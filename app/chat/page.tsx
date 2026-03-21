@@ -18,7 +18,7 @@ import { UserDiscoverySidebar } from "@/components/UserDiscoverySidebar";
 import { ModeController } from "@/components/ModeController";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Settings, Paperclip } from "lucide-react";
+import { Menu, Settings, Paperclip, X } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
 
@@ -116,6 +116,9 @@ export default function Home() {
 
   // Presence: users currently connected to "online-users".
   const [onlineUserIds, setOnlineUserIds] = useState<Record<string, boolean>>({});
+
+  /** Mobile / tablet: sidebar hidden until hamburger opens (overlay). Desktop lg+: always visible. */
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const wait = useCallback((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), []);
 
@@ -1135,6 +1138,34 @@ export default function Home() {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (mobileSidebarOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [mobileSidebarOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const closeOnDesktop = () => {
+      if (mq.matches) setMobileSidebarOpen(false);
+    };
+    mq.addEventListener("change", closeOnDesktop);
+    return () => mq.removeEventListener("change", closeOnDesktop);
+  }, []);
+
+  const isLtr = language === "en";
+  const sidebarSlideClosed = isLtr ? "-translate-x-full" : "translate-x-full";
+  const sidebarSlideOpen = "translate-x-0";
+  const sidebarPos = isLtr ? "left-0" : "right-0";
+  const sidebarBorder = isLtr ? "border-r" : "border-l";
+
   if (!session) {
     return <Auth />;
   }
@@ -1150,7 +1181,7 @@ export default function Home() {
 
   return (
     <motion.div
-      className={`flex h-screen overflow-hidden ${language === "en" ? "" : "flex-row-reverse"}`}
+      className={`relative flex h-[100dvh] max-h-[100dvh] overflow-hidden ${language === "en" ? "" : "flex-row-reverse"}`}
       dir={language === "en" ? "ltr" : "rtl"}
       data-theme={isSupportMode ? "support" : "default"}
       style={{
@@ -1163,9 +1194,21 @@ export default function Home() {
       )}
       transition={{ duration: 0.5, ease: "easeInOut" }}
     >
-      {/* Sidebar */}
+      {/* Mobile overlay backdrop */}
+      <button
+        type="button"
+        aria-label="Close sidebar"
+        className={`fixed inset-0 z-40 bg-black/50 transition-opacity lg:hidden ${
+          mobileSidebarOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+        }`}
+        onClick={() => setMobileSidebarOpen(false)}
+      />
+
+      {/* Sidebar: overlay drawer on small screens; normal column from lg */}
       <motion.aside
-        className="flex w-72 shrink-0 flex-col border-r backdrop-blur-xl"
+        className={`fixed inset-y-0 z-50 flex h-full w-[min(18rem,85vw)] shrink-0 flex-col backdrop-blur-xl shadow-2xl transition-transform duration-300 ease-out lg:relative lg:z-0 lg:h-full lg:w-72 lg:max-w-none lg:translate-x-0 lg:shadow-none ${sidebarPos} ${sidebarBorder} ${
+          mobileSidebarOpen ? sidebarSlideOpen : `${sidebarSlideClosed} lg:translate-x-0`
+        }`}
         style={{
           background: "var(--sidebar-bg)",
           borderColor: "var(--border)",
@@ -1188,20 +1231,30 @@ export default function Home() {
         transition={{ duration: 0.5, ease: "easeInOut" }}
       >
         <div className="border-b p-4" style={{ borderColor: "var(--border)" }}>
-          <div className="flex items-center gap-2">
-            <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-full border-2 border-white/20">
-              <Image
-                src={KITE_APP_ICON}
-                alt=""
-                width={36}
-                height={36}
-                className="h-full w-full object-cover"
-                priority
-              />
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-full border-2 border-white/20">
+                <Image
+                  src={KITE_APP_ICON}
+                  alt=""
+                  width={36}
+                  height={36}
+                  className="h-full w-full object-cover"
+                  priority
+                />
+              </div>
+              <h1 className="truncate text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
+                Kite
+              </h1>
             </div>
-            <h1 className="text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
-              Kite
-            </h1>
+            <button
+              type="button"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/20 text-white/90 transition hover:bg-white/10 lg:hidden"
+              onClick={() => setMobileSidebarOpen(false)}
+              aria-label="Close menu"
+            >
+              <X className="h-5 w-5" aria-hidden />
+            </button>
           </div>
           <div className="mt-2 flex gap-2">
             {(["en", "fa", "ar"] as Language[]).map((lang) => {
@@ -1244,7 +1297,10 @@ export default function Home() {
           <UserDiscoverySidebar
             sessionUserId={session.user.id}
             activeRecipientId={activeRecipientId}
-            onSelectRecipientId={setActiveRecipientId}
+            onSelectRecipientId={(id) => {
+              setActiveRecipientId(id);
+              setMobileSidebarOpen(false);
+            }}
             language={language}
             onlineUserIds={onlineUserIds}
           />
@@ -1306,10 +1362,10 @@ export default function Home() {
       </motion.aside>
 
       {/* Main chat area */}
-      <main className="flex flex-1 flex-col min-w-0">
-        {/* Header with mode-specific indicator */}
+      <main className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
+        {/* Header: hamburger + brand logo + title; actions */}
         <motion.header
-          className="flex items-center justify-between border-b px-6 py-3 backdrop-blur-sm"
+          className="flex shrink-0 flex-col gap-2 border-b px-3 py-2 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-4 sm:py-3 lg:px-6"
           style={{
             background: "var(--panel-bg)",
             borderColor: "var(--border)",
@@ -1323,10 +1379,39 @@ export default function Home() {
           }}
           transition={{ duration: 0.5, ease: "easeInOut" }}
         >
-          <h2 className="text-lg font-medium" style={{ color: "var(--text-primary)" }}>
-            {t(language, "chatTitle")}
-          </h2>
-          <div className="flex items-center gap-4">
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+            <button
+              type="button"
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border transition hover:bg-white/10 lg:hidden"
+              style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
+              onClick={() => setMobileSidebarOpen(true)}
+              aria-label="Open menu"
+            >
+              <Menu className="h-5 w-5" aria-hidden />
+            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              <div className="relative h-8 w-8 shrink-0 overflow-hidden rounded-full border-2 border-white/20">
+                <Image
+                  src={KITE_APP_ICON}
+                  alt=""
+                  width={32}
+                  height={32}
+                  className="h-full w-full object-cover"
+                  priority
+                />
+              </div>
+              <span className="text-sm font-semibold sm:text-base" style={{ color: "var(--text-primary)" }}>
+                Kite
+              </span>
+            </div>
+            <h2
+              className="min-w-0 flex-1 truncate text-base font-medium sm:text-lg"
+              style={{ color: "var(--text-primary)" }}
+            >
+              {t(language, "chatTitle")}
+            </h2>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
             <AnimatePresence mode="wait">
               {!isSupportMode && professionalMode ? (
                 <motion.span
@@ -1408,8 +1493,8 @@ export default function Home() {
         </motion.header>
 
         {/* Messages area */}
-        <div className="flex-1 overflow-y-auto p-6">
-          <div className="mx-auto max-w-2xl space-y-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-6">
+          <div className="mx-auto w-full max-w-full space-y-4 lg:max-w-2xl">
             {filteredMessages.length === 0 ? (
               <div
                 className="rounded-2xl px-4 py-3 w-fit"
@@ -1513,16 +1598,19 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Input */}
-        <div className="border-t p-4" style={{ borderColor: "var(--border)" }}>
+        {/* Input — extra bottom padding for home indicator + on-screen keyboard */}
+        <div
+          className="shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] pt-3 sm:p-4 sm:pb-[max(1rem,env(safe-area-inset-bottom,0px))]"
+          style={{ borderColor: "var(--border)" }}
+        >
           {sendError && (
-            <p className="mx-auto mb-2 max-w-2xl text-sm text-red-500" role="alert">
+            <p className="mx-auto mb-2 w-full max-w-full px-1 text-sm text-red-500 lg:max-w-2xl" role="alert">
               {sendError}
             </p>
           )}
-          <div className="mx-auto max-w-2xl">
+          <div className="mx-auto w-full max-w-full lg:max-w-2xl">
             <div
-              className="flex items-end gap-2 rounded-xl border backdrop-blur-sm px-2"
+              className="flex w-full min-w-0 items-end gap-2 rounded-xl border backdrop-blur-sm px-2"
               style={{
                 background: "var(--input-bg)",
                 borderColor: "var(--border)",
