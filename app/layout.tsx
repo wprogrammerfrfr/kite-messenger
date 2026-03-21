@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { cookies } from "next/headers";
 
-const siteTitle = "Kite | Secure Messaging & Future Studios";
+const siteTitle = "Kite | Secure Messaging";
 const siteDescription =
-  "Kite — end-to-end encrypted messaging with multilingual support, support mode, and future studio features. Built for privacy.";
+  "End-to-end encrypted messaging for musicians, therapists, and those who value privacy. Built by Sammy.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(
@@ -17,6 +17,7 @@ export const metadata: Metadata = {
   description: siteDescription,
   icons: {
     icon: "/kite-mobile-icon.png",
+    shortcut: "/kite-mobile-icon.png",
     apple: "/kite-mobile-icon.png",
   },
   openGraph: {
@@ -25,14 +26,7 @@ export const metadata: Metadata = {
     siteName: "Kite",
     type: "website",
     locale: "en_US",
-    images: [
-      {
-        url: "/kite-mobile-icon.png",
-        width: 512,
-        height: 512,
-        alt: "Kite",
-      },
-    ],
+    images: ["/kite-mobile-icon.png"],
   },
   twitter: {
     card: "summary_large_image",
