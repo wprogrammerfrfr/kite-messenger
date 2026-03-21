@@ -93,7 +93,14 @@ type TranslationKey =
   | "sidebarNoExactUser"
   | "discoverSearchButton"
   | "conversationsLoadError"
-  | "sidebarDiscoverTitle";
+  | "sidebarDiscoverTitle"
+  | "messageRequestBannerTitle"
+  | "messageRequestBannerBody"
+  | "messageRequestIgnoreBlock"
+  | "messageRequestComposerLocked"
+  | "messageSenderPendingNote"
+  | "threadDeclinedNote"
+  | "sidebarNewRequestBadge";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -214,6 +221,15 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverSearchButton: "Search",
     conversationsLoadError: "Could not load conversations.",
     sidebarDiscoverTitle: "Find a friend",
+    messageRequestBannerTitle: "Message request",
+    messageRequestBannerBody:
+      "This person is not in your contacts yet. Accept to reply, or ignore to decline.",
+    messageRequestIgnoreBlock: "Ignore / Block",
+    messageRequestComposerLocked: "Accept the request above to send messages.",
+    messageSenderPendingNote:
+      "Message sent. Waiting for {{nickname}} to accept your request.",
+    threadDeclinedNote: "This conversation was declined. You cannot send messages here.",
+    sidebarNewRequestBadge: "New",
   },
   fa: {
     wipeConfirm:
@@ -330,6 +346,15 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverSearchButton: "جستجو",
     conversationsLoadError: "بارگذاری گفتگوها انجام نشد.",
     sidebarDiscoverTitle: "پیدا کردن دوست",
+    messageRequestBannerTitle: "درخواست پیام",
+    messageRequestBannerBody:
+      "این فرد هنوز در مخاطبین شما نیست. برای پاسخ بپذیرید، یا رد کنید.",
+    messageRequestIgnoreBlock: "نادیده / مسدود",
+    messageRequestComposerLocked: "برای ارسال پیام، درخواست بالا را بپذیرید.",
+    messageSenderPendingNote:
+      "پیام ارسال شد. در انتظار پذیرش توسط {{nickname}}.",
+    threadDeclinedNote: "این گفتگو رد شده است. نمی‌توانید پیام بفرستید.",
+    sidebarNewRequestBadge: "جدید",
   },
   ar: {
     wipeConfirm:
@@ -446,6 +471,15 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverSearchButton: "بحث",
     conversationsLoadError: "تعذر تحميل المحادثات.",
     sidebarDiscoverTitle: "العثور على صديق",
+    messageRequestBannerTitle: "طلب رسالة",
+    messageRequestBannerBody:
+      "هذا الشخص ليس في جهات اتصالك بعد. اقبل للرد، أو تجاهل للرفض.",
+    messageRequestIgnoreBlock: "تجاهل / حظر",
+    messageRequestComposerLocked: "اقبل الطلب أعلاه لإرسال الرسائل.",
+    messageSenderPendingNote:
+      "تم إرسال الرسالة. في انتظار قبول {{nickname}} لطلبك.",
+    threadDeclinedNote: "تم رفض هذه المحادثة. لا يمكنك إرسال رسائل هنا.",
+    sidebarNewRequestBadge: "جديد",
   },
 };
 

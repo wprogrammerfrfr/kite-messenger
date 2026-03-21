@@ -16,7 +16,13 @@ import type { Session } from "@supabase/supabase-js";
 import { Auth } from "@/components/Auth";
 import { UserDiscoverySidebar } from "@/components/UserDiscoverySidebar";
 import { ModeController } from "@/components/ModeController";
-import { ensureDmConnectionAfterSend } from "@/lib/dm-connections";
+import {
+  acceptDmConnection,
+  declineDmConnection,
+  dmPairKey,
+  ensureDmConnectionAfterSend,
+  fetchDmConnectionForPair,
+} from "@/lib/dm-connections";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
@@ -123,6 +129,22 @@ export default function Home() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sidebarRefreshNonce, setSidebarRefreshNonce] = useState(0);
   const [nicknameBannerDismissed, setNicknameBannerDismissed] = useState(false);
+  /** DM row for active thread: null status = no row yet (composer allowed). */
+  const [dmThread, setDmThread] = useState<{
+    status: "pending" | "accepted" | "declined" | null;
+    initiatedBy: string | null;
+  }>({ status: null, initiatedBy: null });
+  const [activeRecipientNickname, setActiveRecipientNickname] = useState<string | null>(null);
+  const [dmActionBusy, setDmActionBusy] = useState(false);
+
+  const dmThreadRef = useRef(dmThread);
+  const activeRecipientIdRef = useRef(activeRecipientId);
+  useEffect(() => {
+    dmThreadRef.current = dmThread;
+  }, [dmThread]);
+  useEffect(() => {
+    activeRecipientIdRef.current = activeRecipientId;
+  }, [activeRecipientId]);
 
   const wait = useCallback((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), []);
 
@@ -342,6 +364,87 @@ export default function Home() {
     };
   }, [session]);
 
+  // Active thread: dm_connections + recipient nickname (message request / pending sender UI).
+  useEffect(() => {
+    let cancelled = false;
+    if (!session || !activeRecipientId) {
+      setDmThread({ status: null, initiatedBy: null });
+      setActiveRecipientNickname(null);
+      return;
+    }
+
+    const me = session.user.id;
+    const other = activeRecipientId;
+
+    void (async () => {
+      const row = await fetchDmConnectionForPair(supabase, me, other);
+      if (cancelled) return;
+      if (!row) {
+        setDmThread({ status: null, initiatedBy: null });
+      } else {
+        setDmThread({ status: row.status, initiatedBy: row.initiated_by });
+      }
+
+      if (other === me) {
+        setActiveRecipientNickname(nickname?.trim() ? nickname.trim() : null);
+        return;
+      }
+      const { data } = await supabase.from("profiles").select("nickname").eq("id", other).maybeSingle();
+      if (cancelled) return;
+      const nn =
+        typeof data?.nickname === "string" && data.nickname.trim().length > 0
+          ? data.nickname.trim()
+          : null;
+      setActiveRecipientNickname(nn);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session, activeRecipientId, nickname, sidebarRefreshNonce]);
+
+  // Realtime: partner accepted/declined or row inserted → refresh thread gatekeeping.
+  useEffect(() => {
+    if (!session?.user?.id || !activeRecipientId) return;
+    const me = session.user.id;
+    const other = activeRecipientId;
+    if (other === me) return;
+
+    const { user_low, user_high } = dmPairKey(me, other);
+
+    const channel = supabase
+      .channel(`dm-connection-${user_low}-${user_high}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "dm_connections",
+          filter: `user_low=eq.${user_low}`,
+        },
+        (payload) => {
+          const n = payload.new as {
+            user_low?: string;
+            user_high?: string;
+            status?: string;
+            initiated_by?: string;
+          } | null;
+          if (!n?.user_high || n.user_high !== user_high) return;
+          if (n.status === "pending" || n.status === "accepted" || n.status === "declined") {
+            setDmThread({
+              status: n.status,
+              initiatedBy: typeof n.initiated_by === "string" ? n.initiated_by : null,
+            });
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [session?.user?.id, activeRecipientId]);
+
   useEffect(() => {
     try {
       if (localStorage.getItem("kite-nickname-banner-dismissed") === "1") {
@@ -529,12 +632,13 @@ export default function Home() {
   };
 }, [activeRecipientId, session]); // Removed senderKeys dependency to force refresh on click
 
-  // Fetch all existing messages on load and subscribe to new ones.
+  // Load messages where the current user is a participant; subscribe to new inserts.
   // Every message is decrypted locally before being added to `messages`.
   useEffect(() => {
-    if (!senderKeys) return;
+    if (!senderKeys || !session?.user?.id) return;
 
     let cancelled = false;
+    const viewerId = session.user.id;
     const channel = supabase
       .channel("messages-inserts")
       .on(
@@ -556,7 +660,12 @@ export default function Home() {
 
             if (!row.encrypted_content) return;
 
-            const viewerId = session?.user.id ?? null;
+            if (
+              row.sender_id !== viewerId &&
+              row.receiver_id !== viewerId
+            ) {
+              return;
+            }
             let encryptedForViewer =
               viewerId && row.sender_id === viewerId && row.content_for_sender
                 ? row.content_for_sender
@@ -641,9 +750,19 @@ export default function Home() {
               }
             }
 
+            const senderIdForRead = row.sender_id;
+            const d = dmThreadRef.current;
+            const pid = activeRecipientIdRef.current;
+            const pendingRequestThread =
+              Boolean(senderIdForRead) &&
+              pid === senderIdForRead &&
+              pid !== viewerId &&
+              d.status === "pending" &&
+              d.initiatedBy === senderIdForRead;
+
             if (
-              session &&
-              row.receiver_id === session.user.id &&
+              !pendingRequestThread &&
+              row.receiver_id === viewerId &&
               row.is_read === false &&
               row.id !== undefined &&
               row.id !== null
@@ -652,7 +771,7 @@ export default function Home() {
                 .from("messages")
                 .update({ is_read: true })
                 .eq("id", row.id)
-                .eq("receiver_id", session.user.id);
+                .eq("receiver_id", viewerId);
             }
 
             const id =
@@ -682,13 +801,14 @@ export default function Home() {
       )
       .subscribe();
 
-    // Initial load: fetch and decrypt all existing messages.
+    // Initial load: only conversations this user participates in (incl. pending requests).
     (async () => {
       const { data, error } = await supabase
         .from("messages")
         .select(
           "id, encrypted_content, content_for_sender, sender_id, receiver_id, is_session_mode, is_read, created_at"
         )
+        .or(`sender_id.eq.${viewerId},receiver_id.eq.${viewerId}`)
         .order("created_at", { ascending: true });
 
       if (cancelled || error || !data) return;
@@ -704,8 +824,6 @@ export default function Home() {
         receiverId?: string | null;
         isRead?: boolean | null;
       }> = [];
-
-      const viewerId = session?.user.id ?? null;
 
       for (const row of data as Array<{
         id?: string | number;
@@ -784,11 +902,18 @@ export default function Home() {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [senderKeys, session, activeRecipientId, decryptWithRetry]);
+  }, [senderKeys, session, decryptWithRetry]);
 
   const sendMessage = useCallback(async () => {
     const trimmed = inputValue.trim();
     if (!trimmed || !senderKeys || !session || !activeRecipientId) return;
+
+    const recipientPendingGate =
+      activeRecipientId !== session.user.id &&
+      dmThread.status === "pending" &&
+      dmThread.initiatedBy != null &&
+      dmThread.initiatedBy !== session.user.id;
+    if (recipientPendingGate || dmThread.status === "declined") return;
 
     setSending(true);
     setSendError(null);
@@ -864,7 +989,7 @@ export default function Home() {
     } finally {
       setSending(false);
     }
-  }, [inputValue, senderKeys, recipientPublicKey, professionalMode, session, activeRecipientId]);
+  }, [inputValue, senderKeys, recipientPublicKey, professionalMode, session, activeRecipientId, dmThread.status, dmThread.initiatedBy]);
   // --- NEW FILTERING LOGIC ---
   // This calculates which messages to show based on the person you clicked in the sidebar
   const baseFilteredMessages = messages.filter((m) => {
@@ -882,12 +1007,18 @@ export default function Home() {
     ? baseFilteredMessages.filter((m) => !m.isImage && !m.imageUrl)
     : baseFilteredMessages;
 
-  // Mark messages as read when they come from the currently active recipient.
+  // Mark messages as read when they come from the currently active recipient (after you accepted).
   useEffect(() => {
     if (!session || !activeRecipientId) return;
     if (document.visibilityState !== "visible") return;
     if (typeof document.hasFocus === "function" && !document.hasFocus()) return;
     const myId = session.user.id;
+    const pendingRecipientBlock =
+      activeRecipientId !== myId &&
+      dmThread.status === "pending" &&
+      dmThread.initiatedBy != null &&
+      dmThread.initiatedBy !== myId;
+    if (pendingRecipientBlock) return;
 
     (async () => {
       try {
@@ -910,7 +1041,7 @@ export default function Home() {
         // Don't block UI if the column doesn't exist yet.
       }
     })();
-  }, [session, activeRecipientId, messages]);
+  }, [session, activeRecipientId, messages, dmThread.status, dmThread.initiatedBy]);
 
   // Realtime: update read receipts without re-decrypting message content.
   useEffect(() => {
@@ -941,12 +1072,24 @@ export default function Home() {
   }, [session]);
   const handleOpenFilePicker = () => {
     if (!session || !activeRecipientId || isSupportMode) return;
+    const pendingRecipientBlock =
+      activeRecipientId !== session.user.id &&
+      dmThread.status === "pending" &&
+      dmThread.initiatedBy != null &&
+      dmThread.initiatedBy !== session.user.id;
+    if (pendingRecipientBlock || dmThread.status === "declined") return;
     fileInputRef.current?.click();
   };
 
   const handleImageSelected = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !session || !senderKeys || !activeRecipientId || isSupportMode) return;
+    const pendingRecipientBlock =
+      activeRecipientId !== session.user.id &&
+      dmThread.status === "pending" &&
+      dmThread.initiatedBy != null &&
+      dmThread.initiatedBy !== session.user.id;
+    if (pendingRecipientBlock || dmThread.status === "declined") return;
 
     setUploadingImage(true);
     setSendError(null);
@@ -1065,6 +1208,12 @@ export default function Home() {
 
   const handleShareLocation = () => {
     if (!session || !senderKeys || !activeRecipientId) return;
+    const pendingRecipientBlock =
+      activeRecipientId !== session.user.id &&
+      dmThread.status === "pending" &&
+      dmThread.initiatedBy != null &&
+      dmThread.initiatedBy !== session.user.id;
+    if (pendingRecipientBlock || dmThread.status === "declined") return;
     if (typeof navigator === "undefined" || !navigator.geolocation) {
       setSendError("Geolocation is not supported by this browser.");
       return;
@@ -1146,16 +1295,82 @@ export default function Home() {
 
 
   const trimmedInput = inputValue.trim();
+
+  const recipientDisplayName =
+    activeRecipientNickname?.trim() ||
+    (activeRecipientId === session?.user.id && nickname?.trim() ? nickname.trim() : null) ||
+    t(language, "anonymousLabel");
+
+  const isRecipientMessageRequest =
+    !!session &&
+    !!activeRecipientId &&
+    session.user.id !== activeRecipientId &&
+    dmThread.status === "pending" &&
+    dmThread.initiatedBy != null &&
+    dmThread.initiatedBy !== session.user.id;
+
+  const isSenderAwaitingAccept =
+    !!session &&
+    !!activeRecipientId &&
+    session.user.id !== activeRecipientId &&
+    dmThread.status === "pending" &&
+    dmThread.initiatedBy === session.user.id;
+
+  const isThreadDeclined = dmThread.status === "declined";
+
+  const composerDisabled =
+    !session ||
+    !activeRecipientId ||
+    isRecipientMessageRequest ||
+    isThreadDeclined;
+
+  const handleAcceptMessageRequest = async () => {
+    if (!session || !activeRecipientId || dmActionBusy) return;
+    setDmActionBusy(true);
+    setSendError(null);
+    try {
+      const { error } = await acceptDmConnection(supabase, session.user.id, activeRecipientId);
+      if (error) {
+        setSendError(error.message);
+        return;
+      }
+      setDmThread({ status: "accepted", initiatedBy: dmThread.initiatedBy });
+      setSidebarRefreshNonce((n) => n + 1);
+    } finally {
+      setDmActionBusy(false);
+    }
+  };
+
+  const handleIgnoreMessageRequest = async () => {
+    if (!session || !activeRecipientId || dmActionBusy) return;
+    setDmActionBusy(true);
+    setSendError(null);
+    try {
+      const { error } = await declineDmConnection(supabase, session.user.id, activeRecipientId);
+      if (error) {
+        setSendError(error.message);
+        return;
+      }
+      setDmThread({ status: "declined", initiatedBy: dmThread.initiatedBy });
+      setSidebarRefreshNonce((n) => n + 1);
+      setActiveRecipientId(null);
+    } finally {
+      setDmActionBusy(false);
+    }
+  };
+
   const canSend =
     Boolean(trimmedInput) &&
     Boolean(senderKeys) &&
     Boolean(activeRecipientId) &&
-    !sending;
+    !sending &&
+    !composerDisabled;
 
   const locationReady =
     Boolean(session) &&
     Boolean(senderKeys) &&
     Boolean(activeRecipientId) &&
+    !composerDisabled &&
     hasOwnKeyInDb &&
     (activeRecipientId === session?.user.id ? true : hasRecipientKey);
 
@@ -1561,6 +1776,61 @@ export default function Home() {
             </div>
           )}
 
+        {session && activeRecipientId && isRecipientMessageRequest && (
+          <div
+            className="mx-3 mt-2 flex flex-col gap-3 rounded-xl border px-3 py-3 sm:mx-4"
+            style={{
+              borderColor: "rgba(255, 69, 0, 0.55)",
+              background: "rgba(0, 0, 0, 0.88)",
+            }}
+            role="region"
+            aria-label={t(language, "messageRequestBannerTitle")}
+          >
+            <div>
+              <p className="text-sm font-semibold" style={{ color: "#FF4500" }}>
+                {t(language, "messageRequestBannerTitle")}
+              </p>
+              <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                {t(language, "messageRequestBannerBody")}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={dmActionBusy}
+                onClick={() => void handleAcceptMessageRequest()}
+                className="rounded-lg px-4 py-2 text-xs font-semibold text-black transition disabled:opacity-50"
+                style={{ background: "#FF4500" }}
+              >
+                {t(language, "messageRequestAccept")}
+              </button>
+              <button
+                type="button"
+                disabled={dmActionBusy}
+                onClick={() => void handleIgnoreMessageRequest()}
+                className="rounded-lg border px-4 py-2 text-xs font-medium transition disabled:opacity-50"
+                style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+              >
+                {t(language, "messageRequestIgnoreBlock")}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {session && activeRecipientId && isSenderAwaitingAccept && (
+          <div
+            className="mx-3 mt-2 rounded-xl border px-3 py-2 text-xs sm:mx-4"
+            style={{
+              borderColor: "rgba(255, 69, 0, 0.35)",
+              background: "rgba(255, 69, 0, 0.08)",
+              color: "var(--text-secondary)",
+            }}
+            role="status"
+          >
+            {t(language, "messageSenderPendingNote").replace("{{nickname}}", recipientDisplayName)}
+          </div>
+        )}
+
         {/* Messages area */}
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-6">
           <div className="mx-auto w-full max-w-full space-y-4 lg:max-w-2xl">
@@ -1667,7 +1937,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Input — extra bottom padding for home indicator + on-screen keyboard */}
+        {/* Input — hidden for recipient until they accept the message request */}
         <div
           className="shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] pt-3 sm:p-4 sm:pb-[max(1rem,env(safe-area-inset-bottom,0px))]"
           style={{ borderColor: "var(--border)" }}
@@ -1677,86 +1947,96 @@ export default function Home() {
               {sendError}
             </p>
           )}
-          <div className="mx-auto w-full max-w-full lg:max-w-2xl">
-            <div
-              className="flex w-full min-w-0 items-end gap-2 rounded-xl border backdrop-blur-sm px-2"
-              style={{
-                background: "var(--input-bg)",
-                borderColor: "var(--border)",
-                boxShadow: professionalMode ? "none" : "var(--glow)",
-              }}
-            >
-              <button
-                type="button"
-                onClick={handleOpenFilePicker}
-                disabled={uploadingImage || !senderKeys || !recipientPublicKey || !activeRecipientId}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full text-xs font-medium transition hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ color: "var(--text-secondary)" }}
+          {!composerDisabled ? (
+            <div className="mx-auto w-full max-w-full lg:max-w-2xl">
+              <div
+                className="flex w-full min-w-0 items-end gap-2 rounded-xl border backdrop-blur-sm px-2"
+                style={{
+                  background: "var(--input-bg)",
+                  borderColor: "var(--border)",
+                  boxShadow: professionalMode ? "none" : "var(--glow)",
+                }}
               >
-                {!isSupportMode && <Paperclip className="h-4 w-4" aria-hidden />}
-                <span className="sr-only">{t(language, "attachImage")}</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleShareLocation}
-                disabled={!locationReady}
-                className="inline-flex h-9 px-2 items-center justify-center rounded-full text-xs font-medium transition hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ color: "var(--text-secondary)" }}
-                title={
-                  !locationReady
-                    ? t(language, "locationRequiresSecureKeyExchange")
-                    : undefined
-                }
-              >
-                <span aria-hidden className="mr-1">
-                  📍
-                </span>
-                <span className="hidden sm:inline">{t(language, "shareLocation")}</span>
-              </button>
-              <textarea
-                ref={textAreaRef}
-                rows={1}
-                value={inputValue}
-                onChange={(e) => handleInputChange(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey && canSend) {
-                    e.preventDefault();
-                    handleSend();
+                <button
+                  type="button"
+                  onClick={handleOpenFilePicker}
+                  disabled={uploadingImage || !senderKeys || !recipientPublicKey || !activeRecipientId}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full text-xs font-medium transition hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  {!isSupportMode && <Paperclip className="h-4 w-4" aria-hidden />}
+                  <span className="sr-only">{t(language, "attachImage")}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleShareLocation}
+                  disabled={!locationReady}
+                  className="inline-flex h-9 px-2 items-center justify-center rounded-full text-xs font-medium transition hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ color: "var(--text-secondary)" }}
+                  title={
+                    !locationReady
+                      ? t(language, "locationRequiresSecureKeyExchange")
+                      : undefined
                   }
-                }}
-                placeholder={t(language, "typePlaceholder")}
-                className="flex-1 resize-none bg-transparent px-2 py-3 text-sm outline-none placeholder:opacity-60"
-                style={{
-                  color: "var(--text-primary)",
-                  minHeight: 44,
-                  maxHeight: 160,
-                  overflowY: "auto",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                }}
-                disabled={sending}
-              />
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!canSend}
-                className="rounded-xl px-4 py-2 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{
-                  background: "var(--accent)",
-                  color: isSupportMode || professionalMode ? "#fff" : "rgba(12, 10, 18, 0.9)",
-                }}
-              >
-                {sending ? t(language, "sendingButton") : t(language, "sendButton")}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={handleImageSelected}
-              />
+                >
+                  <span aria-hidden className="mr-1">
+                    📍
+                  </span>
+                  <span className="hidden sm:inline">{t(language, "shareLocation")}</span>
+                </button>
+                <textarea
+                  ref={textAreaRef}
+                  rows={1}
+                  value={inputValue}
+                  onChange={(e) => handleInputChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey && canSend) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  placeholder={t(language, "typePlaceholder")}
+                  className="flex-1 resize-none bg-transparent px-2 py-3 text-sm outline-none placeholder:opacity-60"
+                  style={{
+                    color: "var(--text-primary)",
+                    minHeight: 44,
+                    maxHeight: 160,
+                    overflowY: "auto",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }}
+                  disabled={sending}
+                />
+                <button
+                  type="button"
+                  onClick={handleSend}
+                  disabled={!canSend}
+                  className="rounded-xl px-4 py-2 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    background: "var(--accent)",
+                    color: isSupportMode || professionalMode ? "#fff" : "rgba(12, 10, 18, 0.9)",
+                  }}
+                >
+                  {sending ? t(language, "sendingButton") : t(language, "sendButton")}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleImageSelected}
+                />
+              </div>
             </div>
-          </div>
+          ) : isThreadDeclined && activeRecipientId ? (
+            <p className="mx-auto w-full max-w-full px-2 text-center text-xs lg:max-w-2xl" style={{ color: "var(--text-secondary)" }}>
+              {t(language, "threadDeclinedNote")}
+            </p>
+          ) : isRecipientMessageRequest ? (
+            <p className="mx-auto w-full max-w-full px-2 text-center text-xs lg:max-w-2xl" style={{ color: "var(--text-secondary)" }}>
+              {t(language, "messageRequestComposerLocked")}
+            </p>
+          ) : null}
         </div>
       </main>
     </motion.div>

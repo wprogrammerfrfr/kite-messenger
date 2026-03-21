@@ -185,6 +185,31 @@ export function UserDiscoverySidebar(props: {
     void loadPrivacyLists();
   }, [loadPrivacyLists, refreshNonce]);
 
+  /** Realtime “knock”: new pending dm_connection or status change → refresh Requests / Inbox. */
+  useEffect(() => {
+    const me = sessionUserId;
+    const channel = supabase
+      .channel(`sidebar-dm-${me}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "dm_connections" },
+        (payload) => {
+          const n = (payload.new ?? payload.old) as {
+            user_low?: string;
+            user_high?: string;
+          } | null;
+          if (!n?.user_low || !n?.user_high) return;
+          if (n.user_low !== me && n.user_high !== me) return;
+          void loadPrivacyLists();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [sessionUserId, loadPrivacyLists]);
+
   const runDiscoverSearch = useCallback(async () => {
     const q = discoverInput.trim();
     const me = sessionUserId;
@@ -534,10 +559,18 @@ export function UserDiscoverySidebar(props: {
         {!loading && (
           <>
             <p
-              className="px-2 pb-1 pt-2 text-[11px] font-bold uppercase tracking-wide"
+              className="flex items-center gap-2 px-2 pb-1 pt-2 text-[11px] font-bold uppercase tracking-wide"
               style={{ color: "#FF4500" }}
             >
-              {t(language, "sidebarRequests")}
+              <span>{t(language, "sidebarRequests")}</span>
+              {requestIds.length > 0 ? (
+                <span
+                  className="rounded-full px-1.5 py-0.5 text-[10px] font-bold text-black"
+                  style={{ background: "#FF4500" }}
+                >
+                  {t(language, "sidebarNewRequestBadge")}
+                </span>
+              ) : null}
             </p>
             {requestIds.length === 0 ? (
               <p className="px-2 pb-3 text-xs" style={{ color: "var(--text-secondary)" }}>
