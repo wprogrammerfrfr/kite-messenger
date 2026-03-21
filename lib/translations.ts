@@ -87,7 +87,13 @@ type TranslationKey =
   | "messageRequestDecline"
   | "nicknameOnboardingBanner"
   | "nicknameOnboardingCta"
-  | "nicknameOnboardingDismiss";
+  | "nicknameOnboardingDismiss"
+  | "discoverExactSearchPlaceholder"
+  | "sidebarDiscoverEmptyHint"
+  | "sidebarNoExactUser"
+  | "discoverSearchButton"
+  | "conversationsLoadError"
+  | "sidebarDiscoverTitle";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -202,6 +208,12 @@ export const translations: Record<Language, TranslationRecord> = {
       "Complete your profile: Head to Settings to set your nickname so friends can find you.",
     nicknameOnboardingCta: "Settings",
     nicknameOnboardingDismiss: "Dismiss",
+    discoverExactSearchPlaceholder: "Exact nickname or email",
+    sidebarDiscoverEmptyHint: "Type a nickname to find a friend.",
+    sidebarNoExactUser: "No users found with that name.",
+    discoverSearchButton: "Search",
+    conversationsLoadError: "Could not load conversations.",
+    sidebarDiscoverTitle: "Find a friend",
   },
   fa: {
     wipeConfirm:
@@ -312,6 +324,12 @@ export const translations: Record<Language, TranslationRecord> = {
       "پروفایل را تکمیل کنید: به تنظیمات بروید و نام مستعار بگذارید تا دوستان شما را پیدا کنند.",
     nicknameOnboardingCta: "تنظیمات",
     nicknameOnboardingDismiss: "بستن",
+    discoverExactSearchPlaceholder: "نام مستعار یا ایمیل دقیق",
+    sidebarDiscoverEmptyHint: "برای پیدا کردن دوست، نام مستعار را تایپ کنید.",
+    sidebarNoExactUser: "کاربری با این نام پیدا نشد.",
+    discoverSearchButton: "جستجو",
+    conversationsLoadError: "بارگذاری گفتگوها انجام نشد.",
+    sidebarDiscoverTitle: "پیدا کردن دوست",
   },
   ar: {
     wipeConfirm:
@@ -422,6 +440,12 @@ export const translations: Record<Language, TranslationRecord> = {
       "أكمل ملفك: انتقل إلى الإعدادات لتعيين اسمك المستعار حتى يتمكن أصدقاؤك من العثور عليك.",
     nicknameOnboardingCta: "الإعدادات",
     nicknameOnboardingDismiss: "إغلاق",
+    discoverExactSearchPlaceholder: "الاسم المستعار أو البريد بالضبط",
+    sidebarDiscoverEmptyHint: "اكتب اسمًا مستعارًا للعثور على صديق.",
+    sidebarNoExactUser: "لم يُعثر على مستخدم بهذا الاسم.",
+    discoverSearchButton: "بحث",
+    conversationsLoadError: "تعذر تحميل المحادثات.",
+    sidebarDiscoverTitle: "العثور على صديق",
   },
 };
 

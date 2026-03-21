@@ -2,7 +2,7 @@
 
 import { supabase } from "@/lib/supabase";
 import { dmPairKey } from "@/lib/dm-connections";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { t, type Language } from "@/lib/translations";
 
 type Role = "musician" | "therapist" | "responder" | null;
@@ -48,9 +48,14 @@ export function UserDiscoverySidebar(props: {
   const [requestIds, setRequestIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
   const [unreadBySender, setUnreadBySender] = useState<Record<string, number>>({});
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+
+  /** Exact-match discover: no fetch until user runs search. */
+  const [discoverInput, setDiscoverInput] = useState("");
+  const [discoverHasSearched, setDiscoverHasSearched] = useState(false);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoverResult, setDiscoverResult] = useState<ProfileRow | null>(null);
 
   const loadPrivacyLists = useCallback(async () => {
     setLoading(true);
@@ -166,19 +171,61 @@ export function UserDiscoverySidebar(props: {
       setProfilesById(map);
       setInboxIds(inboxSorted.filter((id) => id === me || map[id]));
       setRequestIds(requestSorted.filter((id) => map[id]));
-    } catch (e) {
-      setLoadError(e instanceof Error ? e.message : "Failed to load users");
+    } catch {
+      setLoadError(t(language, "conversationsLoadError"));
       setInboxIds([me]);
       setRequestIds([]);
       setProfilesById({});
     } finally {
       setLoading(false);
     }
-  }, [sessionUserId]);
+  }, [sessionUserId, language]);
 
   useEffect(() => {
     void loadPrivacyLists();
   }, [loadPrivacyLists, refreshNonce]);
+
+  const runDiscoverSearch = useCallback(async () => {
+    const q = discoverInput.trim();
+    const me = sessionUserId;
+
+    if (!q) {
+      setDiscoverHasSearched(false);
+      setDiscoverResult(null);
+      return;
+    }
+
+    setDiscoverHasSearched(true);
+    setDiscoverLoading(true);
+    setDiscoverResult(null);
+
+    try {
+      const { data: byNick } = await supabase
+        .from("profiles")
+        .select("id, nickname, role, lastSeen:last_seen")
+        .eq("nickname", q)
+        .neq("id", me)
+        .maybeSingle();
+
+      let found: ProfileRow | null = (byNick as ProfileRow | null) ?? null;
+
+      if (!found && q.includes("@")) {
+        const { data: byEmail, error: emailErr } = await supabase
+          .from("profiles")
+          .select("id, nickname, role, lastSeen:last_seen")
+          .eq("email", q)
+          .neq("id", me)
+          .maybeSingle();
+        if (!emailErr && byEmail) {
+          found = byEmail as ProfileRow;
+        }
+      }
+
+      setDiscoverResult(found);
+    } finally {
+      setDiscoverLoading(false);
+    }
+  }, [discoverInput, sessionUserId]);
 
   const handleAccept = async (otherId: string) => {
     const me = sessionUserId;
@@ -297,25 +344,6 @@ export function UserDiscoverySidebar(props: {
       : `Last seen ${safeMins} minutes ago`;
   };
 
-  const filterIds = (ids: string[]) => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return ids;
-    return ids.filter((id) => {
-      const p = profilesById[id];
-      if (!p) return false;
-      const nickname = (p.nickname ?? t(language, "anonymousLabel")).toLowerCase();
-      const roleLabel =
-        p.role === "therapist"
-          ? t(language, "roleTherapist").toLowerCase()
-          : p.role === "musician"
-            ? t(language, "roleMusician").toLowerCase()
-            : p.role === "responder"
-              ? t(language, "roleResponder").toLowerCase()
-              : t(language, "roleUnknown").toLowerCase();
-      return nickname.includes(q) || roleLabel.includes(q);
-    });
-  };
-
   const renderUserRow = (p: ProfileRow, opts: { showRequestActions?: boolean }) => {
     const isActive = p.id === activeRecipientId;
     const isMe = p.id === sessionUserId;
@@ -427,26 +455,69 @@ export function UserDiscoverySidebar(props: {
     );
   };
 
-  const filteredInbox = useMemo(() => filterIds(inboxIds), [inboxIds, searchQuery, profilesById, language]);
-  const filteredRequests = useMemo(
-    () => filterIds(requestIds),
-    [requestIds, searchQuery, profilesById, language]
-  );
-
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="px-2 pt-2">
-        <input
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder={t(language, "discoverUsersPlaceholder")}
-          className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
-          style={{
-            background: "var(--input-bg)",
-            borderColor: "var(--border)",
-            color: "var(--text-primary)",
-          }}
-        />
+      {/* Discover: exact match only; no profile list fetch until search */}
+      <div className="shrink-0 border-b px-2 pb-3 pt-2" style={{ borderColor: "var(--border)" }}>
+        <p
+          className="mb-2 text-[11px] font-bold uppercase tracking-wide"
+          style={{ color: "#FF4500" }}
+        >
+          {t(language, "sidebarDiscoverTitle")}
+        </p>
+        <div className="flex gap-2">
+          <input
+            value={discoverInput}
+            onChange={(e) => {
+              setDiscoverInput(e.target.value);
+              setDiscoverHasSearched(false);
+              setDiscoverResult(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void runDiscoverSearch();
+              }
+            }}
+            placeholder={t(language, "discoverExactSearchPlaceholder")}
+            className="min-w-0 flex-1 rounded-xl border px-3 py-2 text-sm outline-none transition-[border-color,box-shadow] focus:border-[#FF4500] focus:ring-1 focus:ring-[#FF4500]"
+            style={{
+              background: "#000000",
+              borderColor: "rgba(255, 69, 0, 0.35)",
+              color: "var(--text-primary)",
+            }}
+            aria-label={t(language, "discoverExactSearchPlaceholder")}
+          />
+          <button
+            type="button"
+            onClick={() => void runDiscoverSearch()}
+            disabled={discoverLoading}
+            className="shrink-0 rounded-xl px-3 py-2 text-xs font-semibold text-black transition disabled:opacity-50"
+            style={{ background: "#FF4500" }}
+          >
+            {t(language, "discoverSearchButton")}
+          </button>
+        </div>
+
+        <div className="mt-2 min-h-[3rem]">
+          {discoverLoading ? (
+            <p className="px-0.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+              {t(language, "loadingUsers")}
+            </p>
+          ) : !discoverHasSearched ? (
+            <p className="px-0.5 text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+              {t(language, "sidebarDiscoverEmptyHint")}
+            </p>
+          ) : discoverResult ? (
+            <div className="rounded-lg border pt-1" style={{ borderColor: "rgba(255, 69, 0, 0.25)" }}>
+              {renderUserRow(discoverResult, { showRequestActions: false })}
+            </div>
+          ) : (
+            <p className="px-0.5 text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+              {t(language, "sidebarNoExactUser")}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -468,13 +539,13 @@ export function UserDiscoverySidebar(props: {
             >
               {t(language, "sidebarRequests")}
             </p>
-            {filteredRequests.length === 0 ? (
+            {requestIds.length === 0 ? (
               <p className="px-2 pb-3 text-xs" style={{ color: "var(--text-secondary)" }}>
                 {t(language, "sidebarNoRequests")}
               </p>
             ) : (
               <div className="space-y-1 pb-4">
-                {filteredRequests.map((id) => {
+                {requestIds.map((id) => {
                   const p = profilesById[id];
                   if (!p) return null;
                   return renderUserRow(p, { showRequestActions: true });
@@ -488,13 +559,13 @@ export function UserDiscoverySidebar(props: {
             >
               {t(language, "sidebarInbox")}
             </p>
-            {filteredInbox.length === 0 ? (
+            {inboxIds.length === 0 ? (
               <p className="px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
                 {t(language, "noMatchingUsers")}
               </p>
             ) : (
               <div className="space-y-1">
-                {filteredInbox.map((id) => {
+                {inboxIds.map((id) => {
                   const p = profilesById[id];
                   if (!p) return null;
                   return renderUserRow(p, { showRequestActions: false });
