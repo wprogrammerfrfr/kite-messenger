@@ -60,7 +60,7 @@ export function Auth() {
     }
   };
 
-  // Allow welcome page to jump directly to sign-up via `/?mode=signup`.
+  // Allow landing → chat handoff via `/chat?mode=signup` or `/chat?mode=login`.
   // This is intentionally best-effort and falls back to login if missing/invalid.
   useEffect(() => {
     if (typeof window === "undefined") return;

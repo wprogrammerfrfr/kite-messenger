@@ -246,7 +246,7 @@ export default function SettingsPage() {
           </div>
 
           <Link
-            href="/"
+            href="/chat"
             className="inline-flex items-center rounded-xl px-3 py-2 text-xs sm:text-sm font-medium border transition-colors"
             style={{
               borderColor: theme.border,
