@@ -8,6 +8,8 @@ export function ModeController(props: {
   isSupportMode: boolean;
   language: Language;
   professionalDisabled?: boolean;
+  /** When false, hides Professional Mode UI (subscription prep); Support + key status stay visible. */
+  showProfessionalUI?: boolean;
   onToggleProfessional: () => void;
   onToggleSupport: () => void;
   isOwnKeySyncing: boolean;
@@ -18,6 +20,7 @@ export function ModeController(props: {
     isSupportMode,
     language,
     professionalDisabled = false,
+    showProfessionalUI = true,
     onToggleProfessional,
     onToggleSupport,
     isOwnKeySyncing,
@@ -26,54 +29,58 @@ export function ModeController(props: {
 
   return (
     <div className="border-t p-4" style={{ borderColor: "var(--border)" }}>
-      <label className="flex cursor-pointer items-center justify-between gap-3">
-        <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-          {t(language, "professionalModeLabel")}
-        </span>
-        <motion.button
-          type="button"
-          role="switch"
-          aria-checked={professionalMode}
-          className="relative h-7 w-12 shrink-0 rounded-full"
-          disabled={professionalDisabled}
-          style={{
-            background: professionalMode
-              ? "var(--accent)"
-              : isSupportMode
-                ? "rgba(255, 69, 0, 0.2)"
-                : "rgba(139, 92, 246, 0.5)",
-            pointerEvents: professionalDisabled ? "none" : "auto",
-            opacity: professionalDisabled ? 0.6 : 1,
-          }}
-          onClick={onToggleProfessional}
-          whileTap={{ scale: 0.98 }}
-          initial={false}
-          animate={{
-            background: professionalMode
-              ? "var(--accent)"
-              : isSupportMode
-                ? "rgba(255, 69, 0, 0.2)"
-                : "rgba(139, 92, 246, 0.5)",
-          }}
-          transition={{ duration: 0.5, ease: "easeInOut" }}
-        >
-          <motion.span
-            className="absolute top-1 h-5 w-5 rounded-full bg-white shadow"
-            initial={false}
-            animate={{ left: professionalMode ? "26px" : "4px" }}
-            transition={{ duration: 0.3, ease: "easeInOut" }}
-          />
-        </motion.button>
-      </label>
-      <p className="mt-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
-        {isSupportMode
-          ? t(language, "supportDescription")
-          : professionalMode
-          ? t(language, "professionalDescriptionTherapist")
-          : t(language, "professionalDescriptionMusician")}
-      </p>
+      {showProfessionalUI && (
+        <>
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+              {t(language, "professionalModeLabel")}
+            </span>
+            <motion.button
+              type="button"
+              role="switch"
+              aria-checked={professionalMode}
+              className="relative h-7 w-12 shrink-0 rounded-full"
+              disabled={professionalDisabled}
+              style={{
+                background: professionalMode
+                  ? "var(--accent)"
+                  : isSupportMode
+                    ? "rgba(255, 69, 0, 0.2)"
+                    : "rgba(139, 92, 246, 0.5)",
+                pointerEvents: professionalDisabled ? "none" : "auto",
+                opacity: professionalDisabled ? 0.6 : 1,
+              }}
+              onClick={onToggleProfessional}
+              whileTap={{ scale: 0.98 }}
+              initial={false}
+              animate={{
+                background: professionalMode
+                  ? "var(--accent)"
+                  : isSupportMode
+                    ? "rgba(255, 69, 0, 0.2)"
+                    : "rgba(139, 92, 246, 0.5)",
+              }}
+              transition={{ duration: 0.5, ease: "easeInOut" }}
+            >
+              <motion.span
+                className="absolute top-1 h-5 w-5 rounded-full bg-white shadow"
+                initial={false}
+                animate={{ left: professionalMode ? "26px" : "4px" }}
+                transition={{ duration: 0.3, ease: "easeInOut" }}
+              />
+            </motion.button>
+          </label>
+          <p className="mt-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+            {isSupportMode
+              ? t(language, "supportDescription")
+              : professionalMode
+                ? t(language, "professionalDescriptionTherapist")
+                : t(language, "professionalDescriptionMusician")}
+          </p>
+        </>
+      )}
 
-      <div className="mt-4">
+      <div className={showProfessionalUI ? "mt-4" : ""}>
         <label className="flex cursor-pointer items-center justify-between gap-3">
           <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             {t(language, "supportModeLabel")}

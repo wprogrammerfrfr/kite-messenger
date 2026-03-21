@@ -16,6 +16,8 @@ import type { Session } from "@supabase/supabase-js";
 import { Auth } from "@/components/Auth";
 import { UserDiscoverySidebar } from "@/components/UserDiscoverySidebar";
 import { ModeController } from "@/components/ModeController";
+import { ensureDmConnectionAfterSend } from "@/lib/dm-connections";
+import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Menu, Settings, Paperclip, X } from "lucide-react";
@@ -38,15 +40,15 @@ interface ThemeVars {
 }
 
 const MUSICIAN_THEME: ThemeVars = {
-  "--page-bg": "rgba(12, 10, 18, 0.92)",
-  "--sidebar-bg": "rgba(20, 18, 28, 0.65)",
-  "--panel-bg": "rgba(30, 26, 42, 0.55)",
+  "--page-bg": "#000000",
+  "--sidebar-bg": "rgba(12, 12, 14, 0.94)",
+  "--panel-bg": "rgba(20, 20, 24, 0.88)",
   "--text-primary": "rgba(255, 255, 255, 0.95)",
   "--text-secondary": "rgba(255, 255, 255, 0.6)",
-  "--border": "rgba(139, 92, 246, 0.4)",
-  "--glow": "0 0 24px rgba(139, 92, 246, 0.35), 0 0 48px rgba(59, 130, 246, 0.12)",
-  "--input-bg": "rgba(30, 26, 42, 0.8)",
-  "--accent": "rgba(167, 139, 250, 0.95)",
+  "--border": "rgba(255, 69, 0, 0.45)",
+  "--glow": "0 0 24px rgba(255, 69, 0, 0.22), 0 0 48px rgba(255, 69, 0, 0.08)",
+  "--input-bg": "rgba(20, 20, 24, 0.95)",
+  "--accent": "#FF4500",
 };
 
 const THERAPIST_THEME: ThemeVars = {
@@ -119,6 +121,8 @@ export default function Home() {
 
   /** Mobile / tablet: sidebar hidden until hamburger opens (overlay). Desktop lg+: always visible. */
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sidebarRefreshNonce, setSidebarRefreshNonce] = useState(0);
+  const [nicknameBannerDismissed, setNicknameBannerDismissed] = useState(false);
 
   const wait = useCallback((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), []);
 
@@ -327,10 +331,26 @@ export default function Home() {
 
     loadProfile();
 
+    const onVis = () => {
+      if (document.visibilityState === "visible") void loadProfile();
+    };
+    document.addEventListener("visibilitychange", onVis);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, [session]);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("kite-nickname-banner-dismissed") === "1") {
+        setNicknameBannerDismissed(true);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // Generate or restore a persistent key pair for the current user.
   useEffect(() => {
@@ -831,6 +851,8 @@ export default function Home() {
         console.log("Supabase insert error:", error);
         setSendError(error.message ?? "Failed to send message");
       } else {
+        void ensureDmConnectionAfterSend(supabase, senderId, receiverId);
+        setSidebarRefreshNonce((n) => n + 1);
         setInputValue(""); // Clear the input field after a successful send
         if (textAreaRef.current) {
           textAreaRef.current.style.height = "44px";
@@ -1015,6 +1037,9 @@ export default function Home() {
 
       if (insertError) {
         setSendError(insertError.message ?? "Failed to send image");
+      } else {
+        void ensureDmConnectionAfterSend(supabase, session.user.id, activeRecipientId);
+        setSidebarRefreshNonce((n) => n + 1);
       }
     } catch (err) {
       setSendError(
@@ -1103,6 +1128,9 @@ export default function Home() {
 
           if (error) {
             setSendError(error.message ?? "Failed to share location");
+          } else {
+            void ensureDmConnectionAfterSend(supabase, senderId, receiverId);
+            setSidebarRefreshNonce((n) => n + 1);
           }
         } catch (err) {
           setSendError(
@@ -1303,6 +1331,7 @@ export default function Home() {
             }}
             language={language}
             onlineUserIds={onlineUserIds}
+            refreshNonce={sidebarRefreshNonce}
           />
         </div>
 
@@ -1310,6 +1339,7 @@ export default function Home() {
           professionalMode={professionalMode}
           isSupportMode={isSupportMode}
           language={language}
+          showProfessionalUI={SHOW_PROFESSIONAL_AND_ROLE_UI}
           professionalDisabled={isSupportMode}
           onToggleProfessional={() =>
             setProfessionalMode((prev) => {
@@ -1491,6 +1521,45 @@ export default function Home() {
             </button>
           </div>
         </motion.header>
+
+        {session &&
+          !nickname &&
+          !nicknameBannerDismissed && (
+            <div
+              className="mx-3 mt-2 flex items-start gap-3 rounded-xl border px-3 py-2.5 sm:mx-4"
+              style={{
+                borderColor: "rgba(255, 69, 0, 0.45)",
+                background: "rgba(0, 0, 0, 0.75)",
+              }}
+              role="status"
+            >
+              <p className="min-w-0 flex-1 text-xs sm:text-sm" style={{ color: "var(--text-primary)" }}>
+                {t(language, "nicknameOnboardingBanner")}
+              </p>
+              <Link
+                href="/settings"
+                className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold text-black"
+                style={{ background: "#FF4500" }}
+              >
+                {t(language, "nicknameOnboardingCta")}
+              </Link>
+              <button
+                type="button"
+                className="shrink-0 rounded-lg p-1 text-lg leading-none text-white/70 hover:text-white"
+                aria-label={t(language, "nicknameOnboardingDismiss")}
+                onClick={() => {
+                  try {
+                    localStorage.setItem("kite-nickname-banner-dismissed", "1");
+                  } catch {
+                    // ignore
+                  }
+                  setNicknameBannerDismissed(true);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
 
         {/* Messages area */}
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-6">

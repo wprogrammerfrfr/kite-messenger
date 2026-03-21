@@ -1,7 +1,8 @@
 "use client";
 
 import { supabase } from "@/lib/supabase";
-import { useEffect, useMemo, useState } from "react";
+import { dmPairKey } from "@/lib/dm-connections";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { t, type Language } from "@/lib/translations";
 
 type Role = "musician" | "therapist" | "responder" | null;
@@ -13,12 +14,25 @@ type ProfileRow = {
   lastSeen?: string | null;
 };
 
+type DmConnectionRow = {
+  user_low: string;
+  user_high: string;
+  status: "pending" | "accepted" | "declined";
+  initiated_by: string;
+};
+
+function otherInPair(row: DmConnectionRow, me: string): string {
+  return row.user_low === me ? row.user_high : row.user_low;
+}
+
 export function UserDiscoverySidebar(props: {
   sessionUserId: string;
   activeRecipientId: string | null;
   onSelectRecipientId: (id: string) => void;
   language?: Language;
   onlineUserIds?: Record<string, boolean>;
+  /** Increment from parent after sending a message to refresh inbox/requests. */
+  refreshNonce?: number;
 }) {
   const {
     sessionUserId,
@@ -26,47 +40,181 @@ export function UserDiscoverySidebar(props: {
     onSelectRecipientId,
     language = "en",
     onlineUserIds = {},
+    refreshNonce = 0,
   } = props;
 
-  const [profiles, setProfiles] = useState<ProfileRow[]>([]);
+  const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
+  const [inboxIds, setInboxIds] = useState<string[]>([]);
+  const [requestIds, setRequestIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [unreadBySender, setUnreadBySender] = useState<Record<string, number>>({});
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadPrivacyLists = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    const me = sessionUserId;
 
-    const load = async () => {
-      setLoading(true);
-      setLoadError(null);
+    try {
+      const { data: connRows, error: connErr } = await supabase
+        .from("dm_connections")
+        .select("user_low, user_high, status, initiated_by")
+        .or(`user_low.eq.${me},user_high.eq.${me}`);
 
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("id, nickname, role, lastSeen:last_seen")
-        .order("nickname", { ascending: true });
-
-      if (cancelled) return;
-
-      if (error) {
-        setLoadError(error.message ?? "Failed to load users");
-        setProfiles([]);
-      } else {
-        setProfiles((data ?? []) as ProfileRow[]);
+      if (connErr) {
+        if (
+          connErr.message?.includes("relation") ||
+          connErr.message?.includes("does not exist") ||
+          connErr.code === "42P01"
+        ) {
+          setLoadError(
+            "Privacy tables missing. Run the SQL migration in supabase/migrations (dm_connections), then reload."
+          );
+          setInboxIds([me]);
+          setRequestIds([]);
+          setProfilesById({});
+          setLoading(false);
+          return;
+        }
+        throw connErr;
       }
 
+      const connections = (connRows ?? []) as DmConnectionRow[];
+      const connByPartner = new Map<string, DmConnectionRow>();
+      for (const c of connections) {
+        connByPartner.set(otherInPair(c, me), c);
+      }
+
+      const { data: msgRows, error: msgErr } = await supabase
+        .from("messages")
+        .select("sender_id, receiver_id")
+        .or(`sender_id.eq.${me},receiver_id.eq.${me}`);
+
+      if (msgErr) throw msgErr;
+
+      const messagePartners = new Set<string>();
+      for (const row of msgRows ?? []) {
+        const s = row.sender_id as string | null;
+        const r = row.receiver_id as string | null;
+        if (s && r) {
+          if (s === me) messagePartners.add(r);
+          else if (r === me) messagePartners.add(s);
+        }
+      }
+
+      const inbox = new Set<string>([me]);
+      const requests = new Set<string>();
+
+      const considerPartner = (v: string) => {
+        if (!v || v === me) return;
+        const conn = connByPartner.get(v);
+        if (!conn) {
+          if (messagePartners.has(v)) inbox.add(v);
+          return;
+        }
+        if (conn.status === "accepted") {
+          inbox.add(v);
+          return;
+        }
+        if (conn.status === "declined") {
+          return;
+        }
+        if (conn.status === "pending") {
+          if (conn.initiated_by !== me) {
+            requests.add(v);
+          } else {
+            inbox.add(v);
+          }
+        }
+      };
+
+      for (const v of Array.from(messagePartners)) considerPartner(v);
+      for (const v of Array.from(connByPartner.keys())) considerPartner(v);
+
+      requests.forEach((id) => inbox.delete(id));
+
+      const inboxSorted = Array.from(inbox).sort((a, b) => {
+        if (a === me) return -1;
+        if (b === me) return 1;
+        return a.localeCompare(b);
+      });
+      const requestSorted = Array.from(requests).sort((a, b) => a.localeCompare(b));
+
+      const allIds = Array.from(new Set([...inboxSorted, ...requestSorted]));
+      if (allIds.length === 0) {
+        setProfilesById({});
+        setInboxIds([me]);
+        setRequestIds([]);
+        setLoading(false);
+        return;
+      }
+
+      const { data: profRows, error: profErr } = await supabase
+        .from("profiles")
+        .select("id, nickname, role, lastSeen:last_seen")
+        .in("id", allIds);
+
+      if (profErr) throw profErr;
+
+      const map: Record<string, ProfileRow> = {};
+      for (const p of (profRows ?? []) as ProfileRow[]) {
+        map[p.id] = p;
+      }
+
+      setProfilesById(map);
+      setInboxIds(inboxSorted.filter((id) => id === me || map[id]));
+      setRequestIds(requestSorted.filter((id) => map[id]));
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Failed to load users");
+      setInboxIds([me]);
+      setRequestIds([]);
+      setProfilesById({});
+    } finally {
       setLoading(false);
-    };
+    }
+  }, [sessionUserId]);
 
-    load();
+  useEffect(() => {
+    void loadPrivacyLists();
+  }, [loadPrivacyLists, refreshNonce]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const handleAccept = async (otherId: string) => {
+    const me = sessionUserId;
+    const { user_low, user_high } = dmPairKey(me, otherId);
+    setActionBusy(otherId);
+    try {
+      await supabase
+        .from("dm_connections")
+        .update({ status: "accepted", updated_at: new Date().toISOString() })
+        .eq("user_low", user_low)
+        .eq("user_high", user_high)
+        .eq("status", "pending");
+      await loadPrivacyLists();
+      onSelectRecipientId(otherId);
+    } finally {
+      setActionBusy(null);
+    }
+  };
 
-  // Unread notification badges: show new unread messages from each sender
-  // (excluding the currently active conversation).
+  const handleDecline = async (otherId: string) => {
+    const me = sessionUserId;
+    const { user_low, user_high } = dmPairKey(me, otherId);
+    setActionBusy(otherId);
+    try {
+      await supabase
+        .from("dm_connections")
+        .update({ status: "declined", updated_at: new Date().toISOString() })
+        .eq("user_low", user_low)
+        .eq("user_high", user_high)
+        .eq("status", "pending");
+      await loadPrivacyLists();
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
   useEffect(() => {
     if (!sessionUserId) return;
 
@@ -83,18 +231,18 @@ export function UserDiscoverySidebar(props: {
         if (cancelled) return;
 
         const counts: Record<string, number> = {};
-        (data ?? []).forEach((row: any) => {
+        (data ?? []).forEach((row: { sender_id?: string | null }) => {
           const senderId = row.sender_id as string | null;
           if (!senderId) return;
           counts[senderId] = (counts[senderId] ?? 0) + 1;
         });
         setUnreadBySender(counts);
       } catch {
-        // Non-blocking: sidebar can still render.
+        // non-blocking
       }
     };
 
-    loadUnreadCounts();
+    void loadUnreadCounts();
 
     const channel = supabase
       .channel("messages-unread-badges")
@@ -128,7 +276,6 @@ export function UserDiscoverySidebar(props: {
     };
   }, [sessionUserId, activeRecipientId]);
 
-  // When opening a conversation, clear any badge count for that sender.
   useEffect(() => {
     if (!activeRecipientId) return;
     setUnreadBySender((prev) => {
@@ -150,26 +297,144 @@ export function UserDiscoverySidebar(props: {
       : `Last seen ${safeMins} minutes ago`;
   };
 
-  const visibleProfiles = useMemo(() => {
+  const filterIds = (ids: string[]) => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return profiles;
-
-    return profiles.filter((p) => {
+    if (!q) return ids;
+    return ids.filter((id) => {
+      const p = profilesById[id];
+      if (!p) return false;
       const nickname = (p.nickname ?? t(language, "anonymousLabel")).toLowerCase();
       const roleLabel =
         p.role === "therapist"
           ? t(language, "roleTherapist").toLowerCase()
           : p.role === "musician"
-          ? t(language, "roleMusician").toLowerCase()
-          : p.role === "responder"
-          ? t(language, "roleResponder").toLowerCase()
-          : t(language, "roleUnknown").toLowerCase();
+            ? t(language, "roleMusician").toLowerCase()
+            : p.role === "responder"
+              ? t(language, "roleResponder").toLowerCase()
+              : t(language, "roleUnknown").toLowerCase();
       return nickname.includes(q) || roleLabel.includes(q);
     });
-  }, [profiles, searchQuery, language]);
+  };
+
+  const renderUserRow = (p: ProfileRow, opts: { showRequestActions?: boolean }) => {
+    const isActive = p.id === activeRecipientId;
+    const isMe = p.id === sessionUserId;
+    const isOnline = Boolean(onlineUserIds[p.id]);
+    const lastSeenText = formatLastSeenMinutes(p.lastSeen);
+    const unreadCount = unreadBySender[p.id] ?? 0;
+    const roleLabel =
+      p.role === "musician"
+        ? t(language, "roleMusician")
+        : p.role === "therapist"
+          ? t(language, "roleTherapist")
+          : p.role === "responder"
+            ? t(language, "roleResponder")
+            : t(language, "roleUnknown");
+    const busy = actionBusy === p.id;
+
+    return (
+      <div
+        key={p.id}
+        className="w-full rounded-lg border border-transparent px-2 py-2"
+        style={{
+          background: isActive ? "var(--panel-bg)" : "transparent",
+          borderColor: isActive ? "var(--border)" : "transparent",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => onSelectRecipientId(p.id)}
+          className="w-full rounded-lg px-2 py-1.5 text-left text-sm transition-colors"
+          style={{ color: "var(--text-primary)" }}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate font-medium">
+                {(p.nickname && p.nickname.trim()) || t(language, "anonymousLabel")}
+                {isMe && (
+                  <span className="ml-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+                    {t(language, "youLabel")}
+                  </span>
+                )}
+              </p>
+              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                {roleLabel}
+              </p>
+              <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                {isOnline ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                    Online
+                  </span>
+                ) : lastSeenText ? (
+                  lastSeenText
+                ) : (
+                  "Offline"
+                )}
+              </p>
+            </div>
+            <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+              {isActive ? (
+                t(language, "activeLabel")
+              ) : unreadCount > 0 ? (
+                unreadCount === 1 ? (
+                  <span
+                    className="inline-flex h-2.5 w-2.5 animate-pulse rounded-full"
+                    style={{ background: "#FF4500" }}
+                    aria-label="New messages"
+                  />
+                ) : (
+                  <span
+                    className="inline-flex min-w-5 items-center justify-center rounded-full px-1 py-0.5 text-[10px] font-bold"
+                    style={{
+                      background: "#FF4500",
+                      color: "#000000",
+                    }}
+                    aria-label={`${unreadCount} new messages`}
+                  >
+                    {unreadCount}
+                  </span>
+                )
+              ) : (
+                ""
+              )}
+            </span>
+          </div>
+        </button>
+        {opts.showRequestActions && !isMe && (
+          <div className="mt-2 flex gap-2 px-2 pb-1">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleAccept(p.id)}
+              className="flex-1 rounded-lg px-2 py-1.5 text-xs font-semibold text-black transition disabled:opacity-50"
+              style={{ background: "#FF4500" }}
+            >
+              {t(language, "messageRequestAccept")}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleDecline(p.id)}
+              className="flex-1 rounded-lg border px-2 py-1.5 text-xs font-medium transition disabled:opacity-50"
+              style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+            >
+              {t(language, "messageRequestDecline")}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const filteredInbox = useMemo(() => filterIds(inboxIds), [inboxIds, searchQuery, profilesById, language]);
+  const filteredRequests = useMemo(
+    () => filterIds(requestIds),
+    [requestIds, searchQuery, profilesById, language]
+  );
 
   return (
-    <div className="flex flex-1 flex-col min-h-0">
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="px-2 pt-2">
         <input
           value={searchQuery}
@@ -184,112 +449,61 @@ export function UserDiscoverySidebar(props: {
         />
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2">
-        <p className="px-2 py-3 text-sm" style={{ color: "var(--text-secondary)" }}>
-          {t(language, "usersLabel")}
-        </p>
-
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {loading ? (
           <p className="px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
             {t(language, "loadingUsers")}
           </p>
         ) : loadError ? (
-          <p className="px-2 text-sm text-red-500" role="alert">
+          <p className="px-2 text-xs text-red-500" role="alert">
             {loadError}
           </p>
-        ) : visibleProfiles.length === 0 ? (
-          <p className="px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
-            {t(language, "noMatchingUsers")}
-          </p>
-        ) : (
-          <div className="space-y-1">
-            {visibleProfiles.map((p) => {
-              const isActive = p.id === activeRecipientId;
-              const isMe = p.id === sessionUserId;
-              const isOnline = Boolean(onlineUserIds[p.id]);
-              const lastSeenText = formatLastSeenMinutes(p.lastSeen);
-              const unreadCount = unreadBySender[p.id] ?? 0;
-              const roleLabel =
-                p.role === "musician"
-                  ? t(language, "roleMusician")
-                  : p.role === "therapist"
-                  ? t(language, "roleTherapist")
-                  : p.role === "responder"
-                  ? t(language, "roleResponder")
-                  : t(language, "roleUnknown");
+        ) : null}
 
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => onSelectRecipientId(p.id)}
-                  className="w-full rounded-lg px-3 py-2.5 text-left text-sm transition-colors"
-                  style={{
-                    background: isActive ? "var(--panel-bg)" : "transparent",
-                    color: "var(--text-primary)",
-                    border: isActive ? "1px solid var(--border)" : "1px solid transparent",
-                  }}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">
-                        {(p.nickname && p.nickname.trim()) || t(language, "anonymousLabel")}
-                        {isMe && (
-                          <span className="ml-2 text-xs" style={{ color: "var(--text-secondary)" }}>
-                            {t(language, "youLabel")}
-                          </span>
-                        )}
-                      </p>
-                      <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                        {roleLabel}
-                      </p>
-                      <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                        {isOnline ? (
-                          <span className="inline-flex items-center gap-2">
-                            <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                            Online
-                          </span>
-                        ) : lastSeenText ? (
-                          lastSeenText
-                        ) : (
-                          "Offline"
-                        )}
-                      </p>
-                    </div>
-                    <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                      {isActive ? (
-                        t(language, "activeLabel")
-                      ) : unreadCount > 0 ? (
-                        unreadCount === 1 ? (
-                          <span
-                            className="inline-flex h-2.5 w-2.5 animate-pulse rounded-full"
-                            style={{ background: "#FF4500" }}
-                            aria-label="New messages"
-                          />
-                        ) : (
-                          <span
-                            className="inline-flex min-w-5 items-center justify-center rounded-full px-1 py-0.5 text-[10px] font-bold"
-                            style={{
-                              background: "#FF4500",
-                              color: "#000000",
-                            }}
-                            aria-label={`${unreadCount} new messages`}
-                          >
-                            {unreadCount}
-                          </span>
-                        )
-                      ) : (
-                        ""
-                      )}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+        {!loading && (
+          <>
+            <p
+              className="px-2 pb-1 pt-2 text-[11px] font-bold uppercase tracking-wide"
+              style={{ color: "#FF4500" }}
+            >
+              {t(language, "sidebarRequests")}
+            </p>
+            {filteredRequests.length === 0 ? (
+              <p className="px-2 pb-3 text-xs" style={{ color: "var(--text-secondary)" }}>
+                {t(language, "sidebarNoRequests")}
+              </p>
+            ) : (
+              <div className="space-y-1 pb-4">
+                {filteredRequests.map((id) => {
+                  const p = profilesById[id];
+                  if (!p) return null;
+                  return renderUserRow(p, { showRequestActions: true });
+                })}
+              </div>
+            )}
+
+            <p
+              className="px-2 pb-1 text-[11px] font-bold uppercase tracking-wide"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              {t(language, "sidebarInbox")}
+            </p>
+            {filteredInbox.length === 0 ? (
+              <p className="px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+                {t(language, "noMatchingUsers")}
+              </p>
+            ) : (
+              <div className="space-y-1">
+                {filteredInbox.map((id) => {
+                  const p = profilesById[id];
+                  if (!p) return null;
+                  return renderUserRow(p, { showRequestActions: false });
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
   );
 }
-

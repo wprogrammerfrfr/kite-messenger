@@ -1,9 +1,10 @@
- "use client";
+"use client";
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 import Link from "next/link";
+import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 
 type Role = "musician" | "therapist" | "responder";
 
@@ -17,13 +18,13 @@ interface Profile {
 const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
 
 const MUSICIAN_THEME = {
-  pageBg: "rgba(12, 10, 18, 0.92)",
-  panelBg: "rgba(30, 26, 42, 0.9)",
-  border: "rgba(139, 92, 246, 0.5)",
-  accent: "rgba(167, 139, 250, 0.95)",
+  pageBg: "#000000",
+  panelBg: "rgba(14, 14, 18, 0.96)",
+  border: "rgba(255, 69, 0, 0.35)",
+  accent: "#FF4500",
   textPrimary: "rgba(255, 255, 255, 0.95)",
   textSecondary: "rgba(255, 255, 255, 0.6)",
-  inputBg: "rgba(30, 26, 42, 0.85)",
+  inputBg: "rgba(20, 20, 24, 0.95)",
 };
 
 const THERAPIST_THEME = {
@@ -43,6 +44,7 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [resettingKeys, setResettingKeys] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   const [nickname, setNickname] = useState("");
   const [emergencyContact, setEmergencyContact] = useState<string>("");
@@ -220,6 +222,37 @@ export default function SettingsPage() {
     }
   };
 
+  const handleDeleteAccount = async () => {
+    if (!session || deletingAccount) return;
+    const ok =
+      typeof window !== "undefined"
+        ? window.confirm(
+            "Permanently delete your account? This removes your profile, all messages, and your login. This cannot be undone."
+          )
+        : false;
+    if (!ok) return;
+
+    setDeletingAccount(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const res = await fetch("/api/account/delete", { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        setError(body.error ?? "Could not delete account.");
+        return;
+      }
+      if (typeof window !== "undefined") {
+        window.location.href = "/";
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed.");
+    } finally {
+      setDeletingAccount(false);
+    }
+  };
+
   return (
     <div
       className="min-h-screen flex items-center justify-center px-4"
@@ -323,66 +356,68 @@ export default function SettingsPage() {
               />
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium uppercase tracking-[0.18em]">
-                Role
-              </label>
-              <div className="grid grid-cols-3 gap-2 rounded-xl border p-1">
-                <button
-                  type="button"
-                  onClick={() => setRole("musician")}
-                  className="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
-                  style={{
-                    background:
-                      role === "musician" ? theme.accent : "transparent",
-                    color:
-                      role === "musician"
-                        ? vibe === "therapist"
+            {SHOW_PROFESSIONAL_AND_ROLE_UI && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium uppercase tracking-[0.18em]">
+                  Role
+                </label>
+                <div className="grid grid-cols-3 gap-2 rounded-xl border p-1">
+                  <button
+                    type="button"
+                    onClick={() => setRole("musician")}
+                    className="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
+                    style={{
+                      background:
+                        role === "musician" ? theme.accent : "transparent",
+                      color:
+                        role === "musician"
+                          ? vibe === "therapist"
+                            ? "#fff"
+                            : "rgba(12, 10, 18, 0.95)"
+                          : theme.textSecondary,
+                    }}
+                  >
+                    Musician
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRole("therapist")}
+                    className="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
+                    style={{
+                      background:
+                        role === "therapist" ? theme.accent : "transparent",
+                      color:
+                        role === "therapist"
                           ? "#fff"
-                          : "rgba(12, 10, 18, 0.95)"
-                        : theme.textSecondary,
-                  }}
+                          : theme.textSecondary,
+                    }}
+                  >
+                    Therapist
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRole("responder")}
+                    className="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
+                    style={{
+                      background:
+                        role === "responder" ? theme.accent : "transparent",
+                      color:
+                        role === "responder"
+                          ? "#fff"
+                          : theme.textSecondary,
+                    }}
+                  >
+                    Responder
+                  </button>
+                </div>
+                <p
+                  className="text-xs"
+                  style={{ color: theme.textSecondary }}
                 >
-                  Musician
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRole("therapist")}
-                  className="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
-                  style={{
-                    background:
-                      role === "therapist" ? theme.accent : "transparent",
-                    color:
-                      role === "therapist"
-                        ? "#fff"
-                        : theme.textSecondary,
-                  }}
-                >
-                  Therapist
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRole("responder")}
-                  className="rounded-lg px-3 py-2 text-sm font-medium transition-colors"
-                  style={{
-                    background:
-                      role === "responder" ? theme.accent : "transparent",
-                    color:
-                      role === "responder"
-                        ? "#fff"
-                        : theme.textSecondary,
-                  }}
-                >
-                  Responder
-                </button>
+                  This helps us personalize your workspace and recommendations.
+                </p>
               </div>
-              <p
-                className="text-xs"
-                style={{ color: theme.textSecondary }}
-              >
-                This helps us personalize your workspace and recommendations.
-              </p>
-            </div>
+            )}
 
             {error && (
               <div className="rounded-xl border px-3 py-2 text-xs text-red-500 border-red-400/70 bg-red-500/5">
@@ -402,12 +437,26 @@ export default function SettingsPage() {
               className="inline-flex w-full items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold shadow-md transition disabled:opacity-60 disabled:cursor-not-allowed"
               style={{
                 background: theme.accent,
-                color: vibe === "therapist" ? "#fff" : "rgba(12, 10, 18, 0.95)",
+                color: vibe === "therapist" ? "#fff" : "#000",
               }}
             >
               {saving ? "Saving…" : "Save Changes"}
             </button>
 
+            <p
+              className="text-xs leading-relaxed rounded-xl border px-3 py-2.5"
+              style={{
+                borderColor: "rgba(255, 69, 0, 0.35)",
+                color: theme.textSecondary,
+                background: "rgba(255, 69, 0, 0.06)",
+              }}
+            >
+              Resetting keys will generate a new set of End-to-End Encryption (E2EE) keys.{" "}
+              <strong className="text-red-400">
+                Warning: You will lose access to previous message history encrypted with your old keys.
+              </strong>{" "}
+              Use only if you suspect your current keys are compromised.
+            </p>
             <button
               type="button"
               onClick={handleResetKeys}
@@ -420,6 +469,15 @@ export default function SettingsPage() {
               }}
             >
               {resettingKeys ? "Resetting Keys…" : "Reset Keys"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleDeleteAccount()}
+              disabled={deletingAccount}
+              className="inline-flex w-full items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold transition disabled:opacity-60 disabled:cursor-not-allowed border border-red-500/60 bg-red-950/40 text-red-200 hover:bg-red-950/70"
+            >
+              {deletingAccount ? "Deleting account…" : "Delete account"}
             </button>
           </form>
         )}

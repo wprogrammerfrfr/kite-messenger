@@ -79,7 +79,15 @@ type TranslationKey =
   | "noMessagesConversation"
   | "selectUserToStart"
   | "readStatus"
-  | "sentStatus";
+  | "sentStatus"
+  | "sidebarRequests"
+  | "sidebarInbox"
+  | "sidebarNoRequests"
+  | "messageRequestAccept"
+  | "messageRequestDecline"
+  | "nicknameOnboardingBanner"
+  | "nicknameOnboardingCta"
+  | "nicknameOnboardingDismiss";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -185,6 +193,15 @@ export const translations: Record<Language, TranslationRecord> = {
     selectUserToStart: "Select a user from the sidebar to start chatting.",
     readStatus: "Read",
     sentStatus: "Sent",
+    sidebarRequests: "Requests",
+    sidebarInbox: "Inbox",
+    sidebarNoRequests: "No message requests.",
+    messageRequestAccept: "Accept",
+    messageRequestDecline: "Decline",
+    nicknameOnboardingBanner:
+      "Complete your profile: Head to Settings to set your nickname so friends can find you.",
+    nicknameOnboardingCta: "Settings",
+    nicknameOnboardingDismiss: "Dismiss",
   },
   fa: {
     wipeConfirm:
@@ -286,6 +303,15 @@ export const translations: Record<Language, TranslationRecord> = {
     selectUserToStart: "برای شروع گفتگو، یک کاربر را از نوار کناری انتخاب کنید.",
     readStatus: "خوانده شد",
     sentStatus: "ارسال شد",
+    sidebarRequests: "درخواست‌ها",
+    sidebarInbox: "صندوق ورودی",
+    sidebarNoRequests: "درخواست پیامی نیست.",
+    messageRequestAccept: "پذیرفتن",
+    messageRequestDecline: "رد کردن",
+    nicknameOnboardingBanner:
+      "پروفایل را تکمیل کنید: به تنظیمات بروید و نام مستعار بگذارید تا دوستان شما را پیدا کنند.",
+    nicknameOnboardingCta: "تنظیمات",
+    nicknameOnboardingDismiss: "بستن",
   },
   ar: {
     wipeConfirm:
@@ -387,6 +413,15 @@ export const translations: Record<Language, TranslationRecord> = {
     selectUserToStart: "اختر مستخدمًا من الشريط الجانبي لبدء الدردشة.",
     readStatus: "تمت القراءة",
     sentStatus: "تم الإرسال",
+    sidebarRequests: "الطلبات",
+    sidebarInbox: "صندوق الوارد",
+    sidebarNoRequests: "لا توجد طلبات رسائل.",
+    messageRequestAccept: "قبول",
+    messageRequestDecline: "رفض",
+    nicknameOnboardingBanner:
+      "أكمل ملفك: انتقل إلى الإعدادات لتعيين اسمك المستعار حتى يتمكن أصدقاؤك من العثور عليك.",
+    nicknameOnboardingCta: "الإعدادات",
+    nicknameOnboardingDismiss: "إغلاق",
   },
 };
 

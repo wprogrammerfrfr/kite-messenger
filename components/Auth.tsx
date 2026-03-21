@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Image from "next/image";
 import { supabase } from "@/lib/supabase";
+import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 
 type Mode = "login" | "signup";
 type Role = "musician" | "therapist" | "responder";
@@ -35,10 +36,15 @@ export function Auth() {
           setMessage("Logged in successfully.");
         }
       } else {
+        const redirectBase =
+          (typeof process !== "undefined" &&
+            process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "")) ||
+          (typeof window !== "undefined" ? window.location.origin : "");
         const { error: signUpError } = await supabase.auth.signUp({
           email,
           password,
           options: {
+            emailRedirectTo: redirectBase ? `${redirectBase}/auth/callback` : undefined,
             data: {
               role,
             },
@@ -164,7 +170,7 @@ export function Auth() {
             />
           </div>
 
-          {!isLogin && (
+          {!isLogin && SHOW_PROFESSIONAL_AND_ROLE_UI && (
             <div className="space-y-1.5">
               <span className="text-xs font-medium uppercase tracking-[0.18em] text-neutral-400">
                 Role
