@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Support Mode dictator overrides (black + safety orange). */
+[data-theme="support"] {
+  --page-bg: #000000 !important;
+  --sidebar-bg: #000000 !important;
+  --panel-bg: #000000 !important;
+  --text-primary: #ffffff !important;
+  --text-secondary: #ffffff !important;
+  --border: rgba(255, 69, 0, 0.6) !important;
+  --accent: #ff4500 !important;
+  --glow: 0 0 24px rgba(255, 69, 0, 0.6), 0 0 48px rgba(255, 69, 0, 0.2) !important;
+
+  background: #000000 !important;
+  color: #ffffff !important;
+}
+
+[data-theme="support"] * {
+  background-image: none !important;
+  filter: none !important;
+  backdrop-filter: none !important;
+}
+
