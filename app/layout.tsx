@@ -3,6 +3,7 @@ import "./globals.css";
 import { cookies } from "next/headers";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ResilienceProvider } from "@/components/resilience-provider";
+import { InstallPromptProvider } from "@/components/install-prompt-provider";
 
 const siteTitle = "Kite | Secure Messaging";
 const siteDescription =
@@ -70,7 +71,9 @@ export default function RootLayout({
     >
       <body className="bg-stone-50 text-stone-900 dark:bg-black dark:text-white">
         <ThemeProvider>
-          <ResilienceProvider>{children}</ResilienceProvider>
+          <InstallPromptProvider>
+            <ResilienceProvider>{children}</ResilienceProvider>
+          </InstallPromptProvider>
         </ThemeProvider>
       </body>
     </html>

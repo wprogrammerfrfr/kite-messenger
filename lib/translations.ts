@@ -150,7 +150,8 @@ type TranslationKey =
   | "settingsSupportModeDataHint"
   | "welcomeMissionTitle"
   | "welcomeMissionBody1"
-  | "welcomeMissionBody2";
+  | "welcomeMissionBody2"
+  | "installKiteForOffline";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -344,6 +345,7 @@ const translationsEn: TranslationRecord = {
       "Kite is designed specifically for those in conflict zones, areas with 2G/low-bandwidth internet, and anyone who requires a digital shield for their conversations.",
     welcomeMissionBody2:
       "The platform is engineered to be lightweight, end-to-end encrypted, and resilient. It is built for humanitarians, individuals in crisis zones, and users whose safety depends on a reliable, private, and low-data connection.",
+    installKiteForOffline: "Install Kite for Offline Access",
 };
 
 export const translations: Record<Language, TranslationRecord> = {
@@ -538,6 +540,7 @@ export const translations: Record<Language, TranslationRecord> = {
       "Kite به‌طور ویژه برای افرادی طراحی شده که در مناطق درگیری به سر می‌برند، در محیط‌هایی با اینترنت نسل دوم یا پهنای باند پایین فعالیت می‌کنند، یا به سپر دیجیتال برای گفتگوهای خود نیاز دارند.",
     welcomeMissionBody2:
       "این پلتفرم سبک، رمزنگاری‌شدهٔ سرتاسری و بادوام است. برای فعالان بشردوستانه، افراد در بحران، و کاربرانی ساخته شده که امنیتشان به اتصالی قابل اعتماد، خصوصی و کم‌مصرف وابسته است.",
+    installKiteForOffline: "نصب Kite برای دسترسی آفلاین",
   },
   ar: {
     wipeConfirm:
@@ -729,6 +732,7 @@ export const translations: Record<Language, TranslationRecord> = {
       "صُمم Kite خصيصًا لمن يعملون أو يعيشون في بيئات نزاع، ولمن يستخدمون إنترنتًا ضعيفًا مثل شبكات الجيل الثاني أو النطاق المنخفض، ولمن يحتاجون إلى حماية رقمية لمحادثاتهم.",
     welcomeMissionBody2:
       "جُهزت المنصة لتكون خفيفة، ومشفرة من الطرف إلى الطرف، وقادرة على الصمود. وهي موجهة للعاملين في المجال الإنساني، والأفراد في ظروف أزمة، والمستخدمين الذين تعتمد سلامتهم على اتصال موثوق وخاص ومنخفض استهلاك البيانات.",
+    installKiteForOffline: "تثبيت Kite للوصول دون اتصال",
   },
   kr: {
     ...translationsEn,
@@ -737,6 +741,7 @@ export const translations: Record<Language, TranslationRecord> = {
       "Kite는 분쟁 지역에 있는 이들, 2G·저대역폭 인터넷 환경의 이용자, 그리고 대화에 디지털 방패가 필요한 모든 이를 위해 설계되었습니다.",
     welcomeMissionBody2:
       "플랫폼은 경량·종단간 암호화·회복력을 갖추도록 설계되었습니다. 인도주의 활동가, 위기 상황에 있는 개인, 그리고 신뢰할 수 있고 사적이며 데이터 소비가 적은 연결에 안전이 달린 이용자를 위해 만들어졌습니다.",
+    installKiteForOffline: "오프라인 접속을 위해 Kite 설치",
   },
   tr: {
     ...translationsEn,
@@ -745,6 +750,7 @@ export const translations: Record<Language, TranslationRecord> = {
       "Kite; çatışma bölgelerinde bulunanlar, 2G ve düşük bant genişlikli internet ortamları ve görüşmeleri için dijital bir kalkan gerektiren herkes için özel olarak tasarlanmıştır.",
     welcomeMissionBody2:
       "Platform hafif, uçtan uca şifreli ve dayanıklı olacak şekilde tasarlanmıştır. İnsani yardım çalışanları, kriz bölgelerindeki bireyler ve güvenliği güvenilir, özel ve düşük veri kullanan bir bağlantıya bağlı olan kullanıcılar için geliştirilmiştir.",
+    installKiteForOffline: "Çevrimdışı erişim için Kite’yi yükleyin",
   },
 };
 

@@ -8,6 +8,7 @@ import { Sun, Moon } from "lucide-react";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { getStoredAppearance, setAppearanceMode } from "@/components/theme-provider";
 import { t, type Language } from "@/lib/translations";
+import { InstallKiteButton } from "@/components/InstallKiteButton";
 
 type Role = "musician" | "therapist" | "responder";
 
@@ -319,6 +320,12 @@ export default function SettingsPage() {
           borderColor: theme.border,
         }}
       >
+        <InstallKiteButton
+          language={uiLang}
+          variant="compact"
+          className="mb-5"
+        />
+
         <div className="flex flex-col gap-4 mb-6 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">

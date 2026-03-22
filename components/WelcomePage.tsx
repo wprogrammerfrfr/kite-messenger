@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { t, type Language } from "@/lib/translations";
+import { InstallKiteButton } from "@/components/InstallKiteButton";
 
 /** App icon file: `public/kite-mobile-icon.png` → URL `/kite-mobile-icon.png` */
 const KITE_APP_ICON = "/kite-mobile-icon.png";
@@ -291,6 +292,18 @@ export default function WelcomePage() {
               {t(language, "welcomeMissionBody2")}
             </p>
           </div>
+        </section>
+
+        <section
+          style={{
+            paddingTop: 20,
+            marginBottom: 8,
+            maxWidth: 720,
+            marginLeft: "auto",
+            marginRight: "auto",
+          }}
+        >
+          <InstallKiteButton language={language} variant="prominent" />
         </section>
 
         <section style={{ paddingTop: 24 }}>
