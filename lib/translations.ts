@@ -1,4 +1,4 @@
-export type Language = "en" | "fa" | "ar";
+export type Language = "en" | "fa" | "ar" | "kr" | "tr";
 
 type TranslationKey =
   | "wipeConfirm"
@@ -147,12 +147,14 @@ type TranslationKey =
   | "relativeLastSeenHours"
   | "relativeLastSeenOneDay"
   | "relativeLastSeenDays"
-  | "settingsSupportModeDataHint";
+  | "settingsSupportModeDataHint"
+  | "welcomeMissionTitle"
+  | "welcomeMissionBody1"
+  | "welcomeMissionBody2";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
-export const translations: Record<Language, TranslationRecord> = {
-  en: {
+const translationsEn: TranslationRecord = {
     wipeConfirm: "This action is permanent and messages cannot be restored",
     typePlaceholder: "Type a secure message...",
     chatTitle: "Chat",
@@ -215,7 +217,7 @@ export const translations: Record<Language, TranslationRecord> = {
       "Messages are encrypted end-to-end so only participants can read the content in transit and storage.",
     welcomeAboutMultilingualTitle: "Multilingual Support",
     welcomeAboutMultilingualBody:
-      "Smooth EN/FA/AR support keeps communication consistent across languages without sacrificing performance.",
+      "Smooth support across EN, KO, TR, FA, and AR keeps communication consistent across languages without sacrificing performance.",
     welcomeAboutLowBandwidthTitle: "Low-Bandwidth Mode",
     welcomeAboutLowBandwidthBody:
       "Low-bandwidth, text-first support mode prioritizes speed and reliability in difficult network conditions.",
@@ -337,7 +339,15 @@ export const translations: Record<Language, TranslationRecord> = {
     relativeLastSeenDays: "{{n}} days ago",
     settingsSupportModeDataHint:
       "Turn on Support Mode in the chat sidebar (orange toggle) to save data: no avatars, lighter motion, and less background sync.",
-  },
+    welcomeMissionTitle: "MISSION & PURPOSE OF KITE V1.1",
+    welcomeMissionBody1:
+      "Kite is designed specifically for those in conflict zones, areas with 2G/low-bandwidth internet, and anyone who requires a digital shield for their conversations.",
+    welcomeMissionBody2:
+      "The platform is engineered to be lightweight, end-to-end encrypted, and resilient. It is built for humanitarians, individuals in crisis zones, and users whose safety depends on a reliable, private, and low-data connection.",
+};
+
+export const translations: Record<Language, TranslationRecord> = {
+  en: translationsEn,
   fa: {
     wipeConfirm:
       "این اقدام دائمی است و پیام‌ها قابل بازیابی نخواهند بود",
@@ -400,7 +410,7 @@ export const translations: Record<Language, TranslationRecord> = {
       "پیام‌ها به‌صورت سرتاسری رمزنگاری می‌شوند تا فقط شرکت‌کنندگان بتوانند محتوا را در انتقال و ذخیره‌سازی بخوانند.",
     welcomeAboutMultilingualTitle: "پشتیبانی چندزبانه",
     welcomeAboutMultilingualBody:
-      "پشتیبانی روان EN/FA/AR ارتباط را میان زبان‌ها بدون افت عملکرد یکپارچه نگه می‌دارد.",
+      "پشتیبانی روان برای EN، KO، TR، FA و AR ارتباط را میان زبان‌ها بدون افت عملکرد یکپارچه نگه می‌دارد.",
     welcomeAboutLowBandwidthTitle: "حالت کم‌پهنای‌باند",
     welcomeAboutLowBandwidthBody:
       "حالت پشتیبانی متن‌محور برای پهنای‌باند پایین، سرعت و پایداری را در شبکه‌های ضعیف اولویت می‌دهد.",
@@ -523,6 +533,11 @@ export const translations: Record<Language, TranslationRecord> = {
     relativeLastSeenDays: "{{n}} روز پیش",
     settingsSupportModeDataHint:
       "برای صرفه‌جویی در داده، حالت پشتیبانی را در نوار کناری چت (کلید نارنجی) روشن کنید: بدون آواتار، حرکت سبک‌تر و همگام‌سازی کمتر.",
+    welcomeMissionTitle: "مأموریت و هدف Kite نسخه ۱.۱",
+    welcomeMissionBody1:
+      "Kite به‌طور ویژه برای افرادی طراحی شده که در مناطق درگیری به سر می‌برند، در محیط‌هایی با اینترنت نسل دوم یا پهنای باند پایین فعالیت می‌کنند، یا به سپر دیجیتال برای گفتگوهای خود نیاز دارند.",
+    welcomeMissionBody2:
+      "این پلتفرم سبک، رمزنگاری‌شدهٔ سرتاسری و بادوام است. برای فعالان بشردوستانه، افراد در بحران، و کاربرانی ساخته شده که امنیتشان به اتصالی قابل اعتماد، خصوصی و کم‌مصرف وابسته است.",
   },
   ar: {
     wipeConfirm:
@@ -586,7 +601,7 @@ export const translations: Record<Language, TranslationRecord> = {
       "تُشفّر الرسائل من طرف إلى طرف بحيث لا يقرأ المحتوى أثناء النقل والتخزين إلا المشاركون فقط.",
     welcomeAboutMultilingualTitle: "دعم متعدد اللغات",
     welcomeAboutMultilingualBody:
-      "يدعم EN/FA/AR بسلاسة للحفاظ على الاتساق بين اللغات دون التضحية بالأداء.",
+      "يدعم EN وKO وTR وFA وAR بسلاسة للحفاظ على الاتساق بين اللغات دون التضحية بالأداء.",
     welcomeAboutLowBandwidthTitle: "وضع النطاق المنخفض",
     welcomeAboutLowBandwidthBody:
       "وضع دعم نصي مخصص للشبكات الضعيفة يعطي الأولوية للسرعة والاعتمادية في ظروف الاتصال الصعبة.",
@@ -709,6 +724,27 @@ export const translations: Record<Language, TranslationRecord> = {
     relativeLastSeenDays: "منذ {{n}} يوم",
     settingsSupportModeDataHint:
       "فعّل وضع الدعم في الشريط الجانبي للدردشة (مفتاح برتقالي) لتوفير البيانات: دون صور رمزية، حركة أخف، ومزامنة أقل.",
+    welcomeMissionTitle: "المهمة والغرض من Kite الإصدار 1.1",
+    welcomeMissionBody1:
+      "صُمم Kite خصيصًا لمن يعملون أو يعيشون في بيئات نزاع، ولمن يستخدمون إنترنتًا ضعيفًا مثل شبكات الجيل الثاني أو النطاق المنخفض، ولمن يحتاجون إلى حماية رقمية لمحادثاتهم.",
+    welcomeMissionBody2:
+      "جُهزت المنصة لتكون خفيفة، ومشفرة من الطرف إلى الطرف، وقادرة على الصمود. وهي موجهة للعاملين في المجال الإنساني، والأفراد في ظروف أزمة، والمستخدمين الذين تعتمد سلامتهم على اتصال موثوق وخاص ومنخفض استهلاك البيانات.",
+  },
+  kr: {
+    ...translationsEn,
+    welcomeMissionTitle: "KITE V1.1의 사명과 목적",
+    welcomeMissionBody1:
+      "Kite는 분쟁 지역에 있는 이들, 2G·저대역폭 인터넷 환경의 이용자, 그리고 대화에 디지털 방패가 필요한 모든 이를 위해 설계되었습니다.",
+    welcomeMissionBody2:
+      "플랫폼은 경량·종단간 암호화·회복력을 갖추도록 설계되었습니다. 인도주의 활동가, 위기 상황에 있는 개인, 그리고 신뢰할 수 있고 사적이며 데이터 소비가 적은 연결에 안전이 달린 이용자를 위해 만들어졌습니다.",
+  },
+  tr: {
+    ...translationsEn,
+    welcomeMissionTitle: "KITE V1.1'İN MİSYONU VE AMACI",
+    welcomeMissionBody1:
+      "Kite; çatışma bölgelerinde bulunanlar, 2G ve düşük bant genişlikli internet ortamları ve görüşmeleri için dijital bir kalkan gerektiren herkes için özel olarak tasarlanmıştır.",
+    welcomeMissionBody2:
+      "Platform hafif, uçtan uca şifreli ve dayanıklı olacak şekilde tasarlanmıştır. İnsani yardım çalışanları, kriz bölgelerindeki bireyler ve güvenliği güvenilir, özel ve düşük veri kullanan bir bağlantıya bağlı olan kullanıcılar için geliştirilmiştir.",
   },
 };
 

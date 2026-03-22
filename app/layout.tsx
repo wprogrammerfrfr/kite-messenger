@@ -59,10 +59,11 @@ export default function RootLayout({
   const cookieStore = cookies();
   const lang = (cookieStore.get("nexus-lang")?.value as string | undefined) ?? "en";
   const isRtl = lang === "fa" || lang === "ar";
+  const htmlLang = lang === "kr" ? "ko" : lang === "tr" ? "tr" : lang;
 
   return (
     <html
-      lang={lang}
+      lang={htmlLang}
       dir={isRtl ? "rtl" : "ltr"}
       className="dark"
       suppressHydrationWarning

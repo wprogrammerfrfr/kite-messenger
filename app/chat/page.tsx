@@ -292,7 +292,13 @@ export default function Home() {
         setProfessionalMode(false);
       }
       const storedLang = localStorage.getItem("nexus-lang");
-      if (storedLang === "fa" || storedLang === "ar" || storedLang === "en") {
+      if (
+        storedLang === "fa" ||
+        storedLang === "ar" ||
+        storedLang === "en" ||
+        storedLang === "kr" ||
+        storedLang === "tr"
+      ) {
         setLanguage(storedLang);
       }
       setAppearance(localStorage.getItem("kite-appearance") === "light" ? "light" : "dark");
@@ -319,7 +325,8 @@ export default function Home() {
     if (typeof window === "undefined") return;
     const isRtl = language === "fa" || language === "ar";
     document.documentElement.dir = isRtl ? "rtl" : "ltr";
-    document.documentElement.lang = language;
+    document.documentElement.lang =
+      language === "kr" ? "ko" : language === "tr" ? "tr" : language;
     document.cookie = `nexus-lang=${language}; path=/; max-age=${60 * 60 * 24 * 365}`;
   }, [language]);
 
@@ -479,7 +486,9 @@ export default function Home() {
         preferred_locale:
           data.preferred_locale === "en" ||
           data.preferred_locale === "fa" ||
-          data.preferred_locale === "ar"
+          data.preferred_locale === "ar" ||
+          data.preferred_locale === "kr" ||
+          data.preferred_locale === "tr"
             ? data.preferred_locale
             : null,
       });
@@ -543,7 +552,9 @@ export default function Home() {
               preferred_locale:
                 data.preferred_locale === "en" ||
                 data.preferred_locale === "fa" ||
-                data.preferred_locale === "ar"
+                data.preferred_locale === "ar" ||
+                data.preferred_locale === "kr" ||
+                data.preferred_locale === "tr"
                   ? data.preferred_locale
                   : null,
               lastSeen:
@@ -1684,7 +1695,8 @@ export default function Home() {
     return () => mq.removeEventListener("change", closeOnDesktop);
   }, []);
 
-  const isLtr = language === "en";
+  const isRtlLayout = language === "fa" || language === "ar";
+  const isLtr = !isRtlLayout;
   const sidebarSlideClosed = isLtr ? "-translate-x-full" : "translate-x-full";
   const sidebarSlideOpen = "translate-x-0";
   const sidebarPos = isLtr ? "left-0" : "right-0";
@@ -1718,8 +1730,8 @@ export default function Home() {
   return (
     <MotionConfig reducedMotion={isLowBandwidthMode ? "always" : "user"}>
     <motion.div
-      className={`relative flex h-[100dvh] max-h-[100dvh] overflow-hidden ${language === "en" ? "" : "flex-row-reverse"}`}
-      dir={language === "en" ? "ltr" : "rtl"}
+      className={`relative flex h-[100dvh] max-h-[100dvh] overflow-hidden ${isRtlLayout ? "flex-row-reverse" : ""}`}
+      dir={isRtlLayout ? "rtl" : "ltr"}
       data-theme={isSupportMode ? "support" : "default"}
       style={{
         background: "var(--page-bg)",
@@ -1781,9 +1793,18 @@ export default function Home() {
             </button>
           </div>
           <div className="mt-2 flex gap-2">
-            {(["en", "fa", "ar"] as Language[]).map((lang) => {
+            {(["en", "kr", "tr", "fa", "ar"] as Language[]).map((lang) => {
               const isActive = language === lang;
-              const label = lang === "en" ? "EN" : lang === "fa" ? "FA" : "AR";
+              const label =
+                lang === "en"
+                  ? "EN"
+                  : lang === "kr"
+                    ? "KO"
+                    : lang === "tr"
+                      ? "TR"
+                      : lang === "fa"
+                        ? "FA"
+                        : "AR";
               return (
                 <button
                   key={lang}

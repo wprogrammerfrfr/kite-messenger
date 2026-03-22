@@ -88,7 +88,13 @@ export function Auth() {
     if (typeof window === "undefined") return;
     try {
       const lng = localStorage.getItem("nexus-lang");
-      if (lng === "en" || lng === "fa" || lng === "ar") {
+      if (
+        lng === "en" ||
+        lng === "fa" ||
+        lng === "ar" ||
+        lng === "kr" ||
+        lng === "tr"
+      ) {
         setUiLang(lng);
       }
     } catch {

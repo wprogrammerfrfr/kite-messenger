@@ -91,7 +91,13 @@ export default function SettingsPage() {
       }
       setAppearance(getStoredAppearance());
       const lng = localStorage.getItem("nexus-lang");
-      if (lng === "en" || lng === "fa" || lng === "ar") {
+      if (
+        lng === "en" ||
+        lng === "fa" ||
+        lng === "ar" ||
+        lng === "kr" ||
+        lng === "tr"
+      ) {
         setUiLang(lng);
       }
     } catch {
@@ -137,7 +143,9 @@ export default function SettingsPage() {
           if (
             typedProfile.preferred_locale === "en" ||
             typedProfile.preferred_locale === "fa" ||
-            typedProfile.preferred_locale === "ar"
+            typedProfile.preferred_locale === "ar" ||
+            typedProfile.preferred_locale === "kr" ||
+            typedProfile.preferred_locale === "tr"
           ) {
             setUiLang(typedProfile.preferred_locale);
           }

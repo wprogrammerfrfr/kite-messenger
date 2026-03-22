@@ -41,7 +41,13 @@ export default function WelcomePage() {
     if (typeof window === "undefined") return;
     try {
       const storedLang = localStorage.getItem("nexus-lang");
-      if (storedLang === "fa" || storedLang === "ar" || storedLang === "en") {
+      if (
+        storedLang === "fa" ||
+        storedLang === "ar" ||
+        storedLang === "en" ||
+        storedLang === "kr" ||
+        storedLang === "tr"
+      ) {
         setLanguage(storedLang);
       }
     } catch {
@@ -53,15 +59,21 @@ export default function WelcomePage() {
     if (typeof window === "undefined") return;
     const isRtl = language === "fa" || language === "ar";
     document.documentElement.dir = isRtl ? "rtl" : "ltr";
-    document.documentElement.lang = language;
+    document.documentElement.lang =
+      language === "kr" ? "ko" : language === "tr" ? "tr" : language;
     document.cookie = `nexus-lang=${language}; path=/; max-age=${60 * 60 * 24 * 365}`;
   }, [language]);
 
   const languageButtons = useMemo(() => {
-    return (["en", "fa", "ar"] as Language[]).map((lang) => ({
-      lang,
-      label: lang === "en" ? "EN" : lang === "fa" ? "FA" : "AR",
-    }));
+    const langs: Language[] = ["en", "kr", "tr", "fa", "ar"];
+    const labels: Record<Language, string> = {
+      en: "EN",
+      kr: "KO",
+      tr: "TR",
+      fa: "FA",
+      ar: "AR",
+    };
+    return langs.map((lang) => ({ lang, label: labels[lang] }));
   }, []);
 
   const isRtl = language === "fa" || language === "ar";
@@ -228,6 +240,56 @@ export default function WelcomePage() {
                 {t(language, "welcomeScrollHint")}
               </span>
             </div>
+          </div>
+        </section>
+
+        <section style={{ paddingTop: 24, marginBottom: 8 }}>
+          <div
+            style={{
+              border: `2px solid ${ACCENT_ORANGE}`,
+              borderRadius: 16,
+              background: "#050505",
+              padding: "clamp(28px, 5vw, 44px) clamp(22px, 4vw, 40px)",
+              boxShadow: "0 0 0 1px rgba(255, 69, 0, 0.15), 0 24px 48px rgba(0, 0, 0, 0.55)",
+            }}
+          >
+            <h2
+              style={{
+                margin: 0,
+                marginBottom: 22,
+                fontSize: "clamp(0.95rem, 2.4vw, 1.15rem)",
+                fontWeight: 800,
+                letterSpacing: "0.12em",
+                lineHeight: 1.35,
+                color: ACCENT_ORANGE,
+                textTransform: "uppercase",
+              }}
+            >
+              {t(language, "welcomeMissionTitle")}
+            </h2>
+            <p
+              style={{
+                margin: 0,
+                marginBottom: 18,
+                fontSize: "clamp(1rem, 2.2vw, 1.125rem)",
+                lineHeight: 1.75,
+                fontWeight: 500,
+                color: "rgba(245, 245, 244, 0.94)",
+              }}
+            >
+              {t(language, "welcomeMissionBody1")}
+            </p>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "clamp(1rem, 2.2vw, 1.125rem)",
+                lineHeight: 1.75,
+                fontWeight: 500,
+                color: "rgba(245, 245, 244, 0.94)",
+              }}
+            >
+              {t(language, "welcomeMissionBody2")}
+            </p>
           </div>
         </section>
 

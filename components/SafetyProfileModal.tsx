@@ -43,9 +43,10 @@ type Props = {
 };
 
 function localeBadge(locale: string | null): string | null {
-  if (locale === "en" || locale === "fa" || locale === "ar") {
+  if (locale === "en" || locale === "fa" || locale === "ar" || locale === "tr") {
     return locale.toUpperCase();
   }
+  if (locale === "kr") return "KO";
   return null;
 }
 
