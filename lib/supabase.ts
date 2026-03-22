@@ -12,5 +12,14 @@ if (!supabaseUrl || !supabaseAnonKey) {
 /**
  * Supabase client for browser and server. Use for sending and receiving
  * messages (e.g. realtime channels, table queries, RPC).
+ * PWA / offline: persist session in localStorage so getSession works offline until refresh fails.
  */
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    storage:
+      typeof window !== "undefined" ? window.localStorage : undefined,
+  },
+});

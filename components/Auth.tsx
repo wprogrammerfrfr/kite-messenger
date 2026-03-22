@@ -4,11 +4,15 @@ import { useEffect, useState } from "react";
 import Image from "next/image";
 import { supabase } from "@/lib/supabase";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
+import { useResilience } from "@/components/resilience-provider";
+import { t, type Language } from "@/lib/translations";
 
 type Mode = "login" | "signup";
 type Role = "musician" | "therapist" | "responder";
 
 export function Auth() {
+  const { isOnline, isLowBandwidthMode } = useResilience();
+  const [uiLang, setUiLang] = useState<Language>("en");
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -80,6 +84,18 @@ export function Auth() {
     }
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const lng = localStorage.getItem("nexus-lang");
+      if (lng === "en" || lng === "fa" || lng === "ar") {
+        setUiLang(lng);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const isLogin = mode === "login";
 
   return (
@@ -87,15 +103,24 @@ export function Auth() {
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-neutral-900/70 shadow-2xl shadow-black/50 backdrop-blur-xl p-8">
         <div className="flex justify-between items-center mb-8">
           <div className="flex items-center gap-3">
-            <div className="relative h-10 w-10 shrink-0 overflow-hidden rounded-full border-2 border-white/20">
-              <Image
-                src="/kite-mobile-icon.png"
-                alt=""
-                width={40}
-                height={40}
-                className="h-full w-full object-cover"
-                priority
-              />
+            <div className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border-2 border-white/20">
+              {isLowBandwidthMode ? (
+                <span
+                  className="flex h-full w-full items-center justify-center bg-[#FF4500] text-sm font-bold text-black"
+                  aria-hidden
+                >
+                  K
+                </span>
+              ) : (
+                <Image
+                  src="/kite-mobile-icon.png"
+                  alt=""
+                  width={40}
+                  height={40}
+                  className="h-full w-full object-cover"
+                  priority
+                />
+              )}
             </div>
             <div>
             <h1 className="text-2xl font-semibold tracking-tight">Kite</h1>
@@ -130,6 +155,15 @@ export function Auth() {
             </button>
           </div>
         </div>
+
+        {!isOnline && (
+          <p
+            className="mb-4 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
+            role="status"
+          >
+            {t(uiLang, "authOfflineHint")}
+          </p>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-5">
           <div className="space-y-1.5">

@@ -8,6 +8,7 @@ import { Sun, Moon } from "lucide-react";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { getStoredAppearance, setAppearanceMode } from "@/components/theme-provider";
 import { t, type Language } from "@/lib/translations";
+import { useResilience } from "@/components/resilience-provider";
 
 type Role = "musician" | "therapist" | "responder";
 
@@ -52,6 +53,12 @@ const LIGHT_SETTINGS_THEME = {
 };
 
 export default function SettingsPage() {
+  const {
+    isLowBandwidthMode,
+    manualLowBandwidth,
+    setManualLowBandwidth,
+  } = useResilience();
+
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -111,41 +118,48 @@ export default function SettingsPage() {
 
       if (cancelled) return;
 
-      if (sessionError || !sessionData.session) {
-        setSession(null);
+      if (sessionData?.session) {
+        setSession(sessionData.session);
+
+        const userId = sessionData.session.user.id;
+        const { data: profile, error: profileError } = await supabase
+          .from("profiles")
+          .select("nickname, emergency_contact, role, profile_picture_url")
+          .eq("id", userId)
+          .maybeSingle();
+
+        if (cancelled) return;
+
+        if (profileError && profileError.code !== "PGRST116") {
+          // PGRST116 = no rows found
+          setError(profileError.message);
+        } else if (profile) {
+          const typedProfile = profile as Profile;
+          setNickname(typedProfile.nickname ?? "");
+          setEmergencyContact(typedProfile.emergency_contact ?? "");
+          setProfilePictureUrl(typedProfile.profile_picture_url ?? "");
+          if (
+            typedProfile.role === "therapist" ||
+            typedProfile.role === "musician" ||
+            typedProfile.role === "responder"
+          ) {
+            setRole(typedProfile.role);
+          }
+        }
+
         setLoading(false);
-        setError("You must be logged in to view settings.");
         return;
       }
 
-      setSession(sessionData.session);
-
-      const userId = sessionData.session.user.id;
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .select("nickname, emergency_contact, role, profile_picture_url")
-        .eq("id", userId)
-        .maybeSingle();
-
-      if (cancelled) return;
-
-      if (profileError && profileError.code !== "PGRST116") {
-        // PGRST116 = no rows found
-        setError(profileError.message);
-      } else if (profile) {
-        const typedProfile = profile as Profile;
-        setNickname(typedProfile.nickname ?? "");
-        setEmergencyContact(typedProfile.emergency_contact ?? "");
-        setProfilePictureUrl(typedProfile.profile_picture_url ?? "");
-        if (
-          typedProfile.role === "therapist" ||
-          typedProfile.role === "musician" ||
-          typedProfile.role === "responder"
-        ) {
-          setRole(typedProfile.role);
-        }
+      if (sessionError) {
+        console.error(sessionError);
       }
-
+      const offline =
+        typeof navigator !== "undefined" && !navigator.onLine;
+      if (!offline) {
+        setSession(null);
+        setError("You must be logged in to view settings.");
+      }
       setLoading(false);
     };
 
@@ -373,6 +387,39 @@ export default function SettingsPage() {
           <p className="text-sm text-red-500">{error ?? "Not authenticated."}</p>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-5">
+            <div
+              className="flex flex-col gap-2 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between"
+              style={{ borderColor: theme.border }}
+            >
+              <div className="min-w-0 pr-2">
+                <label
+                  htmlFor="data-saver"
+                  className="text-sm font-medium"
+                  style={{ color: theme.textPrimary }}
+                >
+                  {t(uiLang, "settingsDataSaverLabel")}
+                </label>
+                <p
+                  className="mt-1 text-xs"
+                  style={{ color: theme.textSecondary }}
+                >
+                  {t(uiLang, "settingsDataSaverHint")}
+                  {isLowBandwidthMode && !manualLowBandwidth ? (
+                    <span className="mt-1 block">
+                      {t(uiLang, "settingsDataSaverAutoActive")}
+                    </span>
+                  ) : null}
+                </p>
+              </div>
+              <input
+                id="data-saver"
+                type="checkbox"
+                className="h-5 w-5 shrink-0 accent-orange-500"
+                checked={manualLowBandwidth}
+                onChange={(e) => setManualLowBandwidth(e.target.checked)}
+              />
+            </div>
+
             <div className="space-y-1.5">
               <label className="text-xs font-medium uppercase tracking-[0.18em]">
                 Nickname

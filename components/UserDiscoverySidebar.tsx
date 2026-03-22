@@ -41,6 +41,8 @@ export function UserDiscoverySidebar(props: {
   refreshNonce?: number;
   /** After creating a pending DM from Discover search (before opening chat). */
   onDmRequestCreated?: () => void;
+  /** Skip pulse animations (low-bandwidth / data saver). */
+  lowBandwidth?: boolean;
 }) {
   const {
     sessionUserId,
@@ -50,6 +52,7 @@ export function UserDiscoverySidebar(props: {
     onlineUserIds = {},
     refreshNonce = 0,
     onDmRequestCreated,
+    lowBandwidth = false,
   } = props;
 
   const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
@@ -469,7 +472,9 @@ export function UserDiscoverySidebar(props: {
               ) : unreadCount > 0 ? (
                 unreadCount === 1 ? (
                   <span
-                    className="inline-flex h-2.5 w-2.5 animate-pulse rounded-full"
+                    className={`inline-flex h-2.5 w-2.5 rounded-full ${
+                      lowBandwidth ? "" : "animate-pulse"
+                    }`}
                     style={{ background: "#FF4500" }}
                     aria-label="New messages"
                   />

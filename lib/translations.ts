@@ -109,7 +109,14 @@ type TranslationKey =
   | "discoverAlreadyFriends"
   | "discoverMessageButton"
   | "discoverRequestSentWaiting"
-  | "discoverViewRequestButton";
+  | "discoverViewRequestButton"
+  | "offlineBadge"
+  | "lowSignalBadge"
+  | "settingsDataSaverLabel"
+  | "settingsDataSaverHint"
+  | "settingsDataSaverAutoActive"
+  | "authOfflineHint"
+  | "imageSkippedLowBandwidth";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -248,6 +255,16 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverMessageButton: "Message",
     discoverRequestSentWaiting: "Request sent — waiting for them to accept.",
     discoverViewRequestButton: "View request",
+    offlineBadge: "Offline",
+    lowSignalBadge: "Low signal",
+    settingsDataSaverLabel: "Data saver (low bandwidth)",
+    settingsDataSaverHint:
+      "Disables avatars, read receipts, and heavy motion. Longer timeouts when sending.",
+    settingsDataSaverAutoActive:
+      "Also active automatically because your connection looks slow or Save-Data is on.",
+    authOfflineHint:
+      "You appear offline. If you were signed in before, open Chat once you’re back online — your session is kept on this device.",
+    imageSkippedLowBandwidth: "Image hidden to save data. Open when connection is better.",
   },
   fa: {
     wipeConfirm:
@@ -382,6 +399,17 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverMessageButton: "پیام",
     discoverRequestSentWaiting: "درخواست ارسال شد — در انتظار پذیرش.",
     discoverViewRequestButton: "دیدن درخواست",
+    offlineBadge: "آفلاین",
+    lowSignalBadge: "سیگنال ضعیف",
+    settingsDataSaverLabel: "صرفه‌جویی در داده (پهنای باند کم)",
+    settingsDataSaverHint:
+      "آواتارها، رسید خوانده‌شدن و انیمیشن‌های سنگین غیرفعال می‌شود. زمان انتظار ارسال بیشتر می‌شود.",
+    settingsDataSaverAutoActive:
+      "به‌صورت خودکار هم فعال است چون اتصال کند به نظر می‌رسد یا Save-Data روشن است.",
+    authOfflineHint:
+      "به نظر آفلاین هستید. اگر قبلاً وارد شده‌اید، پس از برقراری اینترنت Chat را باز کنید — نشست روی این دستگاه نگه داشته می‌شود.",
+    imageSkippedLowBandwidth:
+      "تصویر برای صرفه‌جویی در داده پنهان است. با اینترنت بهتر باز کنید.",
   },
   ar: {
     wipeConfirm:
@@ -516,6 +544,17 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverMessageButton: "رسالة",
     discoverRequestSentWaiting: "تم إرسال الطلب — بانتظار القبول.",
     discoverViewRequestButton: "عرض الطلب",
+    offlineBadge: "غير متصل",
+    lowSignalBadge: "إشارة ضعيفة",
+    settingsDataSaverLabel: "توفير البيانات (نطاق ضيق)",
+    settingsDataSaverHint:
+      "يعطّل الصور الرمزية وإيصالات القراءة والحركة الثقيلة. مهلة أطول عند الإرسال.",
+    settingsDataSaverAutoActive:
+      "مفعّل تلقائيًا أيضًا لأن اتصالك يبدو بطيئًا أو وضع توفير البيانات مفعّل.",
+    authOfflineHint:
+      "يبدو أنك غير متصل. إن كنت قد سجّلت الدخول من قبل، افتح الدردشة عند عودة الشبكة — الجلسة تبقى على هذا الجهاز.",
+    imageSkippedLowBandwidth:
+      "الصورة مخفية لتوفير البيانات. افتحها عند تحسن الاتصال.",
   },
 };
 

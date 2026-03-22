@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { cookies } from "next/headers";
 import { ThemeProvider } from "@/components/theme-provider";
+import { ResilienceProvider } from "@/components/resilience-provider";
 
 const siteTitle = "Kite | Secure Messaging";
 const siteDescription =
@@ -20,6 +21,12 @@ export const metadata: Metadata = {
     icon: "/kite-mobile-icon.png",
     shortcut: "/kite-mobile-icon.png",
     apple: "/kite-mobile-icon.png",
+  },
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Kite",
   },
   openGraph: {
     title: siteTitle,
@@ -41,6 +48,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  themeColor: "#000000",
 };
 
 export default function RootLayout({
@@ -60,7 +68,9 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="bg-stone-50 text-stone-900 dark:bg-black dark:text-white">
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider>
+          <ResilienceProvider>{children}</ResilienceProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

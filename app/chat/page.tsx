@@ -24,14 +24,56 @@ import {
   fetchDmConnectionForPair,
 } from "@/lib/dm-connections";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Menu, Settings, Paperclip, X } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
+import { useResilience } from "@/components/resilience-provider";
+import { withPatience } from "@/lib/network-patience";
+import {
+  loadMessagesSnapshot,
+  saveMessagesSnapshot,
+} from "@/lib/offline-message-cache";
 
 /** Brand icon: `public/kite-mobile-icon.png` */
 const KITE_APP_ICON = "/kite-mobile-icon.png";
+
+function KiteBrandMark({
+  lowBandwidth,
+  size = 36,
+}: {
+  lowBandwidth: boolean;
+  size?: number;
+}) {
+  if (lowBandwidth) {
+    return (
+      <div
+        className="flex shrink-0 items-center justify-center rounded-full border-2 font-bold text-black"
+        style={{
+          width: size,
+          height: size,
+          borderColor: "var(--border)",
+          background: "#FF4500",
+          fontSize: Math.max(12, size * 0.38),
+        }}
+        aria-hidden
+      >
+        K
+      </div>
+    );
+  }
+  return (
+    <Image
+      src={KITE_APP_ICON}
+      alt=""
+      width={size}
+      height={size}
+      className="h-full w-full object-cover"
+      priority
+    />
+  );
+}
 
 interface ThemeVars {
   "--page-bg": string;
@@ -115,6 +157,12 @@ function themeToMotionStyle(theme: ThemeVars): Record<string, string> {
 }
 
 export default function Home() {
+  const {
+    isOnline,
+    isLowBandwidthMode,
+    isLowSignal,
+  } = useResilience();
+
   const [professionalMode, setProfessionalMode] = useState(false);
   const [isSupportMode, setIsSupportMode] = useState(false);
   const [inputValue, setInputValue] = useState("");
@@ -260,13 +308,19 @@ export default function Home() {
       const { data, error } = await supabase.auth.getSession();
       if (!mounted) return;
 
-      if (error) {
-        console.error("Error getting session", error);
-        setSession(null);
+      if (data?.session) {
+        setSession(data.session);
         return;
       }
 
-      setSession(data.session);
+      if (error) {
+        console.error("Error getting session", error);
+      }
+      const offline =
+        typeof navigator !== "undefined" && !navigator.onLine;
+      if (!offline) {
+        setSession(null);
+      }
     };
 
     getInitialSession();
@@ -801,6 +855,7 @@ export default function Home() {
               d.initiatedBy === senderIdForRead;
 
             if (
+              !isLowBandwidthMode &&
               !pendingRequestThread &&
               row.receiver_id === viewerId &&
               row.is_read === false &&
@@ -851,7 +906,15 @@ export default function Home() {
         .or(`sender_id.eq.${viewerId},receiver_id.eq.${viewerId}`)
         .order("created_at", { ascending: true });
 
-      if (cancelled || error || !data) return;
+      if (cancelled) return;
+
+      if (error || !data) {
+        const cached = await loadMessagesSnapshot(viewerId);
+        if (!cancelled && cached?.length) {
+          setMessages(cached);
+        }
+        return;
+      }
 
       const decrypted: Array<{
         id: string | number;
@@ -935,6 +998,7 @@ export default function Home() {
 
       if (!cancelled) {
         setMessages(decrypted);
+        void saveMessagesSnapshot(viewerId, decrypted);
       }
     })();
 
@@ -942,7 +1006,7 @@ export default function Home() {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [senderKeys, session, decryptWithRetry]);
+  }, [senderKeys, session, decryptWithRetry, isLowBandwidthMode]);
 
   const sendMessage = useCallback(async () => {
     const trimmed = inputValue.trim();
@@ -970,22 +1034,30 @@ export default function Home() {
         // Always refresh the recipient's public key right before encrypting.
         // This prevents stale keys across different login sessions.
         try {
-          const { data, error } = await supabase
-            .from("profiles")
-            .select("public_key")
-            .eq("id", receiverId)
-            .single();
+          const profileRow = await withPatience(
+            async () => {
+              const { data, error } = await supabase
+                .from("profiles")
+                .select("public_key")
+                .eq("id", receiverId)
+                .single();
+              if (error) throw error;
+              return data;
+            },
+            { patient: isLowBandwidthMode }
+          );
 
-          if (error) throw error;
-
-          if (!data?.public_key || typeof data.public_key !== "string") {
+          if (
+            !profileRow?.public_key ||
+            typeof profileRow.public_key !== "string"
+          ) {
             const msg = "Waiting for user to initialize secure connection...";
             setSendError(msg);
             setSending(false);
             return;
           }
 
-          const key = await importPublicKeyFromBase64(data.public_key);
+          const key = await importPublicKeyFromBase64(profileRow.public_key);
           setRecipientPublicKey(key);
           setHasRecipientKey(true);
           keyToUse = key;
@@ -1004,24 +1076,35 @@ export default function Home() {
         senderKeys
       );
 
-      const { error } = await supabase.from("messages").insert({
-        encrypted_content: encryptedForRecipient,
-        content_for_sender: encryptedForSender,
-        sender_id: senderId,
-        receiver_id: receiverId,
-        is_session_mode: professionalMode,
-        is_read: false,
-      });
-      if (error) {
-        console.log("Supabase insert error:", error);
-        setSendError(error.message ?? "Failed to send message");
-      } else {
+      try {
+        await withPatience(
+          async () => {
+            const { error } = await supabase.from("messages").insert({
+              encrypted_content: encryptedForRecipient,
+              content_for_sender: encryptedForSender,
+              sender_id: senderId,
+              receiver_id: receiverId,
+              is_session_mode: professionalMode,
+              is_read: false,
+            });
+            if (error) {
+              console.log("Supabase insert error:", error);
+              throw new Error(error.message ?? "Failed to send message");
+            }
+          },
+          { patient: isLowBandwidthMode }
+        );
         void ensureDmConnectionAfterSend(supabase, senderId, receiverId);
         setSidebarRefreshNonce((n) => n + 1);
-        setInputValue(""); // Clear the input field after a successful send
+        setInputValue("");
         if (textAreaRef.current) {
           textAreaRef.current.style.height = "44px";
         }
+      } catch (err) {
+        console.log(err);
+        setSendError(
+          err instanceof Error ? err.message : "Failed to send message"
+        );
       }
     } catch (err) {
       console.log(err);
@@ -1029,7 +1112,17 @@ export default function Home() {
     } finally {
       setSending(false);
     }
-  }, [inputValue, senderKeys, recipientPublicKey, professionalMode, session, activeRecipientId, dmThread.status, dmThread.initiatedBy]);
+  }, [
+    inputValue,
+    senderKeys,
+    recipientPublicKey,
+    professionalMode,
+    session,
+    activeRecipientId,
+    dmThread.status,
+    dmThread.initiatedBy,
+    isLowBandwidthMode,
+  ]);
   // --- NEW FILTERING LOGIC ---
   // This calculates which messages to show based on the person you clicked in the sidebar
   const baseFilteredMessages = messages.filter((m) => {
@@ -1049,6 +1142,7 @@ export default function Home() {
 
   // Mark messages as read when they come from the currently active recipient (after you accepted).
   useEffect(() => {
+    if (isLowBandwidthMode) return;
     if (!session || !activeRecipientId) return;
     if (document.visibilityState !== "visible") return;
     if (typeof document.hasFocus === "function" && !document.hasFocus()) return;
@@ -1081,10 +1175,18 @@ export default function Home() {
         // Don't block UI if the column doesn't exist yet.
       }
     })();
-  }, [session, activeRecipientId, messages, dmThread.status, dmThread.initiatedBy]);
+  }, [
+    session,
+    activeRecipientId,
+    messages,
+    dmThread.status,
+    dmThread.initiatedBy,
+    isLowBandwidthMode,
+  ]);
 
   // Realtime: update read receipts without re-decrypting message content.
   useEffect(() => {
+    if (isLowBandwidthMode) return;
     if (!session) return;
 
     const channel = supabase
@@ -1109,7 +1211,22 @@ export default function Home() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [session]);
+  }, [session, isLowBandwidthMode]);
+
+  const snapshotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const uid = session?.user?.id;
+    if (!uid || messages.length === 0) return;
+    if (snapshotTimerRef.current) clearTimeout(snapshotTimerRef.current);
+    snapshotTimerRef.current = setTimeout(() => {
+      snapshotTimerRef.current = null;
+      void saveMessagesSnapshot(uid, messages);
+    }, 800);
+    return () => {
+      if (snapshotTimerRef.current) clearTimeout(snapshotTimerRef.current);
+    };
+  }, [messages, session?.user?.id]);
+
   const handleOpenFilePicker = () => {
     if (!session || !activeRecipientId || isSupportMode) return;
     const pendingRecipientBlock =
@@ -1138,17 +1255,20 @@ export default function Home() {
       const ext = file.name.split(".").pop() || "jpg";
       const path = `${session.user.id}/${Date.now()}.${ext}`;
 
-      const { error: uploadError } = await supabase.storage
-        .from("chat-images")
-        .upload(path, file, {
-          cacheControl: "3600",
-          upsert: false,
-        });
-
-      if (uploadError) {
-        setSendError(uploadError.message ?? "Failed to upload image");
-        return;
-      }
+      await withPatience(
+        async () => {
+          const { error: uploadError } = await supabase.storage
+            .from("chat-images")
+            .upload(path, file, {
+              cacheControl: "3600",
+              upsert: false,
+            });
+          if (uploadError) {
+            throw new Error(uploadError.message ?? "Failed to upload image");
+          }
+        },
+        { patient: isLowBandwidthMode }
+      );
 
       const { data: publicData } = supabase.storage
         .from("chat-images")
@@ -1168,15 +1288,23 @@ export default function Home() {
         keyToUse = senderKeys.publicKey;
       } else {
         try {
-          const { data, error } = await supabase
-            .from("profiles")
-            .select("public_key")
-            .eq("id", receiverId)
-            .maybeSingle();
+          const profileRow = await withPatience(
+            async () => {
+              const { data, error } = await supabase
+                .from("profiles")
+                .select("public_key")
+                .eq("id", receiverId)
+                .maybeSingle();
+              if (error) throw error;
+              return data;
+            },
+            { patient: isLowBandwidthMode }
+          );
 
-          if (error) throw error;
-
-          if (!data?.public_key || typeof data.public_key !== "string") {
+          if (
+            !profileRow?.public_key ||
+            typeof profileRow.public_key !== "string"
+          ) {
             const msg = "Waiting for user to initialize secure connection...";
             setSendError(msg);
             setUploadingImage(false);
@@ -1184,7 +1312,7 @@ export default function Home() {
             return;
           }
 
-          const key = await importPublicKeyFromBase64(data.public_key);
+          const key = await importPublicKeyFromBase64(profileRow.public_key);
           setRecipientPublicKey(key);
           setHasRecipientKey(true);
           keyToUse = key;
@@ -1209,21 +1337,25 @@ export default function Home() {
         senderKeys
       );
 
-      const { error: insertError } = await supabase.from("messages").insert({
-        encrypted_content: encryptedText,
-        content_for_sender: encryptedForSender,
-        sender_id: session.user.id,
-        receiver_id: activeRecipientId,
-        is_session_mode: professionalMode,
-        is_read: false,
-      });
+      await withPatience(
+        async () => {
+          const { error: insertError } = await supabase.from("messages").insert({
+            encrypted_content: encryptedText,
+            content_for_sender: encryptedForSender,
+            sender_id: session.user.id,
+            receiver_id: activeRecipientId,
+            is_session_mode: professionalMode,
+            is_read: false,
+          });
+          if (insertError) {
+            throw new Error(insertError.message ?? "Failed to send image");
+          }
+        },
+        { patient: isLowBandwidthMode }
+      );
 
-      if (insertError) {
-        setSendError(insertError.message ?? "Failed to send image");
-      } else {
-        void ensureDmConnectionAfterSend(supabase, session.user.id, activeRecipientId);
-        setSidebarRefreshNonce((n) => n + 1);
-      }
+      void ensureDmConnectionAfterSend(supabase, session.user.id, activeRecipientId);
+      setSidebarRefreshNonce((n) => n + 1);
     } catch (err) {
       setSendError(
         err instanceof Error ? err.message : "Failed to send image"
@@ -1274,21 +1406,29 @@ export default function Home() {
             keyToUse = senderKeys.publicKey;
           } else {
             try {
-              const { data, error } = await supabase
-                .from("profiles")
-                .select("public_key")
-                .eq("id", receiverId)
-                .maybeSingle();
+              const profileRow = await withPatience(
+                async () => {
+                  const { data, error } = await supabase
+                    .from("profiles")
+                    .select("public_key")
+                    .eq("id", receiverId)
+                    .maybeSingle();
+                  if (error) throw error;
+                  return data;
+                },
+                { patient: isLowBandwidthMode }
+              );
 
-              if (error) throw error;
-
-              if (!data?.public_key || typeof data.public_key !== "string") {
+              if (
+                !profileRow?.public_key ||
+                typeof profileRow.public_key !== "string"
+              ) {
                 const msg = "Waiting for user to initialize secure connection...";
                 setSendError(msg);
                 return;
               }
 
-              const key = await importPublicKeyFromBase64(data.public_key);
+              const key = await importPublicKeyFromBase64(profileRow.public_key);
               setRecipientPublicKey(key);
               setHasRecipientKey(true);
               keyToUse = key;
@@ -1306,21 +1446,25 @@ export default function Home() {
             senderKeys
           );
 
-          const { error } = await supabase.from("messages").insert({
-            encrypted_content: encryptedText,
-            content_for_sender: encryptedForSender,
-            sender_id: senderId,
-            receiver_id: receiverId,
-            is_session_mode: professionalMode,
-            is_read: false,
-          });
+          await withPatience(
+            async () => {
+              const { error } = await supabase.from("messages").insert({
+                encrypted_content: encryptedText,
+                content_for_sender: encryptedForSender,
+                sender_id: senderId,
+                receiver_id: receiverId,
+                is_session_mode: professionalMode,
+                is_read: false,
+              });
+              if (error) {
+                throw new Error(error.message ?? "Failed to share location");
+              }
+            },
+            { patient: isLowBandwidthMode }
+          );
 
-          if (error) {
-            setSendError(error.message ?? "Failed to share location");
-          } else {
-            void ensureDmConnectionAfterSend(supabase, senderId, receiverId);
-            setSidebarRefreshNonce((n) => n + 1);
-          }
+          void ensureDmConnectionAfterSend(supabase, senderId, receiverId);
+          setSidebarRefreshNonce((n) => n + 1);
         } catch (err) {
           setSendError(
             err instanceof Error ? err.message : "Failed to share location"
@@ -1472,7 +1616,10 @@ export default function Home() {
     );
   }
 
+  const motionDuration = isLowBandwidthMode ? 0 : 0.5;
+
   return (
+    <MotionConfig reducedMotion={isLowBandwidthMode ? "always" : "user"}>
     <motion.div
       className={`relative flex h-[100dvh] max-h-[100dvh] overflow-hidden ${language === "en" ? "" : "flex-row-reverse"}`}
       dir={language === "en" ? "ltr" : "rtl"}
@@ -1483,7 +1630,7 @@ export default function Home() {
       }}
       initial={false}
       animate={themeToMotionStyle(bodyTheme)}
-      transition={{ duration: 0.5, ease: "easeInOut" }}
+      transition={{ duration: motionDuration, ease: "easeInOut" }}
     >
       {/* Mobile overlay backdrop */}
       <button
@@ -1511,23 +1658,16 @@ export default function Home() {
           borderColor: bodyTheme["--border"],
           boxShadow: bodyTheme["--glow"],
         }}
-        transition={{ duration: 0.5, ease: "easeInOut" }}
+        transition={{ duration: motionDuration, ease: "easeInOut" }}
       >
         <div className="border-b p-4" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
               <div
-                className="relative h-9 w-9 shrink-0 overflow-hidden rounded-full border-2"
+                className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border-2"
                 style={{ borderColor: "var(--border)" }}
               >
-                <Image
-                  src={KITE_APP_ICON}
-                  alt=""
-                  width={36}
-                  height={36}
-                  className="h-full w-full object-cover"
-                  priority
-                />
+                <KiteBrandMark lowBandwidth={isLowBandwidthMode} size={36} />
               </div>
               <h1 className="truncate text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
                 Kite
@@ -1586,6 +1726,7 @@ export default function Home() {
             onlineUserIds={onlineUserIds}
             refreshNonce={sidebarRefreshNonce}
             onDmRequestCreated={() => setSidebarRefreshNonce((n) => n + 1)}
+            lowBandwidth={isLowBandwidthMode}
           />
         </div>
 
@@ -1701,7 +1842,7 @@ export default function Home() {
             borderColor: bodyTheme["--border"],
             boxShadow: bodyTheme["--glow"] === "none" ? "none" : bodyTheme["--glow"],
           }}
-          transition={{ duration: 0.5, ease: "easeInOut" }}
+          transition={{ duration: motionDuration, ease: "easeInOut" }}
         >
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             <button
@@ -1713,23 +1854,39 @@ export default function Home() {
             >
               <Menu className="h-5 w-5" aria-hidden />
             </button>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">
               <div
-                className="relative h-8 w-8 shrink-0 overflow-hidden rounded-full border-2"
+                className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full border-2"
                 style={{ borderColor: "var(--border)" }}
               >
-                <Image
-                  src={KITE_APP_ICON}
-                  alt=""
-                  width={32}
-                  height={32}
-                  className="h-full w-full object-cover"
-                  priority
-                />
+                <KiteBrandMark lowBandwidth={isLowBandwidthMode} size={32} />
               </div>
               <span className="text-sm font-semibold sm:text-base" style={{ color: "var(--text-primary)" }}>
                 Kite
               </span>
+              {!isOnline ? (
+                <span
+                  className="rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  style={{
+                    borderColor: "var(--border)",
+                    color: "var(--text-secondary)",
+                    background: "var(--panel-bg)",
+                  }}
+                >
+                  {t(language, "offlineBadge")}
+                </span>
+              ) : isLowSignal ? (
+                <span
+                  className="rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  style={{
+                    borderColor: "var(--border)",
+                    color: "var(--accent)",
+                    background: "var(--panel-bg)",
+                  }}
+                >
+                  {t(language, "lowSignalBadge")}
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
@@ -1914,6 +2071,17 @@ export default function Home() {
                   >
                     {m.isImage && m.imageUrl && !isSupportMode ? (
                       <div className="space-y-2">
+                        {isLowBandwidthMode ? (
+                          <a
+                            href={m.imageUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-sm underline break-words"
+                            style={{ color: "inherit" }}
+                          >
+                            {t(language, "imageSkippedLowBandwidth")}
+                          </a>
+                        ) : (
                         <div className="relative overflow-hidden rounded-lg bg-black/10">
                           <Image
                             src={m.imageUrl}
@@ -1923,6 +2091,7 @@ export default function Home() {
                             className="max-h-64 w-auto object-cover"
                           />
                         </div>
+                        )}
                         {m.text && m.text !== m.imageUrl && (
                           <p
                             className="text-xs opacity-80"
@@ -1958,7 +2127,7 @@ export default function Home() {
                     )}
                     <div className="mt-1 flex items-center justify-end gap-2 text-[11px] opacity-80">
                       <span>{formatTime(m.createdAt)}</span>
-                      {m.senderId === session.user.id && (
+                      {m.senderId === session.user.id && !isLowBandwidthMode && (
                         <span
                           style={{
                             color: m.isRead ? "#FF4500" : "rgba(255, 255, 255, 0.55)",
@@ -2084,5 +2253,6 @@ export default function Home() {
         </div>
       </main>
     </motion.div>
+    </MotionConfig>
   );
 }
