@@ -8,6 +8,7 @@ import {
   type DmConnectionStatus,
 } from "@/lib/dm-connections";
 import { useCallback, useEffect, useState } from "react";
+import { Check, Clock } from "lucide-react";
 import { t, type Language } from "@/lib/translations";
 
 type Role = "musician" | "therapist" | "responder" | null;
@@ -569,8 +570,8 @@ export function UserDiscoverySidebar(props: {
             </p>
           ) : discoverResult ? (
             <div
-              className="rounded-lg border p-3"
-              style={{ borderColor: "rgba(255, 69, 0, 0.35)", background: "rgba(255, 69, 0, 0.04)" }}
+              className="rounded-lg border p-3 bg-stone-100/90 dark:bg-[rgba(255,69,0,0.06)]"
+              style={{ borderColor: "var(--border)" }}
             >
               <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
                 {(discoverResult.nickname && discoverResult.nickname.trim()) ||
@@ -599,6 +600,7 @@ export function UserDiscoverySidebar(props: {
                 </p>
               ) : null}
               <div className="mt-3 flex flex-col gap-2">
+                {/* No row or declined → send new request */}
                 {discoverDm !== "loading" &&
                 discoverDm !== "idle" &&
                 (discoverDm === null || discoverDm.status === "declined") ? (
@@ -612,21 +614,95 @@ export function UserDiscoverySidebar(props: {
                     {discoverRequestBusy ? t(language, "sendingButton") : t(language, "sendDmRequestButton")}
                   </button>
                 ) : null}
+
+                {/* Accepted → friend status + Message */}
                 {discoverDm !== "loading" &&
                 discoverDm !== "idle" &&
                 discoverDm != null &&
-                (discoverDm.status === "accepted" || discoverDm.status === "pending") ? (
+                discoverDm.status === "accepted" ? (
+                  <>
+                    <div
+                      className="flex items-center gap-2 rounded-lg border px-2.5 py-2"
+                      style={{
+                        borderColor: "var(--border)",
+                        background: "color-mix(in srgb, var(--panel-bg) 88%, transparent)",
+                      }}
+                      role="status"
+                    >
+                      <Check
+                        className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400"
+                        strokeWidth={2.5}
+                        aria-hidden
+                      />
+                      <span
+                        className="text-[11px] font-medium leading-snug opacity-90"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
+                        {t(language, "discoverAlreadyFriends")}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onSelectRecipientId(discoverResult.id)}
+                      className="w-full rounded-lg px-3 py-2.5 text-xs font-semibold text-black transition hover:opacity-90"
+                      style={{ background: "#FF4500" }}
+                    >
+                      {t(language, "discoverMessageButton")}
+                    </button>
+                  </>
+                ) : null}
+
+                {/* Pending: you sent → waiting strip + Message to open thread */}
+                {discoverDm !== "loading" &&
+                discoverDm !== "idle" &&
+                discoverDm != null &&
+                discoverDm.status === "pending" &&
+                discoverDm.initiated_by === sessionUserId ? (
+                  <>
+                    <div
+                      className="flex items-start gap-2 rounded-lg border px-2.5 py-2"
+                      style={{
+                        borderColor: "var(--border)",
+                        background: "color-mix(in srgb, var(--panel-bg) 88%, transparent)",
+                      }}
+                      role="status"
+                    >
+                      <Clock
+                        className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400"
+                        aria-hidden
+                      />
+                      <span className="text-[11px] leading-snug" style={{ color: "var(--text-secondary)" }}>
+                        {t(language, "discoverRequestSentWaiting")}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onSelectRecipientId(discoverResult.id)}
+                      className="w-full rounded-lg border px-3 py-2.5 text-xs font-semibold transition hover:opacity-90"
+                      style={{
+                        borderColor: "#FF4500",
+                        color: "var(--text-primary)",
+                        background: "transparent",
+                      }}
+                    >
+                      {t(language, "discoverMessageButton")}
+                    </button>
+                  </>
+                ) : null}
+
+                {/* Pending: they sent → view / open chat */}
+                {discoverDm !== "loading" &&
+                discoverDm !== "idle" &&
+                discoverDm != null &&
+                discoverDm.status === "pending" &&
+                discoverDm.initiated_by !== sessionUserId ? (
                   <button
                     type="button"
                     onClick={() => onSelectRecipientId(discoverResult.id)}
-                    className="w-full rounded-lg border px-3 py-2.5 text-xs font-semibold transition hover:opacity-90"
-                    style={{
-                      borderColor: "#FF4500",
-                      color: "var(--text-primary)",
-                      background: "transparent",
-                    }}
+                    className="w-full rounded-lg px-3 py-2.5 text-xs font-semibold text-black transition hover:opacity-90"
+                    style={{ background: "#FF4500" }}
                   >
-                    {t(language, "openChatButton")}
+                    {t(language, "discoverViewRequestButton")}
                   </button>
                 ) : null}
               </div>

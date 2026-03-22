@@ -105,7 +105,11 @@ type TranslationKey =
   | "openChatButton"
   | "settingsThemeLight"
   | "settingsThemeDark"
-  | "settingsAppearanceLabel";
+  | "settingsAppearanceLabel"
+  | "discoverAlreadyFriends"
+  | "discoverMessageButton"
+  | "discoverRequestSentWaiting"
+  | "discoverViewRequestButton";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -240,6 +244,10 @@ export const translations: Record<Language, TranslationRecord> = {
     settingsThemeLight: "Light",
     settingsThemeDark: "Dark",
     settingsAppearanceLabel: "Appearance",
+    discoverAlreadyFriends: "Already friends",
+    discoverMessageButton: "Message",
+    discoverRequestSentWaiting: "Request sent — waiting for them to accept.",
+    discoverViewRequestButton: "View request",
   },
   fa: {
     wipeConfirm:
@@ -370,6 +378,10 @@ export const translations: Record<Language, TranslationRecord> = {
     settingsThemeLight: "روشن",
     settingsThemeDark: "تاریک",
     settingsAppearanceLabel: "ظاهر",
+    discoverAlreadyFriends: "از قبل دوست هستید",
+    discoverMessageButton: "پیام",
+    discoverRequestSentWaiting: "درخواست ارسال شد — در انتظار پذیرش.",
+    discoverViewRequestButton: "دیدن درخواست",
   },
   ar: {
     wipeConfirm:
@@ -500,6 +512,10 @@ export const translations: Record<Language, TranslationRecord> = {
     settingsThemeLight: "فاتح",
     settingsThemeDark: "داكن",
     settingsAppearanceLabel: "المظهر",
+    discoverAlreadyFriends: "أصدقاء مسبقًا",
+    discoverMessageButton: "رسالة",
+    discoverRequestSentWaiting: "تم إرسال الطلب — بانتظار القبول.",
+    discoverViewRequestButton: "عرض الطلب",
   },
 };
 
