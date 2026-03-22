@@ -39,6 +39,10 @@ import {
   loadMessagesSnapshot,
   saveMessagesSnapshot,
 } from "@/lib/offline-message-cache";
+import {
+  readSupportModeFromStorage,
+  writeSupportModeToStorage,
+} from "@/lib/support-mode-storage";
 
 /** Brand icon: `public/kite-mobile-icon.png` */
 const KITE_APP_ICON = "/kite-mobile-icon.png";
@@ -169,6 +173,17 @@ export default function Home() {
 
   const [professionalMode, setProfessionalMode] = useState(false);
   const [isSupportMode, setIsSupportMode] = useState(false);
+
+  useEffect(() => {
+    const syncSupport = () => setIsSupportMode(readSupportModeFromStorage());
+    syncSupport();
+    window.addEventListener("kite-support-mode", syncSupport);
+    window.addEventListener("storage", syncSupport);
+    return () => {
+      window.removeEventListener("kite-support-mode", syncSupport);
+      window.removeEventListener("storage", syncSupport);
+    };
+  }, []);
   const [inputValue, setInputValue] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -1840,6 +1855,7 @@ export default function Home() {
               if (next) {
                 setProfessionalMode(false);
               }
+              writeSupportModeToStorage(next);
               return next;
             });
           }}

@@ -80,34 +80,52 @@ export function ModeController(props: {
         </>
       )}
 
-      <div className={showProfessionalUI ? "mt-4" : ""}>
-        <label className="flex cursor-pointer items-center justify-between gap-3">
-          <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-            {t(language, "supportModeLabel")}
-          </span>
-          <motion.button
-            type="button"
-            role="switch"
-            aria-checked={isSupportMode}
-            className="relative h-7 w-12 shrink-0 rounded-full"
-            style={{
-              background: isSupportMode ? "var(--accent)" : "rgba(148, 163, 184, 0.7)",
-            }}
-            onClick={onToggleSupport}
-            whileTap={{ scale: 0.98 }}
-            initial={false}
-          >
-            <motion.span
-              className="absolute top-1 h-5 w-5 rounded-full bg-white shadow"
+      <div
+        className={showProfessionalUI ? "mt-4" : ""}
+        style={{
+          borderRadius: "0.75rem",
+          border: "2px solid",
+          borderColor: isSupportMode ? "#FF4500" : "rgba(255, 69, 0, 0.42)",
+          background: isSupportMode
+            ? "rgba(255, 69, 0, 0.12)"
+            : "rgba(255, 69, 0, 0.04)",
+          boxShadow: isSupportMode
+            ? "0 0 0 1px rgba(255, 69, 0, 0.25), 0 4px 20px rgba(255, 69, 0, 0.12)"
+            : "none",
+        }}
+      >
+        <div className="p-3 sm:p-3.5">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span
+              className="text-sm font-bold uppercase tracking-wide"
+              style={{ color: isSupportMode ? "#FF4500" : "var(--text-primary)" }}
+            >
+              {t(language, "supportModeLabel")}
+            </span>
+            <motion.button
+              type="button"
+              role="switch"
+              aria-checked={isSupportMode}
+              className="relative h-8 w-[3.25rem] shrink-0 rounded-full ring-2 ring-[rgba(255,69,0,0.5)] ring-offset-2 ring-offset-transparent"
+              style={{
+                background: isSupportMode ? "#FF4500" : "rgba(120, 113, 108, 0.45)",
+              }}
+              onClick={onToggleSupport}
+              whileTap={{ scale: 0.97 }}
               initial={false}
-              animate={{ left: isSupportMode ? "26px" : "4px" }}
-              transition={{ duration: 0.3, ease: "easeInOut" }}
-            />
-          </motion.button>
-        </label>
-        <p className="mt-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
-          {t(language, "optimizedSupportText")}
-        </p>
+            >
+              <motion.span
+                className="absolute top-1 h-6 w-6 rounded-full bg-white shadow-md"
+                initial={false}
+                animate={{ left: isSupportMode ? "1.375rem" : "0.25rem" }}
+                transition={{ duration: 0.25, ease: "easeInOut" }}
+              />
+            </motion.button>
+          </label>
+          <p className="mt-2 text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+            {t(language, "optimizedSupportText")}
+          </p>
+        </div>
       </div>
 
       <p className="mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>

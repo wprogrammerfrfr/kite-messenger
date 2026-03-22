@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { X, Copy, Check, Phone } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { t, type Language } from "@/lib/translations";
+import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
 import type { DmConnectionStatus } from "@/lib/dm-connections";
 import {
   readCachedSafetyProfile,
@@ -40,22 +41,6 @@ type Props = {
   dmStatus: DmConnectionStatus | null;
   isSelf: boolean;
 };
-
-function formatLastSeenLabel(
-  language: Language,
-  lastSeen: string | null
-): string | null {
-  if (!lastSeen) return null;
-  const d = new Date(lastSeen);
-  if (Number.isNaN(d.getTime())) return null;
-  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
-  const safe = Math.max(0, mins);
-  if (safe <= 1) return t(language, "safetyProfileLastSeenOneMin");
-  return t(language, "safetyProfileLastSeenMins").replace(
-    "{{mins}}",
-    String(safe)
-  );
-}
 
 function localeBadge(locale: string | null): string | null {
   if (locale === "en" || locale === "fa" || locale === "ar") {
@@ -234,7 +219,7 @@ export function SafetyProfileModal({
   const langBadge = localeBadge(target.preferred_locale);
   const role = roleLabel(language, target.role);
   const lastSeenText = !target.isOnline
-    ? formatLastSeenLabel(language, target.lastSeen)
+    ? formatRelativeLastSeen(target.lastSeen, language)
     : null;
 
   let emergencyBlock: React.ReactNode = null;

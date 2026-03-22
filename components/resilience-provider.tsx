@@ -9,32 +9,26 @@ import {
   useState,
   type ReactNode,
 } from "react";
-
-const STORAGE_MANUAL = "kite-low-bandwidth";
+import { readSupportModeFromStorage } from "@/lib/support-mode-storage";
 
 type NetworkQuality = "offline" | "slow" | "good";
 
 type ResilienceContextValue = {
   isOnline: boolean;
   networkQuality: NetworkQuality;
-  /** Manual data-saver or auto-detected 2G / slow-2g */
+  /** Support Mode (persisted) — avatars, motion, read receipts, patience timeouts (see chat). */
   isLowBandwidthMode: boolean;
-  /** User toggled data saver in Settings (vs network-only detection). */
+  /** True when Support Mode is on (from storage), regardless of network */
+  isSupportModeEnabled: boolean;
+  /** @deprecated No-op; data saver is tied to Support Mode. */
+  setManualLowBandwidth: (_value: boolean) => void;
+  /** @deprecated Always false */
   manualLowBandwidth: boolean;
-  setManualLowBandwidth: (value: boolean) => void;
   /** True when online but connection is constrained (for header badge) */
   isLowSignal: boolean;
 };
 
 const ResilienceContext = createContext<ResilienceContextValue | null>(null);
-
-function readManual(): boolean {
-  try {
-    return localStorage.getItem(STORAGE_MANUAL) === "1";
-  } catch {
-    return false;
-  }
-}
 
 function connectionSlow(): boolean {
   if (typeof navigator === "undefined") return false;
@@ -53,12 +47,16 @@ export function ResilienceProvider({ children }: { children: ReactNode }) {
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== "undefined" ? navigator.onLine : true
   );
-  const [manualLowBw, setManualLowBwState] = useState(false);
+  const [supportModeOn, setSupportModeOn] = useState(false);
   const [connSlow, setConnSlow] = useState(false);
 
-  useEffect(() => {
-    setManualLowBwState(readManual());
+  const syncSupportFromStorage = useCallback(() => {
+    setSupportModeOn(readSupportModeFromStorage());
   }, []);
+
+  useEffect(() => {
+    syncSupportFromStorage();
+  }, [syncSupportFromStorage]);
 
   useEffect(() => {
     const onOnline = () => setIsOnline(true);
@@ -91,52 +89,46 @@ export function ResilienceProvider({ children }: { children: ReactNode }) {
     return () => c.removeEventListener?.("change", update);
   }, []);
 
-  const setManualLowBandwidth = useCallback((value: boolean) => {
-    setManualLowBwState(value);
-    try {
-      if (value) localStorage.setItem(STORAGE_MANUAL, "1");
-      else localStorage.removeItem(STORAGE_MANUAL);
-    } catch {
-      // ignore
-    }
-    window.dispatchEvent(new Event("kite-low-bandwidth"));
-  }, []);
-
   useEffect(() => {
-    const onStorage = () => setManualLowBwState(readManual());
-    window.addEventListener("kite-low-bandwidth", onStorage);
-    window.addEventListener("storage", onStorage);
+    const onSupport = () => syncSupportFromStorage();
+    window.addEventListener("kite-support-mode", onSupport);
+    window.addEventListener("storage", onSupport);
     return () => {
-      window.removeEventListener("kite-low-bandwidth", onStorage);
-      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("kite-support-mode", onSupport);
+      window.removeEventListener("storage", onSupport);
     };
+  }, [syncSupportFromStorage]);
+
+  const setManualLowBandwidth = useCallback((_value: boolean) => {
+    // Deprecated: data saver consolidated into Support Mode in chat.
   }, []);
 
-  const isLowBandwidthMode = manualLowBw || connSlow;
-  const manualLowBandwidth = manualLowBw;
+  const isLowBandwidthMode = supportModeOn;
+  const manualLowBandwidth = false;
 
   const networkQuality: NetworkQuality = useMemo(() => {
     if (!isOnline) return "offline";
-    if (isLowBandwidthMode) return "slow";
+    if (supportModeOn || connSlow) return "slow";
     return "good";
-  }, [isOnline, isLowBandwidthMode]);
+  }, [isOnline, supportModeOn, connSlow]);
 
-  const isLowSignal = isOnline && (connSlow || manualLowBw);
+  const isLowSignal = isOnline && (connSlow || supportModeOn);
 
   const value = useMemo(
     () => ({
       isOnline,
       networkQuality,
       isLowBandwidthMode,
-      manualLowBandwidth,
+      isSupportModeEnabled: supportModeOn,
       setManualLowBandwidth,
+      manualLowBandwidth,
       isLowSignal,
     }),
     [
       isOnline,
       networkQuality,
       isLowBandwidthMode,
-      manualLowBandwidth,
+      supportModeOn,
       setManualLowBandwidth,
       isLowSignal,
     ]
@@ -154,8 +146,9 @@ export function useResilience(): ResilienceContextValue {
       isOnline: true,
       networkQuality: "good",
       isLowBandwidthMode: false,
-      manualLowBandwidth: false,
+      isSupportModeEnabled: false,
       setManualLowBandwidth: () => {},
+      manualLowBandwidth: false,
       isLowSignal: false,
     };
   }

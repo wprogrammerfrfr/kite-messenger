@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Check, Clock } from "lucide-react";
 import { t, type Language } from "@/lib/translations";
 import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
+import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
 
 type Role = "musician" | "therapist" | "responder" | null;
 
@@ -414,17 +415,6 @@ export function UserDiscoverySidebar(props: {
     });
   }, [activeRecipientId]);
 
-  const formatLastSeenMinutes = (iso?: string | null) => {
-    if (!iso) return null;
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return null;
-    const mins = Math.floor((Date.now() - d.getTime()) / 60000);
-    const safeMins = Math.max(0, mins);
-    return safeMins <= 1
-      ? `Last seen 1 minute ago`
-      : `Last seen ${safeMins} minutes ago`;
-  };
-
   const handleDiscoverSendRequest = async () => {
     if (!discoverResult || discoverRequestBusy) return;
     setDiscoverRequestBusy(true);
@@ -444,7 +434,7 @@ export function UserDiscoverySidebar(props: {
     const isActive = p.id === activeRecipientId;
     const isMe = p.id === sessionUserId;
     const isOnline = Boolean(onlineUserIds[p.id]);
-    const lastSeenText = formatLastSeenMinutes(p.lastSeen);
+    const lastSeenText = formatRelativeLastSeen(p.lastSeen, language);
     const unreadCount = unreadBySender[p.id] ?? 0;
     const busy = actionBusy === p.id;
     const displayName =
@@ -664,8 +654,8 @@ export function UserDiscoverySidebar(props: {
                     <span className="h-2 w-2 rounded-full bg-emerald-500" />
                     Online
                   </span>
-                ) : formatLastSeenMinutes(discoverResult.lastSeen) ? (
-                  formatLastSeenMinutes(discoverResult.lastSeen)
+                ) : formatRelativeLastSeen(discoverResult.lastSeen, language) ? (
+                  formatRelativeLastSeen(discoverResult.lastSeen, language)
                 ) : (
                   "Offline"
                 )}

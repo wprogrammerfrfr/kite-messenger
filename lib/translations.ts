@@ -139,7 +139,15 @@ type TranslationKey =
   | "safetyProfileEmergencySection"
   | "safetyProfileOpenProfileAria"
   | "chatHeaderConversationWith"
-  | "safetyProfileOfflineNoCache";
+  | "safetyProfileOfflineNoCache"
+  | "relativeLastSeenJustNow"
+  | "relativeLastSeenOneMinute"
+  | "relativeLastSeenMinutes"
+  | "relativeLastSeenOneHour"
+  | "relativeLastSeenHours"
+  | "relativeLastSeenOneDay"
+  | "relativeLastSeenDays"
+  | "settingsSupportModeDataHint";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -320,6 +328,15 @@ export const translations: Record<Language, TranslationRecord> = {
     chatHeaderConversationWith: "Conversation with",
     safetyProfileOfflineNoCache:
       "Connect to the internet once to load this emergency contact. Saved details appear here when you’re offline.",
+    relativeLastSeenJustNow: "Just now",
+    relativeLastSeenOneMinute: "1 minute ago",
+    relativeLastSeenMinutes: "{{n}} minutes ago",
+    relativeLastSeenOneHour: "1 hour ago",
+    relativeLastSeenHours: "{{n}} hours ago",
+    relativeLastSeenOneDay: "1 day ago",
+    relativeLastSeenDays: "{{n}} days ago",
+    settingsSupportModeDataHint:
+      "Turn on Support Mode in the chat sidebar (orange toggle) to save data: no avatars, lighter motion, and less background sync.",
   },
   fa: {
     wipeConfirm:
@@ -497,6 +514,15 @@ export const translations: Record<Language, TranslationRecord> = {
     chatHeaderConversationWith: "گفتگو با",
     safetyProfileOfflineNoCache:
       "برای بارگذاری شماره اضطراری یک‌بار آنلاین شوید. پس از آن، نسخه ذخیره‌شده آفلاین هم نمایش داده می‌شود.",
+    relativeLastSeenJustNow: "همین الان",
+    relativeLastSeenOneMinute: "۱ دقیقه پیش",
+    relativeLastSeenMinutes: "{{n}} دقیقه پیش",
+    relativeLastSeenOneHour: "۱ ساعت پیش",
+    relativeLastSeenHours: "{{n}} ساعت پیش",
+    relativeLastSeenOneDay: "۱ روز پیش",
+    relativeLastSeenDays: "{{n}} روز پیش",
+    settingsSupportModeDataHint:
+      "برای صرفه‌جویی در داده، حالت پشتیبانی را در نوار کناری چت (کلید نارنجی) روشن کنید: بدون آواتار، حرکت سبک‌تر و همگام‌سازی کمتر.",
   },
   ar: {
     wipeConfirm:
@@ -674,6 +700,15 @@ export const translations: Record<Language, TranslationRecord> = {
     chatHeaderConversationWith: "محادثة مع",
     safetyProfileOfflineNoCache:
       "اتصل بالإنترنت مرة واحدة لتحميل جهة الطوارئ. تُعرض النسخة المحفوظة عند عدم الاتصال.",
+    relativeLastSeenJustNow: "الآن",
+    relativeLastSeenOneMinute: "منذ دقيقة",
+    relativeLastSeenMinutes: "منذ {{n}} دقيقة",
+    relativeLastSeenOneHour: "منذ ساعة",
+    relativeLastSeenHours: "منذ {{n}} ساعة",
+    relativeLastSeenOneDay: "منذ يوم",
+    relativeLastSeenDays: "منذ {{n}} يوم",
+    settingsSupportModeDataHint:
+      "فعّل وضع الدعم في الشريط الجانبي للدردشة (مفتاح برتقالي) لتوفير البيانات: دون صور رمزية، حركة أخف، ومزامنة أقل.",
   },
 };
 
