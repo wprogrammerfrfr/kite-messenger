@@ -1,7 +1,12 @@
 "use client";
 
 import { supabase } from "@/lib/supabase";
-import { dmPairKey } from "@/lib/dm-connections";
+import {
+  createPendingDmRequest,
+  dmPairKey,
+  fetchDmConnectionForPair,
+  type DmConnectionStatus,
+} from "@/lib/dm-connections";
 import { useCallback, useEffect, useState } from "react";
 import { t, type Language } from "@/lib/translations";
 
@@ -33,6 +38,8 @@ export function UserDiscoverySidebar(props: {
   onlineUserIds?: Record<string, boolean>;
   /** Increment from parent after sending a message to refresh inbox/requests. */
   refreshNonce?: number;
+  /** After creating a pending DM from Discover search (before opening chat). */
+  onDmRequestCreated?: () => void;
 }) {
   const {
     sessionUserId,
@@ -41,6 +48,7 @@ export function UserDiscoverySidebar(props: {
     language = "en",
     onlineUserIds = {},
     refreshNonce = 0,
+    onDmRequestCreated,
   } = props;
 
   const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
@@ -56,6 +64,29 @@ export function UserDiscoverySidebar(props: {
   const [discoverHasSearched, setDiscoverHasSearched] = useState(false);
   const [discoverLoading, setDiscoverLoading] = useState(false);
   const [discoverResult, setDiscoverResult] = useState<ProfileRow | null>(null);
+  /** idle | loading | null (no row) | row */
+  const [discoverDm, setDiscoverDm] = useState<
+    "idle" | "loading" | null | { status: DmConnectionStatus; initiated_by: string }
+  >("idle");
+  const [discoverRequestBusy, setDiscoverRequestBusy] = useState(false);
+  const [discoverRequestError, setDiscoverRequestError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!discoverResult) {
+      setDiscoverDm("idle");
+      setDiscoverRequestError(null);
+      return;
+    }
+    let cancelled = false;
+    setDiscoverDm("loading");
+    void fetchDmConnectionForPair(supabase, sessionUserId, discoverResult.id).then((row) => {
+      if (cancelled) return;
+      setDiscoverDm(row ?? null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [discoverResult, sessionUserId]);
 
   const loadPrivacyLists = useCallback(async () => {
     setLoading(true);
@@ -369,29 +400,37 @@ export function UserDiscoverySidebar(props: {
       : `Last seen ${safeMins} minutes ago`;
   };
 
+  const handleDiscoverSendRequest = async () => {
+    if (!discoverResult || discoverRequestBusy) return;
+    setDiscoverRequestBusy(true);
+    setDiscoverRequestError(null);
+    const r = await createPendingDmRequest(supabase, sessionUserId, discoverResult.id);
+    setDiscoverRequestBusy(false);
+    if (!r.ok) {
+      setDiscoverRequestError(r.errorMessage ?? "Request failed");
+      return;
+    }
+    setDiscoverDm({ status: "pending", initiated_by: sessionUserId });
+    onDmRequestCreated?.();
+    onSelectRecipientId(discoverResult.id);
+  };
+
   const renderUserRow = (p: ProfileRow, opts: { showRequestActions?: boolean }) => {
     const isActive = p.id === activeRecipientId;
     const isMe = p.id === sessionUserId;
     const isOnline = Boolean(onlineUserIds[p.id]);
     const lastSeenText = formatLastSeenMinutes(p.lastSeen);
     const unreadCount = unreadBySender[p.id] ?? 0;
-    const roleLabel =
-      p.role === "musician"
-        ? t(language, "roleMusician")
-        : p.role === "therapist"
-          ? t(language, "roleTherapist")
-          : p.role === "responder"
-            ? t(language, "roleResponder")
-            : t(language, "roleUnknown");
     const busy = actionBusy === p.id;
 
     return (
       <div
         key={p.id}
-        className="w-full rounded-lg border border-transparent px-2 py-2"
+        className="w-full rounded-lg px-2 py-2 transition-colors"
         style={{
-          background: isActive ? "var(--panel-bg)" : "transparent",
-          borderColor: isActive ? "var(--border)" : "transparent",
+          background: isActive ? "rgba(255, 69, 0, 0.14)" : "transparent",
+          border: isActive ? "2px solid #FF4500" : "1px solid transparent",
+          boxShadow: isActive ? "0 0 0 1px rgba(255, 69, 0, 0.25)" : undefined,
         }}
       >
         <button
@@ -409,9 +448,6 @@ export function UserDiscoverySidebar(props: {
                     {t(language, "youLabel")}
                   </span>
                 )}
-              </p>
-              <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                {roleLabel}
               </p>
               <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
                 {isOnline ? (
@@ -505,11 +541,9 @@ export function UserDiscoverySidebar(props: {
               }
             }}
             placeholder={t(language, "discoverExactSearchPlaceholder")}
-            className="min-w-0 flex-1 rounded-xl border px-3 py-2 text-sm outline-none transition-[border-color,box-shadow] focus:border-[#FF4500] focus:ring-1 focus:ring-[#FF4500]"
+            className="min-w-0 flex-1 rounded-xl border border-[rgba(255,69,0,0.35)] bg-stone-50 px-3 py-2 text-sm text-stone-900 outline-none transition-[border-color,box-shadow] focus:border-[#FF4500] focus:ring-1 focus:ring-[#FF4500] dark:bg-[var(--input-bg)] dark:text-[var(--text-primary)]"
             style={{
-              background: "#000000",
               borderColor: "rgba(255, 69, 0, 0.35)",
-              color: "var(--text-primary)",
             }}
             aria-label={t(language, "discoverExactSearchPlaceholder")}
           />
@@ -534,8 +568,68 @@ export function UserDiscoverySidebar(props: {
               {t(language, "sidebarDiscoverEmptyHint")}
             </p>
           ) : discoverResult ? (
-            <div className="rounded-lg border pt-1" style={{ borderColor: "rgba(255, 69, 0, 0.25)" }}>
-              {renderUserRow(discoverResult, { showRequestActions: false })}
+            <div
+              className="rounded-lg border p-3"
+              style={{ borderColor: "rgba(255, 69, 0, 0.35)", background: "rgba(255, 69, 0, 0.04)" }}
+            >
+              <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                {(discoverResult.nickname && discoverResult.nickname.trim()) ||
+                  t(language, "anonymousLabel")}
+              </p>
+              <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                {Boolean(onlineUserIds[discoverResult.id]) ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                    Online
+                  </span>
+                ) : formatLastSeenMinutes(discoverResult.lastSeen) ? (
+                  formatLastSeenMinutes(discoverResult.lastSeen)
+                ) : (
+                  "Offline"
+                )}
+              </p>
+              {discoverDm === "loading" ? (
+                <p className="mt-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+                  {t(language, "loadingUsers")}
+                </p>
+              ) : null}
+              {discoverRequestError ? (
+                <p className="mt-2 text-xs text-red-500" role="alert">
+                  {discoverRequestError}
+                </p>
+              ) : null}
+              <div className="mt-3 flex flex-col gap-2">
+                {discoverDm !== "loading" &&
+                discoverDm !== "idle" &&
+                (discoverDm === null || discoverDm.status === "declined") ? (
+                  <button
+                    type="button"
+                    disabled={discoverRequestBusy}
+                    onClick={() => void handleDiscoverSendRequest()}
+                    className="w-full rounded-lg px-3 py-2.5 text-xs font-semibold text-black transition disabled:opacity-50"
+                    style={{ background: "#FF4500" }}
+                  >
+                    {discoverRequestBusy ? t(language, "sendingButton") : t(language, "sendDmRequestButton")}
+                  </button>
+                ) : null}
+                {discoverDm !== "loading" &&
+                discoverDm !== "idle" &&
+                discoverDm != null &&
+                (discoverDm.status === "accepted" || discoverDm.status === "pending") ? (
+                  <button
+                    type="button"
+                    onClick={() => onSelectRecipientId(discoverResult.id)}
+                    className="w-full rounded-lg border px-3 py-2.5 text-xs font-semibold transition hover:opacity-90"
+                    style={{
+                      borderColor: "#FF4500",
+                      color: "var(--text-primary)",
+                      background: "transparent",
+                    }}
+                  >
+                    {t(language, "openChatButton")}
+                  </button>
+                ) : null}
+              </div>
             </div>
           ) : (
             <p className="px-0.5 text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>

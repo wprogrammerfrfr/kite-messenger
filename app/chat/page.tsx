@@ -81,6 +81,31 @@ const SUPPORT_THEME: ThemeVars = {
   "--accent": "#FF4500",
 };
 
+/** Light appearance: off-white surfaces, dark grey text, Electric Orange accents. */
+const LIGHT_MUSICIAN_THEME: ThemeVars = {
+  "--page-bg": "#f5f5f4",
+  "--sidebar-bg": "rgba(250, 250, 249, 0.97)",
+  "--panel-bg": "#ffffff",
+  "--text-primary": "#1c1917",
+  "--text-secondary": "#57534e",
+  "--border": "rgba(255, 69, 0, 0.28)",
+  "--glow": "0 0 20px rgba(255, 69, 0, 0.12)",
+  "--input-bg": "#fafaf9",
+  "--accent": "#FF4500",
+};
+
+const LIGHT_THERAPIST_THEME: ThemeVars = {
+  "--page-bg": "#f5f5f4",
+  "--sidebar-bg": "rgba(245, 245, 244, 0.98)",
+  "--panel-bg": "#ffffff",
+  "--text-primary": "#1a2a1a",
+  "--text-secondary": "#3f4f3f",
+  "--border": "rgba(100, 120, 95, 0.28)",
+  "--glow": "none",
+  "--input-bg": "#fafaf9",
+  "--accent": "#4a6348",
+};
+
 const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
 const KEY_MISMATCH_TEXT = "[Secure Message - Key Mismatch]";
 
@@ -121,6 +146,7 @@ export default function Home() {
   const [hasOwnKeyInDb, setHasOwnKeyInDb] = useState(false);
   const [hasRecipientKey, setHasRecipientKey] = useState(false);
   const [language, setLanguage] = useState<Language>("en");
+  const [appearance, setAppearance] = useState<"light" | "dark">("dark");
 
   // Presence: users currently connected to "online-users".
   const [onlineUserIds, setOnlineUserIds] = useState<Record<string, boolean>>({});
@@ -191,9 +217,23 @@ export default function Home() {
       if (storedLang === "fa" || storedLang === "ar" || storedLang === "en") {
         setLanguage(storedLang);
       }
+      setAppearance(localStorage.getItem("kite-appearance") === "light" ? "light" : "dark");
     } catch {
       // Ignore storage errors and fall back to default.
     }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onAppearance = () => {
+      try {
+        setAppearance(localStorage.getItem("kite-appearance") === "light" ? "light" : "dark");
+      } catch {
+        setAppearance("dark");
+      }
+    };
+    window.addEventListener("kite-appearance", onAppearance);
+    return () => window.removeEventListener("kite-appearance", onAppearance);
   }, []);
 
   // Keep <html dir> in sync with selected language and write cookie for SSR.
@@ -1409,6 +1449,16 @@ export default function Home() {
   const sidebarPos = isLtr ? "left-0" : "right-0";
   const sidebarBorder = isLtr ? "border-r" : "border-l";
 
+  const bodyTheme: ThemeVars = isSupportMode
+    ? SUPPORT_THEME
+    : professionalMode
+      ? appearance === "light"
+        ? LIGHT_THERAPIST_THEME
+        : THERAPIST_THEME
+      : appearance === "light"
+        ? LIGHT_MUSICIAN_THEME
+        : MUSICIAN_THEME;
+
   if (!session) {
     return <Auth />;
   }
@@ -1432,9 +1482,7 @@ export default function Home() {
         color: "var(--text-primary)",
       }}
       initial={false}
-      animate={themeToMotionStyle(
-        isSupportMode ? SUPPORT_THEME : professionalMode ? THERAPIST_THEME : MUSICIAN_THEME
-      )}
+      animate={themeToMotionStyle(bodyTheme)}
       transition={{ duration: 0.5, ease: "easeInOut" }}
     >
       {/* Mobile overlay backdrop */}
@@ -1459,24 +1507,19 @@ export default function Home() {
         }}
         initial={false}
         animate={{
-          background: isSupportMode
-            ? SUPPORT_THEME["--sidebar-bg"]
-            : professionalMode
-            ? THERAPIST_THEME["--sidebar-bg"]
-            : MUSICIAN_THEME["--sidebar-bg"],
-          borderColor: isSupportMode
-            ? SUPPORT_THEME["--border"]
-            : professionalMode
-            ? THERAPIST_THEME["--border"]
-            : MUSICIAN_THEME["--border"],
-          boxShadow: isSupportMode ? SUPPORT_THEME["--glow"] : MUSICIAN_THEME["--glow"],
+          background: bodyTheme["--sidebar-bg"],
+          borderColor: bodyTheme["--border"],
+          boxShadow: bodyTheme["--glow"],
         }}
         transition={{ duration: 0.5, ease: "easeInOut" }}
       >
         <div className="border-b p-4" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-full border-2 border-white/20">
+              <div
+                className="relative h-9 w-9 shrink-0 overflow-hidden rounded-full border-2"
+                style={{ borderColor: "var(--border)" }}
+              >
                 <Image
                   src={KITE_APP_ICON}
                   alt=""
@@ -1492,7 +1535,8 @@ export default function Home() {
             </div>
             <button
               type="button"
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/20 text-white/90 transition hover:bg-white/10 lg:hidden"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition hover:opacity-80 lg:hidden"
+              style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
               onClick={() => setMobileSidebarOpen(false)}
               aria-label="Close menu"
             >
@@ -1527,13 +1571,7 @@ export default function Home() {
               );
             })}
           </div>
-          <p className="mt-0.5 text-sm" style={{ color: "var(--text-secondary)" }}>
-            {isSupportMode
-              ? t(language, "modeSupportLabel")
-              : professionalMode
-              ? t(language, "modeTherapistLabel")
-              : t(language, "modeMusicianLabel")}
-          </p>
+          {/* Mode subtext (Musician / Therapist / Support) removed per product cleanup */}
         </div>
 
         <div className="flex-1 overflow-y-auto p-2">
@@ -1547,6 +1585,7 @@ export default function Home() {
             language={language}
             onlineUserIds={onlineUserIds}
             refreshNonce={sidebarRefreshNonce}
+            onDmRequestCreated={() => setSidebarRefreshNonce((n) => n + 1)}
           />
         </div>
 
@@ -1608,7 +1647,47 @@ export default function Home() {
 
       {/* Main chat area */}
       <main className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
-        {/* Header: hamburger + brand logo + title; actions */}
+        {session &&
+          !nickname &&
+          !nicknameBannerDismissed && (
+            <div
+              className="mx-3 mt-2 flex items-start gap-3 rounded-xl border px-3 py-2.5 sm:mx-4 sm:mt-3"
+              style={{
+                borderColor: "rgba(255, 69, 0, 0.45)",
+                background: "rgba(255, 69, 0, 0.08)",
+              }}
+              role="status"
+            >
+              <p className="min-w-0 flex-1 text-xs sm:text-sm" style={{ color: "var(--text-primary)" }}>
+                {t(language, "nicknameOnboardingBanner")}
+              </p>
+              <Link
+                href="/settings"
+                className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold text-black"
+                style={{ background: "#FF4500" }}
+              >
+                {t(language, "nicknameOnboardingCta")}
+              </Link>
+              <button
+                type="button"
+                className="shrink-0 rounded-lg p-1 text-lg leading-none opacity-70 hover:opacity-100"
+                style={{ color: "var(--text-primary)" }}
+                aria-label={t(language, "nicknameOnboardingDismiss")}
+                onClick={() => {
+                  try {
+                    localStorage.setItem("kite-nickname-banner-dismissed", "1");
+                  } catch {
+                    // ignore
+                  }
+                  setNicknameBannerDismissed(true);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
+
+        {/* Header: hamburger + brand + status badges */}
         <motion.header
           className="flex shrink-0 flex-col gap-2 border-b px-3 py-2 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-4 sm:py-3 lg:px-6"
           style={{
@@ -1618,9 +1697,9 @@ export default function Home() {
           }}
           initial={false}
           animate={{
-            background: professionalMode ? THERAPIST_THEME["--panel-bg"] : MUSICIAN_THEME["--panel-bg"],
-            borderColor: professionalMode ? THERAPIST_THEME["--border"] : MUSICIAN_THEME["--border"],
-            boxShadow: professionalMode ? "none" : MUSICIAN_THEME["--glow"],
+            background: bodyTheme["--panel-bg"],
+            borderColor: bodyTheme["--border"],
+            boxShadow: bodyTheme["--glow"] === "none" ? "none" : bodyTheme["--glow"],
           }}
           transition={{ duration: 0.5, ease: "easeInOut" }}
         >
@@ -1635,7 +1714,10 @@ export default function Home() {
               <Menu className="h-5 w-5" aria-hidden />
             </button>
             <div className="flex shrink-0 items-center gap-2">
-              <div className="relative h-8 w-8 shrink-0 overflow-hidden rounded-full border-2 border-white/20">
+              <div
+                className="relative h-8 w-8 shrink-0 overflow-hidden rounded-full border-2"
+                style={{ borderColor: "var(--border)" }}
+              >
                 <Image
                   src={KITE_APP_ICON}
                   alt=""
@@ -1649,12 +1731,6 @@ export default function Home() {
                 Kite
               </span>
             </div>
-            <h2
-              className="min-w-0 flex-1 truncate text-base font-medium sm:text-lg"
-              style={{ color: "var(--text-primary)" }}
-            >
-              {t(language, "chatTitle")}
-            </h2>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
             <AnimatePresence mode="wait">
@@ -1736,45 +1812,6 @@ export default function Home() {
             </button>
           </div>
         </motion.header>
-
-        {session &&
-          !nickname &&
-          !nicknameBannerDismissed && (
-            <div
-              className="mx-3 mt-2 flex items-start gap-3 rounded-xl border px-3 py-2.5 sm:mx-4"
-              style={{
-                borderColor: "rgba(255, 69, 0, 0.45)",
-                background: "rgba(0, 0, 0, 0.75)",
-              }}
-              role="status"
-            >
-              <p className="min-w-0 flex-1 text-xs sm:text-sm" style={{ color: "var(--text-primary)" }}>
-                {t(language, "nicknameOnboardingBanner")}
-              </p>
-              <Link
-                href="/settings"
-                className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold text-black"
-                style={{ background: "#FF4500" }}
-              >
-                {t(language, "nicknameOnboardingCta")}
-              </Link>
-              <button
-                type="button"
-                className="shrink-0 rounded-lg p-1 text-lg leading-none text-white/70 hover:text-white"
-                aria-label={t(language, "nicknameOnboardingDismiss")}
-                onClick={() => {
-                  try {
-                    localStorage.setItem("kite-nickname-banner-dismissed", "1");
-                  } catch {
-                    // ignore
-                  }
-                  setNicknameBannerDismissed(true);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          )}
 
         {session && activeRecipientId && isRecipientMessageRequest && (
           <div
@@ -1867,8 +1904,10 @@ export default function Home() {
                           ? isSupportMode
                             ? "#fff"
                             : professionalMode
-                            ? "#fff"
-                            : "rgba(12, 10, 18, 0.9)"
+                              ? "#fff"
+                              : appearance === "light"
+                                ? "#000000"
+                                : "rgba(12, 10, 18, 0.9)"
                           : "var(--text-primary)",
                       border: "1px solid var(--border)",
                     }}
@@ -2014,7 +2053,12 @@ export default function Home() {
                   className="rounded-xl px-4 py-2 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{
                     background: "var(--accent)",
-                    color: isSupportMode || professionalMode ? "#fff" : "rgba(12, 10, 18, 0.9)",
+                    color:
+                    isSupportMode || professionalMode
+                      ? "#fff"
+                      : appearance === "light"
+                        ? "#000000"
+                        : "rgba(12, 10, 18, 0.9)",
                   }}
                 >
                   {sending ? t(language, "sendingButton") : t(language, "sendButton")}

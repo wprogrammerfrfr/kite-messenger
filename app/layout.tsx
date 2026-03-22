@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { cookies } from "next/headers";
+import { ThemeProvider } from "@/components/theme-provider";
 
 const siteTitle = "Kite | Secure Messaging";
 const siteDescription =
@@ -52,8 +53,15 @@ export default function RootLayout({
   const isRtl = lang === "fa" || lang === "ar";
 
   return (
-    <html lang={lang} dir={isRtl ? "rtl" : "ltr"}>
-      <body>{children}</body>
+    <html
+      lang={lang}
+      dir={isRtl ? "rtl" : "ltr"}
+      className="dark"
+      suppressHydrationWarning
+    >
+      <body className="bg-stone-50 text-stone-900 dark:bg-black dark:text-white">
+        <ThemeProvider>{children}</ThemeProvider>
+      </body>
     </html>
   );
 }

@@ -100,7 +100,12 @@ type TranslationKey =
   | "messageRequestComposerLocked"
   | "messageSenderPendingNote"
   | "threadDeclinedNote"
-  | "sidebarNewRequestBadge";
+  | "sidebarNewRequestBadge"
+  | "sendDmRequestButton"
+  | "openChatButton"
+  | "settingsThemeLight"
+  | "settingsThemeDark"
+  | "settingsAppearanceLabel";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -212,7 +217,7 @@ export const translations: Record<Language, TranslationRecord> = {
     messageRequestAccept: "Accept",
     messageRequestDecline: "Decline",
     nicknameOnboardingBanner:
-      "Complete your profile: Head to Settings to set your nickname so friends can find you.",
+      "Welcome! 🪁 Click the gear icon (Settings) to set your nickname so your friends can find you.",
     nicknameOnboardingCta: "Settings",
     nicknameOnboardingDismiss: "Dismiss",
     discoverExactSearchPlaceholder: "Exact nickname or email",
@@ -230,6 +235,11 @@ export const translations: Record<Language, TranslationRecord> = {
       "Message sent. Waiting for {{nickname}} to accept your request.",
     threadDeclinedNote: "This conversation was declined. You cannot send messages here.",
     sidebarNewRequestBadge: "New",
+    sendDmRequestButton: "Send message request",
+    openChatButton: "Open chat",
+    settingsThemeLight: "Light",
+    settingsThemeDark: "Dark",
+    settingsAppearanceLabel: "Appearance",
   },
   fa: {
     wipeConfirm:
@@ -337,7 +347,7 @@ export const translations: Record<Language, TranslationRecord> = {
     messageRequestAccept: "پذیرفتن",
     messageRequestDecline: "رد کردن",
     nicknameOnboardingBanner:
-      "پروفایل را تکمیل کنید: به تنظیمات بروید و نام مستعار بگذارید تا دوستان شما را پیدا کنند.",
+      "خوش آمدید! 🪁 روی آیکون چرخ‌دنده (تنظیمات) بزنید و نام مستعار بگذارید تا دوستان شما را پیدا کنند.",
     nicknameOnboardingCta: "تنظیمات",
     nicknameOnboardingDismiss: "بستن",
     discoverExactSearchPlaceholder: "نام مستعار یا ایمیل دقیق",
@@ -355,6 +365,11 @@ export const translations: Record<Language, TranslationRecord> = {
       "پیام ارسال شد. در انتظار پذیرش توسط {{nickname}}.",
     threadDeclinedNote: "این گفتگو رد شده است. نمی‌توانید پیام بفرستید.",
     sidebarNewRequestBadge: "جدید",
+    sendDmRequestButton: "ارسال درخواست پیام",
+    openChatButton: "باز کردن گفتگو",
+    settingsThemeLight: "روشن",
+    settingsThemeDark: "تاریک",
+    settingsAppearanceLabel: "ظاهر",
   },
   ar: {
     wipeConfirm:
@@ -462,7 +477,7 @@ export const translations: Record<Language, TranslationRecord> = {
     messageRequestAccept: "قبول",
     messageRequestDecline: "رفض",
     nicknameOnboardingBanner:
-      "أكمل ملفك: انتقل إلى الإعدادات لتعيين اسمك المستعار حتى يتمكن أصدقاؤك من العثور عليك.",
+      "مرحبًا! 🪁 اضغط أيقونة الترس (الإعدادات) لتعيين اسمك المستعار حتى يجدك أصدقاؤك.",
     nicknameOnboardingCta: "الإعدادات",
     nicknameOnboardingDismiss: "إغلاق",
     discoverExactSearchPlaceholder: "الاسم المستعار أو البريد بالضبط",
@@ -480,6 +495,11 @@ export const translations: Record<Language, TranslationRecord> = {
       "تم إرسال الرسالة. في انتظار قبول {{nickname}} لطلبك.",
     threadDeclinedNote: "تم رفض هذه المحادثة. لا يمكنك إرسال رسائل هنا.",
     sidebarNewRequestBadge: "جديد",
+    sendDmRequestButton: "إرسال طلب رسالة",
+    openChatButton: "فتح الدردشة",
+    settingsThemeLight: "فاتح",
+    settingsThemeDark: "داكن",
+    settingsAppearanceLabel: "المظهر",
   },
 };
 

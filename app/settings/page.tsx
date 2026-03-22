@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 import Link from "next/link";
+import { Sun, Moon } from "lucide-react";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
+import { getStoredAppearance, setAppearanceMode } from "@/components/theme-provider";
+import { t, type Language } from "@/lib/translations";
 
 type Role = "musician" | "therapist" | "responder";
 
@@ -37,6 +40,17 @@ const THERAPIST_THEME = {
   inputBg: "rgba(255, 255, 255, 0.98)",
 };
 
+/** Light mode shell for settings (matches chat light musician palette). */
+const LIGHT_SETTINGS_THEME = {
+  pageBg: "#f5f5f4",
+  panelBg: "#ffffff",
+  border: "rgba(255, 69, 0, 0.28)",
+  accent: "#FF4500",
+  textPrimary: "#1c1917",
+  textSecondary: "#57534e",
+  inputBg: "#fafaf9",
+};
+
 export default function SettingsPage() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -52,8 +66,17 @@ export default function SettingsPage() {
   const [role, setRole] = useState<Role>("musician");
 
   const [vibe, setVibe] = useState<Role>("musician");
+  const [appearance, setAppearance] = useState<"light" | "dark">("dark");
+  const [uiLang, setUiLang] = useState<Language>("en");
 
-  const theme = vibe === "therapist" ? THERAPIST_THEME : MUSICIAN_THEME;
+  const theme =
+    appearance === "light"
+      ? vibe === "therapist"
+        ? THERAPIST_THEME
+        : LIGHT_SETTINGS_THEME
+      : vibe === "therapist"
+        ? THERAPIST_THEME
+        : MUSICIAN_THEME;
 
   // Load current vibe from localStorage so this page matches the chat UI.
   useEffect(() => {
@@ -64,6 +87,11 @@ export default function SettingsPage() {
         setVibe("therapist");
       } else if (stored === "musician") {
         setVibe("musician");
+      }
+      setAppearance(getStoredAppearance());
+      const lng = localStorage.getItem("nexus-lang");
+      if (lng === "en" || lng === "fa" || lng === "ar") {
+        setUiLang(lng);
       }
     } catch {
       // Ignore storage errors and keep default.
@@ -265,7 +293,7 @@ export default function SettingsPage() {
           borderColor: theme.border,
         }}
       >
-        <div className="flex items-center justify-between gap-3 mb-6">
+        <div className="flex flex-col gap-4 mb-6 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">
               Settings
@@ -278,17 +306,60 @@ export default function SettingsPage() {
             </p>
           </div>
 
-          <Link
-            href="/chat"
-            className="inline-flex items-center rounded-xl px-3 py-2 text-xs sm:text-sm font-medium border transition-colors"
-            style={{
-              borderColor: theme.border,
-              color: theme.textPrimary,
-              background: "transparent",
-            }}
-          >
-            ← Back to Chat
-          </Link>
+          <div className="flex flex-wrap items-center gap-3">
+            <div
+              className="flex items-center gap-2 rounded-xl border px-2 py-1.5"
+              style={{ borderColor: theme.border }}
+            >
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wide"
+                style={{ color: theme.textSecondary }}
+              >
+                {t(uiLang, "settingsAppearanceLabel")}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = appearance === "dark" ? "light" : "dark";
+                  setAppearance(next);
+                  setAppearanceMode(next);
+                }}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg transition hover:opacity-90"
+                style={{
+                  background: theme.accent,
+                  color: appearance === "dark" ? "#fff" : "#000",
+                }}
+                title={
+                  appearance === "dark"
+                    ? t(uiLang, "settingsThemeLight")
+                    : t(uiLang, "settingsThemeDark")
+                }
+                aria-label={
+                  appearance === "dark"
+                    ? t(uiLang, "settingsThemeLight")
+                    : t(uiLang, "settingsThemeDark")
+                }
+              >
+                {appearance === "dark" ? (
+                  <Sun className="h-4 w-4" aria-hidden />
+                ) : (
+                  <Moon className="h-4 w-4" aria-hidden />
+                )}
+              </button>
+            </div>
+
+            <Link
+              href="/chat"
+              className="inline-flex items-center rounded-xl px-3 py-2 text-xs sm:text-sm font-medium border transition-colors"
+              style={{
+                borderColor: theme.border,
+                color: theme.textPrimary,
+                background: "transparent",
+              }}
+            >
+              ← Back to Chat
+            </Link>
+          </div>
         </div>
 
         {loading ? (

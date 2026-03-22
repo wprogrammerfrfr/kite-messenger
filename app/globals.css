@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Light (html without .dark): used by pages that rely on Tailwind only */
+html:not(.dark) {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
 /* Support Mode dictator overrides (black + safety orange). */
 [data-theme="support"] {
   --page-bg: #000000 !important;
