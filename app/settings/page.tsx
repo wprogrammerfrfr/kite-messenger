@@ -15,6 +15,7 @@ type Role = "musician" | "therapist" | "responder";
 interface Profile {
   nickname: string | null;
   emergency_contact: string | null;
+  preferred_locale: string | null;
   role: Role | null;
   profile_picture_url: string | null;
 }
@@ -124,7 +125,9 @@ export default function SettingsPage() {
         const userId = sessionData.session.user.id;
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("nickname, emergency_contact, role, profile_picture_url")
+          .select(
+            "nickname, emergency_contact, preferred_locale, role, profile_picture_url"
+          )
           .eq("id", userId)
           .maybeSingle();
 
@@ -138,6 +141,13 @@ export default function SettingsPage() {
           setNickname(typedProfile.nickname ?? "");
           setEmergencyContact(typedProfile.emergency_contact ?? "");
           setProfilePictureUrl(typedProfile.profile_picture_url ?? "");
+          if (
+            typedProfile.preferred_locale === "en" ||
+            typedProfile.preferred_locale === "fa" ||
+            typedProfile.preferred_locale === "ar"
+          ) {
+            setUiLang(typedProfile.preferred_locale);
+          }
           if (
             typedProfile.role === "therapist" ||
             typedProfile.role === "musician" ||
@@ -207,6 +217,7 @@ export default function SettingsPage() {
           id: session.user.id,
           nickname: trimmedNickname || null,
           emergency_contact: emergencyContact.trim() || null,
+          preferred_locale: uiLang,
           profile_picture_url: profilePictureUrl.trim() || null,
           role,
         },
@@ -439,21 +450,35 @@ export default function SettingsPage() {
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium uppercase tracking-[0.18em]">
-                Emergency Contact
+              <label
+                htmlFor="emergency-contact-number"
+                className="text-xs font-medium uppercase tracking-[0.18em]"
+              >
+                {t(uiLang, "settingsEmergencyNumberLabel")}
               </label>
               <input
-                type="text"
+                id="emergency-contact-number"
+                type="tel"
+                inputMode="tel"
+                autoComplete="tel"
                 value={emergencyContact}
                 onChange={(e) => setEmergencyContact(e.target.value)}
-                placeholder="Phone, email, or contact details"
+                placeholder="+1 555 0100"
                 className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
                 style={{
                   background: theme.inputBg,
                   borderColor: theme.border,
                   color: theme.textPrimary,
                 }}
+                aria-describedby="emergency-contact-hint"
               />
+              <p
+                id="emergency-contact-hint"
+                className="text-xs leading-relaxed"
+                style={{ color: theme.textSecondary }}
+              >
+                {t(uiLang, "settingsEmergencyNumberSubtext")}
+              </p>
             </div>
 
             <div className="space-y-1.5">

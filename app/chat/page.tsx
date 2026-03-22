@@ -15,6 +15,10 @@ import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 import { Auth } from "@/components/Auth";
 import { UserDiscoverySidebar } from "@/components/UserDiscoverySidebar";
+import {
+  SafetyProfileModal,
+  type SafetyProfileOpenPayload,
+} from "@/components/SafetyProfileModal";
 import { ModeController } from "@/components/ModeController";
 import {
   acceptDmConnection,
@@ -209,6 +213,17 @@ export default function Home() {
     initiatedBy: string | null;
   }>({ status: null, initiatedBy: null });
   const [activeRecipientNickname, setActiveRecipientNickname] = useState<string | null>(null);
+  const [activeRecipientMeta, setActiveRecipientMeta] = useState<{
+    role: string | null;
+    preferred_locale: string | null;
+    lastSeen: string | null;
+  } | null>(null);
+  const [myProfileBadges, setMyProfileBadges] = useState<{
+    role: string | null;
+    preferred_locale: string | null;
+  }>({ role: null, preferred_locale: null });
+  const [safetyProfilePayload, setSafetyProfilePayload] =
+    useState<SafetyProfileOpenPayload | null>(null);
   const [dmActionBusy, setDmActionBusy] = useState(false);
 
   const dmThreadRef = useRef(dmThread);
@@ -427,7 +442,7 @@ export default function Home() {
     const loadProfile = async () => {
       const { data, error } = await supabase
         .from("profiles")
-        .select("nickname")
+        .select("nickname, role, preferred_locale")
         .eq("id", session.user.id)
         .maybeSingle();
 
@@ -435,6 +450,7 @@ export default function Home() {
 
       if (error || !data) {
         setNickname(null);
+        setMyProfileBadges({ role: null, preferred_locale: null });
         return;
       }
 
@@ -443,6 +459,15 @@ export default function Home() {
           ? data.nickname
           : null
       );
+      setMyProfileBadges({
+        role: typeof data.role === "string" ? data.role : null,
+        preferred_locale:
+          data.preferred_locale === "en" ||
+          data.preferred_locale === "fa" ||
+          data.preferred_locale === "ar"
+            ? data.preferred_locale
+            : null,
+      });
     };
 
     loadProfile();
@@ -464,6 +489,7 @@ export default function Home() {
     if (!session || !activeRecipientId) {
       setDmThread({ status: null, initiatedBy: null });
       setActiveRecipientNickname(null);
+      setActiveRecipientMeta(null);
       return;
     }
 
@@ -481,15 +507,35 @@ export default function Home() {
 
       if (other === me) {
         setActiveRecipientNickname(nickname?.trim() ? nickname.trim() : null);
+        setActiveRecipientMeta(null);
         return;
       }
-      const { data } = await supabase.from("profiles").select("nickname").eq("id", other).maybeSingle();
+      const { data } = await supabase
+        .from("profiles")
+        .select("nickname, role, preferred_locale, last_seen")
+        .eq("id", other)
+        .maybeSingle();
       if (cancelled) return;
       const nn =
         typeof data?.nickname === "string" && data.nickname.trim().length > 0
           ? data.nickname.trim()
           : null;
       setActiveRecipientNickname(nn);
+      setActiveRecipientMeta(
+        data
+          ? {
+              role: typeof data.role === "string" ? data.role : null,
+              preferred_locale:
+                data.preferred_locale === "en" ||
+                data.preferred_locale === "fa" ||
+                data.preferred_locale === "ar"
+                  ? data.preferred_locale
+                  : null,
+              lastSeen:
+                typeof data.last_seen === "string" ? data.last_seen : null,
+            }
+          : null
+      );
     })();
 
     return () => {
@@ -1485,6 +1531,42 @@ export default function Home() {
     (activeRecipientId === session?.user.id && nickname?.trim() ? nickname.trim() : null) ||
     t(language, "anonymousLabel");
 
+  const handleOpenSafetyProfile = useCallback(
+    (payload: SafetyProfileOpenPayload) => {
+      setSafetyProfilePayload(payload);
+    },
+    []
+  );
+
+  const openActiveRecipientProfile = useCallback(() => {
+    if (!session?.user?.id || !activeRecipientId) return;
+    const isSelf = activeRecipientId === session.user.id;
+    handleOpenSafetyProfile({
+      target: {
+        id: activeRecipientId,
+        nickname: recipientDisplayName,
+        role: isSelf ? myProfileBadges.role : activeRecipientMeta?.role ?? null,
+        preferred_locale: isSelf
+          ? myProfileBadges.preferred_locale
+          : activeRecipientMeta?.preferred_locale ?? null,
+        isOnline: Boolean(onlineUserIds[activeRecipientId]),
+        lastSeen: isSelf ? null : activeRecipientMeta?.lastSeen ?? null,
+      },
+      dmStatus: isSelf ? "accepted" : dmThread.status,
+      isSelf,
+    });
+  }, [
+    session?.user?.id,
+    activeRecipientId,
+    recipientDisplayName,
+    myProfileBadges.role,
+    myProfileBadges.preferred_locale,
+    activeRecipientMeta,
+    onlineUserIds,
+    dmThread.status,
+    handleOpenSafetyProfile,
+  ]);
+
   const isRecipientMessageRequest =
     !!session &&
     !!activeRecipientId &&
@@ -1727,6 +1809,7 @@ export default function Home() {
             refreshNonce={sidebarRefreshNonce}
             onDmRequestCreated={() => setSidebarRefreshNonce((n) => n + 1)}
             lowBandwidth={isLowBandwidthMode}
+            onOpenSafetyProfile={handleOpenSafetyProfile}
           />
         </div>
 
@@ -1969,6 +2052,40 @@ export default function Home() {
             </button>
           </div>
         </motion.header>
+
+        {session && activeRecipientId ? (
+          <div
+            className="shrink-0 border-b px-3 py-2 sm:px-4 lg:px-6"
+            style={{
+              borderColor: "var(--border)",
+              background:
+                appearance === "light"
+                  ? "rgb(245 245 244)"
+                  : "rgba(12, 10, 18, 0.92)",
+            }}
+          >
+            <button
+              type="button"
+              onClick={openActiveRecipientProfile}
+              className="flex w-full min-h-[48px] items-center gap-2 rounded-xl border px-3 py-2.5 text-left transition hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+              style={{ borderColor: "var(--border)" }}
+              aria-label={`${t(language, "safetyProfileOpenProfileAria")}: ${recipientDisplayName}`}
+            >
+              <span
+                className="shrink-0 text-[10px] font-bold uppercase tracking-wider sm:text-xs"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                {t(language, "chatHeaderConversationWith")}
+              </span>
+              <span
+                className="min-w-0 flex-1 truncate text-base font-semibold sm:text-lg"
+                style={{ color: "var(--text-primary)" }}
+              >
+                {recipientDisplayName}
+              </span>
+            </button>
+          </div>
+        ) : null}
 
         {session && activeRecipientId && isRecipientMessageRequest && (
           <div
@@ -2252,6 +2369,23 @@ export default function Home() {
           ) : null}
         </div>
       </main>
+
+      {safetyProfilePayload ? (
+        <SafetyProfileModal
+          open
+          onClose={() => setSafetyProfilePayload(null)}
+          language={language}
+          appearance={appearance}
+          viewerId={session.user.id}
+          target={safetyProfilePayload.target}
+          dmStatus={
+            safetyProfilePayload.isSelf
+              ? "accepted"
+              : safetyProfilePayload.dmStatus
+          }
+          isSelf={safetyProfilePayload.isSelf}
+        />
+      ) : null}
     </motion.div>
     </MotionConfig>
   );

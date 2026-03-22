@@ -116,7 +116,30 @@ type TranslationKey =
   | "settingsDataSaverHint"
   | "settingsDataSaverAutoActive"
   | "authOfflineHint"
-  | "imageSkippedLowBandwidth";
+  | "imageSkippedLowBandwidth"
+  | "settingsEmergencyNumberLabel"
+  | "settingsEmergencyNumberSubtext"
+  | "safetyProfileClose"
+  | "safetyProfileBadgeOnline"
+  | "safetyProfileBadgeOffline"
+  | "safetyProfileBadgeLanguage"
+  | "safetyProfileLastSeenOneMin"
+  | "safetyProfileLastSeenMins"
+  | "safetyProfileNotAcceptedPending"
+  | "safetyProfileNotAcceptedDeclined"
+  | "safetyProfileNotAcceptedHint"
+  | "safetyProfileSelfHint"
+  | "safetyProfileCallEmergency"
+  | "safetyProfileCopyNumber"
+  | "safetyProfileCopied"
+  | "safetyProfileNoEmergency"
+  | "safetyProfileLoading"
+  | "safetyProfileCachedHint"
+  | "safetyProfileNonPhoneHint"
+  | "safetyProfileEmergencySection"
+  | "safetyProfileOpenProfileAria"
+  | "chatHeaderConversationWith"
+  | "safetyProfileOfflineNoCache";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -265,6 +288,38 @@ export const translations: Record<Language, TranslationRecord> = {
     authOfflineHint:
       "You appear offline. If you were signed in before, open Chat once you’re back online — your session is kept on this device.",
     imageSkippedLowBandwidth: "Image hidden to save data. Open when connection is better.",
+    settingsEmergencyNumberLabel: "Emergency contact number",
+    settingsEmergencyNumberSubtext:
+      "This number is private. It only appears to users who have accepted your message request.",
+    safetyProfileClose: "Close profile",
+    safetyProfileBadgeOnline: "Online",
+    safetyProfileBadgeOffline: "Offline",
+    safetyProfileBadgeLanguage: "Language",
+    safetyProfileLastSeenOneMin: "Last seen 1 minute ago",
+    safetyProfileLastSeenMins: "Last seen {{mins}} minutes ago",
+    safetyProfileNotAcceptedPending:
+      "Emergency contact is only visible after this person accepts your message request.",
+    safetyProfileNotAcceptedDeclined:
+      "You can’t view an emergency contact for a declined conversation.",
+    safetyProfileNotAcceptedHint:
+      "Emergency contact is only visible for accepted conversations.",
+    safetyProfileSelfHint:
+      "Manage your emergency contact number in Settings. It is shared only with people you’ve accepted.",
+    safetyProfileCallEmergency: "Call emergency contact",
+    safetyProfileCopyNumber: "Copy number",
+    safetyProfileCopied: "Copied to clipboard",
+    safetyProfileNoEmergency:
+      "{{nickname}} hasn’t set an emergency contact number yet.",
+    safetyProfileLoading: "Loading…",
+    safetyProfileCachedHint:
+      "Showing saved details from when you were last online.",
+    safetyProfileNonPhoneHint:
+      "This contact isn’t a phone number. Use copy to share it.",
+    safetyProfileEmergencySection: "Emergency",
+    safetyProfileOpenProfileAria: "Open safety profile",
+    chatHeaderConversationWith: "Conversation with",
+    safetyProfileOfflineNoCache:
+      "Connect to the internet once to load this emergency contact. Saved details appear here when you’re offline.",
   },
   fa: {
     wipeConfirm:
@@ -410,6 +465,38 @@ export const translations: Record<Language, TranslationRecord> = {
       "به نظر آفلاین هستید. اگر قبلاً وارد شده‌اید، پس از برقراری اینترنت Chat را باز کنید — نشست روی این دستگاه نگه داشته می‌شود.",
     imageSkippedLowBandwidth:
       "تصویر برای صرفه‌جویی در داده پنهان است. با اینترنت بهتر باز کنید.",
+    settingsEmergencyNumberLabel: "شماره تماس اضطراری",
+    settingsEmergencyNumberSubtext:
+      "این شماره خصوصی است. فقط برای کسانی که درخواست پیام شما را پذیرفته‌اند نمایش داده می‌شود.",
+    safetyProfileClose: "بستن پروفایل",
+    safetyProfileBadgeOnline: "آنلاین",
+    safetyProfileBadgeOffline: "آفلاین",
+    safetyProfileBadgeLanguage: "زبان",
+    safetyProfileLastSeenOneMin: "آخرین بازدید: ۱ دقیقه پیش",
+    safetyProfileLastSeenMins: "آخرین بازدید: {{mins}} دقیقه پیش",
+    safetyProfileNotAcceptedPending:
+      "شماره اضطراری فقط پس از پذیرش درخواست پیام توسط این فرد دیده می‌شود.",
+    safetyProfileNotAcceptedDeclined:
+      "برای گفتگوی ردشده نمی‌توان شماره اضطراری را دید.",
+    safetyProfileNotAcceptedHint:
+      "شماره اضطراری فقط برای گفتگوهای پذیرفته‌شده نمایش داده می‌شود.",
+    safetyProfileSelfHint:
+      "شماره تماس اضطراری را در تنظیمات مدیریت کنید. فقط برای کسانی که پذیرفته‌اید نشان داده می‌شود.",
+    safetyProfileCallEmergency: "تماس با مخاطب اضطراری",
+    safetyProfileCopyNumber: "کپی شماره",
+    safetyProfileCopied: "در کلیپ‌بورد کپی شد",
+    safetyProfileNoEmergency:
+      "{{nickname}} هنوز شماره تماس اضطراری ثبت نکرده است.",
+    safetyProfileLoading: "در حال بارگذاری…",
+    safetyProfileCachedHint:
+      "اطلاعات ذخیره‌شده از آخرین بار آنلاین بودن نمایش داده می‌شود.",
+    safetyProfileNonPhoneHint:
+      "این مورد شماره تلفن نیست. برای اشتراک از کپی استفاده کنید.",
+    safetyProfileEmergencySection: "اضطراری",
+    safetyProfileOpenProfileAria: "باز کردن پروفایل ایمنی",
+    chatHeaderConversationWith: "گفتگو با",
+    safetyProfileOfflineNoCache:
+      "برای بارگذاری شماره اضطراری یک‌بار آنلاین شوید. پس از آن، نسخه ذخیره‌شده آفلاین هم نمایش داده می‌شود.",
   },
   ar: {
     wipeConfirm:
@@ -555,6 +642,38 @@ export const translations: Record<Language, TranslationRecord> = {
       "يبدو أنك غير متصل. إن كنت قد سجّلت الدخول من قبل، افتح الدردشة عند عودة الشبكة — الجلسة تبقى على هذا الجهاز.",
     imageSkippedLowBandwidth:
       "الصورة مخفية لتوفير البيانات. افتحها عند تحسن الاتصال.",
+    settingsEmergencyNumberLabel: "رقم جهة اتصال للطوارئ",
+    settingsEmergencyNumberSubtext:
+      "هذا الرقم خاص. يظهر فقط للمستخدمين الذين قبلوا طلب رسالتك.",
+    safetyProfileClose: "إغلاق الملف",
+    safetyProfileBadgeOnline: "متصل",
+    safetyProfileBadgeOffline: "غير متصل",
+    safetyProfileBadgeLanguage: "اللغة",
+    safetyProfileLastSeenOneMin: "آخر ظهور منذ دقيقة",
+    safetyProfileLastSeenMins: "آخر ظهور منذ {{mins}} دقيقة",
+    safetyProfileNotAcceptedPending:
+      "رقم الطوارئ يظهر فقط بعد أن يقبل هذا الشخص طلب الرسالة.",
+    safetyProfileNotAcceptedDeclined:
+      "لا يمكن عرض جهة اتصال الطوارئ لمحادثة مرفوضة.",
+    safetyProfileNotAcceptedHint:
+      "رقم الطوارئ يظهر فقط للمحادثات المقبولة.",
+    safetyProfileSelfHint:
+      "أدر رقم الطوارئ من الإعدادات. يُشارك فقط مع من قبلتهم.",
+    safetyProfileCallEmergency: "اتصال بجهة الطوارئ",
+    safetyProfileCopyNumber: "نسخ الرقم",
+    safetyProfileCopied: "تم النسخ",
+    safetyProfileNoEmergency:
+      "لم يضف {{nickname}} رقم طوارئ بعد.",
+    safetyProfileLoading: "جارٍ التحميل…",
+    safetyProfileCachedHint:
+      "عرض بيانات محفوظة من آخر اتصال.",
+    safetyProfileNonPhoneHint:
+      "هذا ليس رقم هاتف. استخدم النسخ للمشاركة.",
+    safetyProfileEmergencySection: "الطوارئ",
+    safetyProfileOpenProfileAria: "فتح ملف الأمان",
+    chatHeaderConversationWith: "محادثة مع",
+    safetyProfileOfflineNoCache:
+      "اتصل بالإنترنت مرة واحدة لتحميل جهة الطوارئ. تُعرض النسخة المحفوظة عند عدم الاتصال.",
   },
 };
 

@@ -10,6 +10,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { Check, Clock } from "lucide-react";
 import { t, type Language } from "@/lib/translations";
+import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
 
 type Role = "musician" | "therapist" | "responder" | null;
 
@@ -18,6 +19,7 @@ type ProfileRow = {
   nickname: string | null;
   role: Role;
   lastSeen?: string | null;
+  preferred_locale?: string | null;
 };
 
 type DmConnectionRow = {
@@ -43,6 +45,8 @@ export function UserDiscoverySidebar(props: {
   onDmRequestCreated?: () => void;
   /** Skip pulse animations (low-bandwidth / data saver). */
   lowBandwidth?: boolean;
+  /** Safety profile modal (nickname / discover name). */
+  onOpenSafetyProfile?: (payload: SafetyProfileOpenPayload) => void;
 }) {
   const {
     sessionUserId,
@@ -53,9 +57,13 @@ export function UserDiscoverySidebar(props: {
     refreshNonce = 0,
     onDmRequestCreated,
     lowBandwidth = false,
+    onOpenSafetyProfile,
   } = props;
 
   const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
+  const [dmStatusByPartnerId, setDmStatusByPartnerId] = useState<
+    Record<string, DmConnectionStatus | null>
+  >({});
   const [inboxIds, setInboxIds] = useState<string[]>([]);
   const [requestIds, setRequestIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -183,17 +191,30 @@ export function UserDiscoverySidebar(props: {
       const requestSorted = Array.from(requests).sort((a, b) => a.localeCompare(b));
 
       const allIds = Array.from(new Set([...inboxSorted, ...requestSorted]));
+
       if (allIds.length === 0) {
         setProfilesById({});
         setInboxIds([me]);
         setRequestIds([]);
+        setDmStatusByPartnerId({ [me]: "accepted" });
         setLoading(false);
         return;
       }
 
+      const statusMap: Record<string, DmConnectionStatus | null> = {};
+      for (const id of allIds) {
+        if (id === me) {
+          statusMap[id] = "accepted";
+          continue;
+        }
+        const c = connByPartner.get(id);
+        statusMap[id] = c ? c.status : null;
+      }
+      setDmStatusByPartnerId(statusMap);
+
       const { data: profRows, error: profErr } = await supabase
         .from("profiles")
-        .select("id, nickname, role, lastSeen:last_seen")
+        .select("id, nickname, role, lastSeen:last_seen, preferred_locale")
         .in("id", allIds);
 
       if (profErr) throw profErr;
@@ -262,7 +283,7 @@ export function UserDiscoverySidebar(props: {
     try {
       const { data: byNick } = await supabase
         .from("profiles")
-        .select("id, nickname, role, lastSeen:last_seen")
+        .select("id, nickname, role, lastSeen:last_seen, preferred_locale")
         .eq("nickname", q)
         .neq("id", me)
         .maybeSingle();
@@ -272,7 +293,7 @@ export function UserDiscoverySidebar(props: {
       if (!found && q.includes("@")) {
         const { data: byEmail, error: emailErr } = await supabase
           .from("profiles")
-          .select("id, nickname, role, lastSeen:last_seen")
+          .select("id, nickname, role, lastSeen:last_seen, preferred_locale")
           .eq("email", q)
           .neq("id", me)
           .maybeSingle();
@@ -426,6 +447,24 @@ export function UserDiscoverySidebar(props: {
     const lastSeenText = formatLastSeenMinutes(p.lastSeen);
     const unreadCount = unreadBySender[p.id] ?? 0;
     const busy = actionBusy === p.id;
+    const displayName =
+      (p.nickname && p.nickname.trim()) || t(language, "anonymousLabel");
+    const partnerDmStatus = dmStatusByPartnerId[p.id] ?? null;
+
+    const openSafetyProfile = () => {
+      onOpenSafetyProfile?.({
+        target: {
+          id: p.id,
+          nickname: displayName,
+          role: p.role,
+          preferred_locale: p.preferred_locale ?? null,
+          isOnline,
+          lastSeen: p.lastSeen ?? null,
+        },
+        dmStatus: isMe ? "accepted" : partnerDmStatus,
+        isSelf: isMe,
+      });
+    };
 
     return (
       <div
@@ -437,65 +476,72 @@ export function UserDiscoverySidebar(props: {
           boxShadow: isActive ? "0 0 0 1px rgba(255, 69, 0, 0.25)" : undefined,
         }}
       >
-        <button
-          type="button"
-          onClick={() => onSelectRecipientId(p.id)}
-          className="w-full rounded-lg px-2 py-1.5 text-left text-sm transition-colors"
-          style={{ color: "var(--text-primary)" }}
-        >
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="truncate font-medium">
-                {(p.nickname && p.nickname.trim()) || t(language, "anonymousLabel")}
-                {isMe && (
-                  <span className="ml-2 text-xs" style={{ color: "var(--text-secondary)" }}>
-                    {t(language, "youLabel")}
-                  </span>
-                )}
-              </p>
-              <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                {isOnline ? (
-                  <span className="inline-flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                    Online
-                  </span>
-                ) : lastSeenText ? (
-                  lastSeenText
-                ) : (
-                  "Offline"
-                )}
-              </p>
+        <div className="flex items-start justify-between gap-2 px-2 py-1.5 text-sm">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="min-w-0 truncate text-left font-medium underline-offset-2 hover:underline"
+                style={{ color: "var(--text-primary)" }}
+                onClick={openSafetyProfile}
+                aria-label={`${t(language, "safetyProfileOpenProfileAria")}: ${displayName}`}
+              >
+                {displayName}
+              </button>
+              {isMe ? (
+                <span className="shrink-0 text-xs" style={{ color: "var(--text-secondary)" }}>
+                  {t(language, "youLabel")}
+                </span>
+              ) : null}
             </div>
-            <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-              {isActive ? (
-                t(language, "activeLabel")
-              ) : unreadCount > 0 ? (
-                unreadCount === 1 ? (
-                  <span
-                    className={`inline-flex h-2.5 w-2.5 rounded-full ${
-                      lowBandwidth ? "" : "animate-pulse"
-                    }`}
-                    style={{ background: "#FF4500" }}
-                    aria-label="New messages"
-                  />
-                ) : (
-                  <span
-                    className="inline-flex min-w-5 items-center justify-center rounded-full px-1 py-0.5 text-[10px] font-bold"
-                    style={{
-                      background: "#FF4500",
-                      color: "#000000",
-                    }}
-                    aria-label={`${unreadCount} new messages`}
-                  >
-                    {unreadCount}
-                  </span>
-                )
+            <button
+              type="button"
+              className="mt-1 w-full max-w-full rounded-md py-1 text-left text-[11px] transition hover:opacity-90"
+              style={{ color: "var(--text-secondary)" }}
+              onClick={() => onSelectRecipientId(p.id)}
+              aria-label={`${t(language, "openChatButton")} ${displayName}`}
+            >
+              {isOnline ? (
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  Online
+                </span>
+              ) : lastSeenText ? (
+                lastSeenText
               ) : (
-                ""
+                "Offline"
               )}
-            </span>
+            </button>
           </div>
-        </button>
+          <span className="shrink-0 self-start pt-0.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+            {isActive ? (
+              t(language, "activeLabel")
+            ) : unreadCount > 0 ? (
+              unreadCount === 1 ? (
+                <span
+                  className={`inline-flex h-2.5 w-2.5 rounded-full ${
+                    lowBandwidth ? "" : "animate-pulse"
+                  }`}
+                  style={{ background: "#FF4500" }}
+                  aria-label="New messages"
+                />
+              ) : (
+                <span
+                  className="inline-flex min-w-5 items-center justify-center rounded-full px-1 py-0.5 text-[10px] font-bold"
+                  style={{
+                    background: "#FF4500",
+                    color: "#000000",
+                  }}
+                  aria-label={`${unreadCount} new messages`}
+                >
+                  {unreadCount}
+                </span>
+              )
+            ) : (
+              ""
+            )}
+          </span>
+        </div>
         {opts.showRequestActions && !isMe && (
           <div className="mt-2 flex gap-2 px-2 pb-1">
             <button
@@ -578,10 +624,40 @@ export function UserDiscoverySidebar(props: {
               className="rounded-lg border p-3 bg-stone-100/90 dark:bg-[rgba(255,69,0,0.06)]"
               style={{ borderColor: "var(--border)" }}
             >
-              <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+              <button
+                type="button"
+                className="w-full truncate text-left text-sm font-medium underline-offset-2 hover:underline"
+                style={{ color: "var(--text-primary)" }}
+                onClick={() => {
+                  if (!onOpenSafetyProfile) return;
+                  const dName =
+                    (discoverResult.nickname && discoverResult.nickname.trim()) ||
+                    t(language, "anonymousLabel");
+                  const dms: DmConnectionStatus | null =
+                    discoverDm === "idle" || discoverDm === "loading" || discoverDm === null
+                      ? null
+                      : discoverDm.status;
+                  onOpenSafetyProfile({
+                    target: {
+                      id: discoverResult.id,
+                      nickname: dName,
+                      role: discoverResult.role,
+                      preferred_locale: discoverResult.preferred_locale ?? null,
+                      isOnline: Boolean(onlineUserIds[discoverResult.id]),
+                      lastSeen: discoverResult.lastSeen ?? null,
+                    },
+                    dmStatus: dms,
+                    isSelf: false,
+                  });
+                }}
+                aria-label={`${t(language, "safetyProfileOpenProfileAria")}: ${
+                  (discoverResult.nickname && discoverResult.nickname.trim()) ||
+                  t(language, "anonymousLabel")
+                }`}
+              >
                 {(discoverResult.nickname && discoverResult.nickname.trim()) ||
                   t(language, "anonymousLabel")}
-              </p>
+              </button>
               <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
                 {Boolean(onlineUserIds[discoverResult.id]) ? (
                   <span className="inline-flex items-center gap-2">
