@@ -43,6 +43,7 @@ import {
   readSupportModeFromStorage,
   writeSupportModeToStorage,
 } from "@/lib/support-mode-storage";
+import { LanguageDropdown } from "@/components/LanguageDropdown";
 
 /** Brand icon: `public/kite-mobile-icon.png` */
 const KITE_APP_ICON = "/kite-mobile-icon.png";
@@ -1726,6 +1727,14 @@ export default function Home() {
   }
 
   const motionDuration = isLowBandwidthMode ? 0 : 0.5;
+  const handleLanguageChange = (lang: Language) => {
+    setLanguage(lang);
+    try {
+      localStorage.setItem("nexus-lang", lang);
+    } catch {
+      // ignore
+    }
+  };
 
   return (
     <MotionConfig reducedMotion={isLowBandwidthMode ? "always" : "user"}>
@@ -1792,42 +1801,8 @@ export default function Home() {
               <X className="h-5 w-5" aria-hidden />
             </button>
           </div>
-          <div className="mt-2 flex gap-2">
-            {(["en", "kr", "tr", "fa", "ar"] as Language[]).map((lang) => {
-              const isActive = language === lang;
-              const label =
-                lang === "en"
-                  ? "EN"
-                  : lang === "kr"
-                    ? "KO"
-                    : lang === "tr"
-                      ? "TR"
-                      : lang === "fa"
-                        ? "FA"
-                        : "AR";
-              return (
-                <button
-                  key={lang}
-                  type="button"
-                  onClick={() => {
-                    setLanguage(lang);
-                    try {
-                      localStorage.setItem("nexus-lang", lang);
-                    } catch {
-                      // ignore
-                    }
-                  }}
-                  className="inline-flex items-center justify-center rounded-full border px-2 py-1 text-[11px] font-medium transition-colors"
-                  style={{
-                    borderColor: isActive ? "#FF4500" : "var(--border)",
-                    background: isActive ? "#FF4500" : "transparent",
-                    color: isActive ? "#000000" : "var(--text-primary)",
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
+          <div className="mt-2 flex items-center justify-end">
+            <LanguageDropdown value={language} onChange={handleLanguageChange} compact />
           </div>
           {/* Mode subtext (Musician / Therapist / Support) removed per product cleanup */}
         </div>

@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { t, type Language } from "@/lib/translations";
 import { InstallKiteButton } from "@/components/InstallKiteButton";
+import { LanguageDropdown } from "@/components/LanguageDropdown";
 
 /** App icon file: `public/kite-mobile-icon.png` → URL `/kite-mobile-icon.png` */
 const KITE_APP_ICON = "/kite-mobile-icon.png";
@@ -65,17 +66,14 @@ export default function WelcomePage() {
     document.cookie = `nexus-lang=${language}; path=/; max-age=${60 * 60 * 24 * 365}`;
   }, [language]);
 
-  const languageButtons = useMemo(() => {
-    const langs: Language[] = ["en", "kr", "tr", "fa", "ar"];
-    const labels: Record<Language, string> = {
-      en: "EN",
-      kr: "KO",
-      tr: "TR",
-      fa: "FA",
-      ar: "AR",
-    };
-    return langs.map((lang) => ({ lang, label: labels[lang] }));
-  }, []);
+  const handleLanguageChange = (lang: Language) => {
+    setLanguage(lang);
+    try {
+      localStorage.setItem("nexus-lang", lang);
+    } catch {
+      // Ignore localStorage failures
+    }
+  };
 
   const isRtl = language === "fa" || language === "ar";
 
@@ -116,39 +114,7 @@ export default function WelcomePage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            {languageButtons.map(({ lang, label }) => {
-              const isActive = language === lang;
-              return (
-                <button
-                  key={lang}
-                  type="button"
-                  onClick={() => {
-                    setLanguage(lang);
-                    try {
-                      localStorage.setItem("nexus-lang", lang);
-                    } catch {
-                      // Ignore localStorage failures
-                    }
-                  }}
-                  style={{
-                    border: `1px solid ${
-                      isActive ? ACCENT_ORANGE : "rgba(255,255,255,0.25)"
-                    }`,
-                    background: isActive ? ACCENT_ORANGE : "transparent",
-                    color: "#fff",
-                    padding: "6px 10px",
-                    borderRadius: 999,
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: "pointer",
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+          <LanguageDropdown value={language} onChange={handleLanguageChange} />
           <nav style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <Link
             href="/chat?mode=signup"
