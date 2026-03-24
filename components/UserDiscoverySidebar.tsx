@@ -12,6 +12,7 @@ import { Check, Clock } from "lucide-react";
 import { t, type Language } from "@/lib/translations";
 import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
 import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
+import { contactDisplayLabel } from "@/lib/contact-display";
 
 type Role = "musician" | "therapist" | "responder" | null;
 
@@ -48,6 +49,8 @@ export function UserDiscoverySidebar(props: {
   lowBandwidth?: boolean;
   /** Safety profile modal (nickname / discover name). */
   onOpenSafetyProfile?: (payload: SafetyProfileOpenPayload) => void;
+  /** Local display names for contacts (from `contact_aliases`). */
+  aliasByContactId?: Record<string, string>;
 }) {
   const {
     sessionUserId,
@@ -59,6 +62,7 @@ export function UserDiscoverySidebar(props: {
     onDmRequestCreated,
     lowBandwidth = false,
     onOpenSafetyProfile,
+    aliasByContactId = {},
   } = props;
 
   const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
@@ -437,15 +441,21 @@ export function UserDiscoverySidebar(props: {
     const lastSeenText = formatRelativeLastSeen(p.lastSeen, language);
     const unreadCount = unreadBySender[p.id] ?? 0;
     const busy = actionBusy === p.id;
-    const displayName =
-      (p.nickname && p.nickname.trim()) || t(language, "anonymousLabel");
+    const publicName = (p.nickname && p.nickname.trim()) || "";
+    const localAlias = aliasByContactId[p.id];
+    const displayName = contactDisplayLabel(
+      publicName,
+      localAlias,
+      t(language, "anonymousLabel")
+    );
     const partnerDmStatus = dmStatusByPartnerId[p.id] ?? null;
 
     const openSafetyProfile = () => {
       onOpenSafetyProfile?.({
         target: {
           id: p.id,
-          nickname: displayName,
+          nickname: publicName,
+          localAlias: localAlias ?? null,
           role: p.role,
           preferred_locale: p.preferred_locale ?? null,
           isOnline,
@@ -620,33 +630,37 @@ export function UserDiscoverySidebar(props: {
                 style={{ color: "var(--text-primary)" }}
                 onClick={() => {
                   if (!onOpenSafetyProfile) return;
-                  const dName =
-                    (discoverResult.nickname && discoverResult.nickname.trim()) ||
-                    t(language, "anonymousLabel");
-                  const dms: DmConnectionStatus | null =
+                  const dPublic =
+                    (discoverResult.nickname && discoverResult.nickname.trim()) || "";
+                  const dMs: DmConnectionStatus | null =
                     discoverDm === "idle" || discoverDm === "loading" || discoverDm === null
                       ? null
                       : discoverDm.status;
                   onOpenSafetyProfile({
                     target: {
                       id: discoverResult.id,
-                      nickname: dName,
+                      nickname: dPublic,
+                      localAlias: aliasByContactId[discoverResult.id] ?? null,
                       role: discoverResult.role,
                       preferred_locale: discoverResult.preferred_locale ?? null,
                       isOnline: Boolean(onlineUserIds[discoverResult.id]),
                       lastSeen: discoverResult.lastSeen ?? null,
                     },
-                    dmStatus: dms,
+                    dmStatus: dMs,
                     isSelf: false,
                   });
                 }}
-                aria-label={`${t(language, "safetyProfileOpenProfileAria")}: ${
-                  (discoverResult.nickname && discoverResult.nickname.trim()) ||
+                aria-label={`${t(language, "safetyProfileOpenProfileAria")}: ${contactDisplayLabel(
+                  discoverResult.nickname,
+                  aliasByContactId[discoverResult.id],
                   t(language, "anonymousLabel")
-                }`}
+                )}`}
               >
-                {(discoverResult.nickname && discoverResult.nickname.trim()) ||
-                  t(language, "anonymousLabel")}
+                {contactDisplayLabel(
+                  discoverResult.nickname,
+                  aliasByContactId[discoverResult.id],
+                  t(language, "anonymousLabel")
+                )}
               </button>
               <p className="mt-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
                 {Boolean(onlineUserIds[discoverResult.id]) ? (

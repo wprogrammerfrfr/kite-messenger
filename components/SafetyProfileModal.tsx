@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Copy, Check, Phone } from "lucide-react";
+import { X, Copy, Check, Phone, Pencil } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { t, type Language } from "@/lib/translations";
+import { contactDisplayLabel } from "@/lib/contact-display";
 import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
 import type { DmConnectionStatus } from "@/lib/dm-connections";
 import {
@@ -15,7 +16,10 @@ import {
 
 export type SafetyProfileTarget = {
   id: string;
+  /** Public profile nickname (may be empty). */
   nickname: string;
+  /** Private label only you see; overrides display of `nickname` in lists and headers. */
+  localAlias?: string | null;
   role: string | null;
   preferred_locale: string | null;
   isOnline: boolean;
@@ -40,6 +44,8 @@ type Props = {
   /** DM status with target; null if no row (treat as not accepted except self). */
   dmStatus: DmConnectionStatus | null;
   isSelf: boolean;
+  /** Called after saving or removing a local alias for a contact. */
+  onContactAliasUpdated?: (contactId: string, alias: string | null) => void;
 };
 
 function localeBadge(locale: string | null): string | null {
@@ -75,6 +81,7 @@ export function SafetyProfileModal({
   target,
   dmStatus,
   isSelf,
+  onContactAliasUpdated,
 }: Props) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -83,6 +90,10 @@ export function SafetyProfileModal({
   const [fromCache, setFromCache] = useState(false);
   const [offlineWithoutCache, setOfflineWithoutCache] = useState(false);
   const [copyDone, setCopyDone] = useState(false);
+  const [editingAlias, setEditingAlias] = useState(false);
+  const [aliasDraft, setAliasDraft] = useState("");
+  const [aliasSaving, setAliasSaving] = useState(false);
+  const [aliasError, setAliasError] = useState<string | null>(null);
 
   const loadProfile = useCallback(async () => {
     if (!target || isSelf) {
@@ -176,10 +187,20 @@ export function SafetyProfileModal({
     if (!open) {
       setCopyDone(false);
       setOfflineWithoutCache(false);
+      setEditingAlias(false);
+      setAliasDraft("");
+      setAliasError(null);
       return;
     }
     void loadProfile();
   }, [open, loadProfile]);
+
+  useEffect(() => {
+    if (!open || !target) return;
+    setAliasDraft((target.localAlias ?? "").trim());
+    setEditingAlias(false);
+    setAliasError(null);
+  }, [open, target?.id, target?.localAlias]);
 
   useEffect(() => {
     if (!open) return;
@@ -210,6 +231,49 @@ export function SafetyProfileModal({
   }, [emergencyContact]);
 
   if (!open || !target || typeof document === "undefined") return null;
+
+  const anonymousLabel = t(language, "anonymousLabel");
+  const publicForEmergency = target.nickname.trim() || anonymousLabel;
+  const profileHeadingName = contactDisplayLabel(
+    target.nickname,
+    target.localAlias,
+    anonymousLabel
+  );
+
+  const saveContactAlias = async () => {
+    if (isSelf) return;
+    setAliasSaving(true);
+    setAliasError(null);
+    const trimmed = aliasDraft.trim();
+    try {
+      if (!trimmed) {
+        const { error } = await supabase
+          .from("contact_aliases")
+          .delete()
+          .eq("user_id", viewerId)
+          .eq("contact_id", target.id);
+        if (error) throw error;
+        onContactAliasUpdated?.(target.id, null);
+      } else {
+        const { error } = await supabase.from("contact_aliases").upsert(
+          {
+            user_id: viewerId,
+            contact_id: target.id,
+            alias: trimmed,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "user_id,contact_id" }
+        );
+        if (error) throw error;
+        onContactAliasUpdated?.(target.id, trimmed);
+      }
+      setEditingAlias(false);
+    } catch {
+      setAliasError(t(language, "contactAliasSaveError"));
+    } finally {
+      setAliasSaving(false);
+    }
+  };
 
   const isLight = appearance === "light";
   const shell = isLight
@@ -263,7 +327,7 @@ export function SafetyProfileModal({
       <p className={`text-sm ${muted}`}>
         {t(language, "safetyProfileNoEmergency").replace(
           "{{nickname}}",
-          target.nickname || t(language, "anonymousLabel")
+          publicForEmergency
         )}
       </p>
     );
@@ -350,8 +414,16 @@ export function SafetyProfileModal({
               id={titleId}
               className="truncate text-xl font-semibold tracking-tight"
             >
-              {target.nickname || t(language, "anonymousLabel")}
+              {profileHeadingName}
             </h2>
+            {target.localAlias?.trim() ? (
+              <p className={`mt-1 text-xs ${muted}`}>
+                {t(language, "contactAliasPublicLine").replace(
+                  "{{name}}",
+                  target.nickname.trim() || anonymousLabel
+                )}
+              </p>
+            ) : null}
             <div className="mt-2 flex flex-wrap gap-2">
               {target.isOnline ? (
                 <span
@@ -394,6 +466,95 @@ export function SafetyProfileModal({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto border-t border-stone-300 pt-4 dark:border-stone-700">
+          {!isSelf ? (
+            <div className="mb-6">
+              <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-[#FF4500]">
+                {t(language, "contactAliasSectionTitle")}
+              </h3>
+              {!editingAlias ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAliasDraft((target.localAlias ?? "").trim());
+                    setEditingAlias(true);
+                    setAliasError(null);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-[#FF4500] px-3 py-2 text-sm font-semibold text-[#FF4500] transition hover:bg-[#FF4500]/10"
+                >
+                  <Pencil className="h-4 w-4" aria-hidden />
+                  {t(language, "contactAliasEditButton")}
+                </button>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  <input
+                    value={aliasDraft}
+                    onChange={(e) => setAliasDraft(e.target.value)}
+                    className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-[#FF4500] ${isLight ? "border-stone-300 bg-white text-stone-900" : "border-stone-600 bg-stone-950 text-stone-100"}`}
+                    placeholder={t(language, "contactAliasPlaceholder")}
+                    maxLength={80}
+                    autoComplete="off"
+                    aria-label={t(language, "contactAliasPlaceholder")}
+                  />
+                  {aliasError ? (
+                    <p className="text-xs text-red-500" role="alert">
+                      {aliasError}
+                    </p>
+                  ) : null}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={aliasSaving}
+                      onClick={() => void saveContactAlias()}
+                      className="rounded-lg px-4 py-2 text-sm font-bold text-black transition disabled:opacity-50"
+                      style={{ background: "#FF4500" }}
+                    >
+                      {aliasSaving ? t(language, "sendingButton") : t(language, "contactAliasSave")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={aliasSaving}
+                      onClick={() => {
+                        setEditingAlias(false);
+                        setAliasDraft((target.localAlias ?? "").trim());
+                        setAliasError(null);
+                      }}
+                      className={`rounded-lg border px-4 py-2 text-sm font-medium ${isLight ? "border-stone-300" : "border-stone-600"}`}
+                    >
+                      {t(language, "contactAliasCancel")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={aliasSaving || !(target.localAlias ?? "").trim()}
+                      onClick={() => {
+                        setAliasDraft("");
+                        void (async () => {
+                          setAliasSaving(true);
+                          setAliasError(null);
+                          try {
+                            const { error } = await supabase
+                              .from("contact_aliases")
+                              .delete()
+                              .eq("user_id", viewerId)
+                              .eq("contact_id", target.id);
+                            if (error) throw error;
+                            onContactAliasUpdated?.(target.id, null);
+                            setEditingAlias(false);
+                          } catch {
+                            setAliasError(t(language, "contactAliasSaveError"));
+                          } finally {
+                            setAliasSaving(false);
+                          }
+                        })();
+                      }}
+                      className="rounded-lg px-4 py-2 text-sm font-medium text-red-600 dark:text-red-400"
+                    >
+                      {t(language, "contactAliasRemove")}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : null}
           <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-[#FF4500]">
             {t(language, "safetyProfileEmergencySection")}
           </h3>

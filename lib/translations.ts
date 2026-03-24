@@ -151,7 +151,21 @@ type TranslationKey =
   | "welcomeMissionTitle"
   | "welcomeMissionBody1"
   | "welcomeMissionBody2"
-  | "installKiteForOffline";
+  | "installKiteForOffline"
+  | "emptyDashboardSearchHeading"
+  | "emptyDashboardSearchPlaceholder"
+  | "emptyDashboardSearchError"
+  | "emptyDashboardSelfCardTitle"
+  | "emptyDashboardViewMyProfile"
+  | "emptyDashboardSupportTitle"
+  | "contactAliasSectionTitle"
+  | "contactAliasEditButton"
+  | "contactAliasPlaceholder"
+  | "contactAliasSave"
+  | "contactAliasCancel"
+  | "contactAliasRemove"
+  | "contactAliasPublicLine"
+  | "contactAliasSaveError";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -346,6 +360,20 @@ const translationsEn: TranslationRecord = {
     welcomeMissionBody2:
       "The platform is engineered to be lightweight, end-to-end encrypted, and resilient. It is built for humanitarians, individuals in crisis zones, and users whose safety depends on a reliable, private, and low-data connection.",
     installKiteForOffline: "Install Kite for Offline Access",
+    emptyDashboardSearchHeading: "Find a user by nickname",
+    emptyDashboardSearchPlaceholder: "Exact nickname",
+    emptyDashboardSearchError: "Search failed. Try again.",
+    emptyDashboardSelfCardTitle: "Your profile",
+    emptyDashboardViewMyProfile: "View My Profile",
+    emptyDashboardSupportTitle: "Support Mode (Data Saver)",
+    contactAliasSectionTitle: "Your private name for this contact",
+    contactAliasEditButton: "Edit nickname",
+    contactAliasPlaceholder: "Name only you will see",
+    contactAliasSave: "Save",
+    contactAliasCancel: "Cancel",
+    contactAliasRemove: "Remove nickname",
+    contactAliasPublicLine: "Profile name: {{name}}",
+    contactAliasSaveError: "Could not save nickname.",
 };
 
 export const translations: Record<Language, TranslationRecord> = {
@@ -541,6 +569,20 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomeMissionBody2:
       "این پلتفرم سبک، رمزنگاری‌شدهٔ سرتاسری و بادوام است. برای فعالان بشردوستانه، افراد در بحران، و کاربرانی ساخته شده که امنیتشان به اتصالی قابل اعتماد، خصوصی و کم‌مصرف وابسته است.",
     installKiteForOffline: "نصب Kite برای دسترسی آفلاین",
+    emptyDashboardSearchHeading: "یافتن کاربر با نام مستعار",
+    emptyDashboardSearchPlaceholder: "نام مستعار دقیق",
+    emptyDashboardSearchError: "جستجو ناموفق بود. دوباره تلاش کنید.",
+    emptyDashboardSelfCardTitle: "پروفایل شما",
+    emptyDashboardViewMyProfile: "مشاهدهٔ پروفایل من",
+    emptyDashboardSupportTitle: "حالت پشتیبانی (صرفه‌جویی داده)",
+    contactAliasSectionTitle: "نام خصوصی شما برای این مخاطب",
+    contactAliasEditButton: "ویرایش نام مستعار",
+    contactAliasPlaceholder: "نامی که فقط شما می‌بینید",
+    contactAliasSave: "ذخیره",
+    contactAliasCancel: "لغو",
+    contactAliasRemove: "حذف نام مستعار",
+    contactAliasPublicLine: "نام نمایه: {{name}}",
+    contactAliasSaveError: "ذخیرهٔ نام مستعار انجام نشد.",
   },
   ar: {
     wipeConfirm:
@@ -733,6 +775,20 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomeMissionBody2:
       "جُهزت المنصة لتكون خفيفة، ومشفرة من الطرف إلى الطرف، وقادرة على الصمود. وهي موجهة للعاملين في المجال الإنساني، والأفراد في ظروف أزمة، والمستخدمين الذين تعتمد سلامتهم على اتصال موثوق وخاص ومنخفض استهلاك البيانات.",
     installKiteForOffline: "تثبيت Kite للوصول دون اتصال",
+    emptyDashboardSearchHeading: "البحث عن مستخدم بالاسم المستعار",
+    emptyDashboardSearchPlaceholder: "اسم مستعار مطابق تمامًا",
+    emptyDashboardSearchError: "فشل البحث. حاول مرة أخرى.",
+    emptyDashboardSelfCardTitle: "ملفك الشخصي",
+    emptyDashboardViewMyProfile: "عرض ملفي الشخصي",
+    emptyDashboardSupportTitle: "وضع الدعم (توفير البيانات)",
+    contactAliasSectionTitle: "اسمك الخاص لهذا الشخص",
+    contactAliasEditButton: "تعديل الاسم المستعار",
+    contactAliasPlaceholder: "اسم يظهر لك أنت فقط",
+    contactAliasSave: "حفظ",
+    contactAliasCancel: "إلغاء",
+    contactAliasRemove: "إزالة الاسم المستعار",
+    contactAliasPublicLine: "اسم الملف العام: {{name}}",
+    contactAliasSaveError: "تعذر حفظ الاسم المستعار.",
   },
   kr: {
     ...translationsEn,
@@ -742,6 +798,20 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomeMissionBody2:
       "플랫폼은 경량·종단간 암호화·회복력을 갖추도록 설계되었습니다. 인도주의 활동가, 위기 상황에 있는 개인, 그리고 신뢰할 수 있고 사적이며 데이터 소비가 적은 연결에 안전이 달린 이용자를 위해 만들어졌습니다.",
     installKiteForOffline: "오프라인 접속을 위해 Kite 설치",
+    emptyDashboardSearchHeading: "닉네임으로 사용자 찾기",
+    emptyDashboardSearchPlaceholder: "정확한 닉네임",
+    emptyDashboardSearchError: "검색에 실패했습니다. 다시 시도하세요.",
+    emptyDashboardSelfCardTitle: "내 프로필",
+    emptyDashboardViewMyProfile: "내 프로필 보기",
+    emptyDashboardSupportTitle: "지원 모드(데이터 절약)",
+    contactAliasSectionTitle: "이 연락처에 대한 내 전용 이름",
+    contactAliasEditButton: "닉네임 편집",
+    contactAliasPlaceholder: "나만 볼 수 있는 이름",
+    contactAliasSave: "저장",
+    contactAliasCancel: "취소",
+    contactAliasRemove: "닉네임 삭제",
+    contactAliasPublicLine: "프로필 이름: {{name}}",
+    contactAliasSaveError: "닉네임을 저장할 수 없습니다.",
   },
   tr: {
     ...translationsEn,
@@ -751,6 +821,20 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomeMissionBody2:
       "Platform hafif, uçtan uca şifreli ve dayanıklı olacak şekilde tasarlanmıştır. İnsani yardım çalışanları, kriz bölgelerindeki bireyler ve güvenliği güvenilir, özel ve düşük veri kullanan bir bağlantıya bağlı olan kullanıcılar için geliştirilmiştir.",
     installKiteForOffline: "Çevrimdışı erişim için Kite’yi yükleyin",
+    emptyDashboardSearchHeading: "Takma ada göre kullanıcı bul",
+    emptyDashboardSearchPlaceholder: "Tam takma ad",
+    emptyDashboardSearchError: "Arama başarısız. Tekrar deneyin.",
+    emptyDashboardSelfCardTitle: "Profiliniz",
+    emptyDashboardViewMyProfile: "Profilimi görüntüle",
+    emptyDashboardSupportTitle: "Destek modu (veri tasarrufu)",
+    contactAliasSectionTitle: "Bu kişi için sizin özel adınız",
+    contactAliasEditButton: "Takma adı düzenle",
+    contactAliasPlaceholder: "Yalnızca sizin göreceğiniz ad",
+    contactAliasSave: "Kaydet",
+    contactAliasCancel: "İptal",
+    contactAliasRemove: "Takma adı kaldır",
+    contactAliasPublicLine: "Profil adı: {{name}}",
+    contactAliasSaveError: "Takma ad kaydedilemedi.",
   },
 };
 

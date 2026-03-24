@@ -44,6 +44,8 @@ import {
   writeSupportModeToStorage,
 } from "@/lib/support-mode-storage";
 import { LanguageDropdown } from "@/components/LanguageDropdown";
+import { EmptyChatDashboard } from "@/components/EmptyChatDashboard";
+import { contactDisplayLabel } from "@/lib/contact-display";
 
 /** Brand icon: `public/kite-mobile-icon.png` */
 const KITE_APP_ICON = "/kite-mobile-icon.png";
@@ -240,6 +242,8 @@ export default function Home() {
   }>({ role: null, preferred_locale: null });
   const [safetyProfilePayload, setSafetyProfilePayload] =
     useState<SafetyProfileOpenPayload | null>(null);
+  /** Local-only labels for contacts (`contact_aliases`). */
+  const [contactAliases, setContactAliases] = useState<Record<string, string>>({});
   const [dmActionBusy, setDmActionBusy] = useState(false);
 
   const dmThreadRef = useRef(dmThread);
@@ -507,6 +511,29 @@ export default function Home() {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [session]);
+
+  const loadContactAliases = useCallback(async () => {
+    if (!session?.user?.id) return;
+    const { data, error } = await supabase
+      .from("contact_aliases")
+      .select("contact_id, alias")
+      .eq("user_id", session.user.id);
+    if (error) return;
+    const map: Record<string, string> = {};
+    for (const row of data ?? []) {
+      const id = (row as { contact_id?: string }).contact_id;
+      const a =
+        typeof (row as { alias?: string }).alias === "string"
+          ? (row as { alias: string }).alias.trim()
+          : "";
+      if (id && a) map[id] = a;
+    }
+    setContactAliases(map);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    void loadContactAliases();
+  }, [loadContactAliases]);
 
   // Active thread: dm_connections + recipient nickname (message request / pending sender UI).
   useEffect(() => {
@@ -1553,10 +1580,16 @@ export default function Home() {
 
   const trimmedInput = inputValue.trim();
 
-  const recipientDisplayName =
-    activeRecipientNickname?.trim() ||
-    (activeRecipientId === session?.user.id && nickname?.trim() ? nickname.trim() : null) ||
-    t(language, "anonymousLabel");
+  const recipientPublicNickname =
+    activeRecipientId === session?.user?.id
+      ? (nickname?.trim() ?? "")
+      : (activeRecipientNickname?.trim() ?? "");
+
+  const recipientDisplayName = contactDisplayLabel(
+    recipientPublicNickname,
+    activeRecipientId ? contactAliases[activeRecipientId] : undefined,
+    t(language, "anonymousLabel")
+  );
 
   const handleOpenSafetyProfile = useCallback(
     (payload: SafetyProfileOpenPayload) => {
@@ -1565,13 +1598,56 @@ export default function Home() {
     []
   );
 
+  const handleContactAliasUpdated = useCallback(
+    (contactId: string, alias: string | null) => {
+      setContactAliases((prev) => {
+        const next = { ...prev };
+        if (alias?.trim()) next[contactId] = alias.trim();
+        else delete next[contactId];
+        return next;
+      });
+      setSafetyProfilePayload((prev) => {
+        if (!prev || prev.target.id !== contactId) return prev;
+        return {
+          ...prev,
+          target: { ...prev.target, localAlias: alias },
+        };
+      });
+    },
+    []
+  );
+
+  const openMyProfile = useCallback(() => {
+    if (!session?.user?.id) return;
+    handleOpenSafetyProfile({
+      target: {
+        id: session.user.id,
+        nickname: nickname?.trim() ?? "",
+        localAlias: null,
+        role: myProfileBadges.role,
+        preferred_locale: myProfileBadges.preferred_locale,
+        isOnline: true,
+        lastSeen: null,
+      },
+      dmStatus: "accepted",
+      isSelf: true,
+    });
+  }, [
+    session?.user?.id,
+    nickname,
+    myProfileBadges.role,
+    myProfileBadges.preferred_locale,
+    handleOpenSafetyProfile,
+  ]);
+
   const openActiveRecipientProfile = useCallback(() => {
     if (!session?.user?.id || !activeRecipientId) return;
     const isSelf = activeRecipientId === session.user.id;
     handleOpenSafetyProfile({
       target: {
         id: activeRecipientId,
-        nickname: recipientDisplayName,
+        nickname: recipientPublicNickname,
+        localAlias: isSelf ? null : contactAliases[activeRecipientId] ?? null,
         role: isSelf ? myProfileBadges.role : activeRecipientMeta?.role ?? null,
         preferred_locale: isSelf
           ? myProfileBadges.preferred_locale
@@ -1585,7 +1661,8 @@ export default function Home() {
   }, [
     session?.user?.id,
     activeRecipientId,
-    recipientDisplayName,
+    recipientPublicNickname,
+    contactAliases,
     myProfileBadges.role,
     myProfileBadges.preferred_locale,
     activeRecipientMeta,
@@ -1821,6 +1898,7 @@ export default function Home() {
             onDmRequestCreated={() => setSidebarRefreshNonce((n) => n + 1)}
             lowBandwidth={isLowBandwidthMode}
             onOpenSafetyProfile={handleOpenSafetyProfile}
+            aliasByContactId={contactAliases}
           />
         </div>
 
@@ -2158,20 +2236,45 @@ export default function Home() {
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-6">
           <div className="mx-auto w-full max-w-full space-y-4 lg:max-w-2xl">
             {filteredMessages.length === 0 ? (
-              <div
-                className="rounded-2xl px-4 py-3 w-fit"
-                style={{
-                  background: "var(--panel-bg)",
-                  border: "1px solid var(--border)",
-                  boxShadow: professionalMode ? "none" : "var(--glow)",
-                }}
-              >
-                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-                  {activeRecipientId
-                    ? t(language, "noMessagesConversation")
-                    : t(language, "selectUserToStart")}
-                </p>
-              </div>
+              activeRecipientId ? (
+                <div
+                  className="rounded-2xl px-4 py-3 w-fit"
+                  style={{
+                    background: "var(--panel-bg)",
+                    border: "1px solid var(--border)",
+                    boxShadow: professionalMode ? "none" : "var(--glow)",
+                  }}
+                >
+                  <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                    {t(language, "noMessagesConversation")}
+                  </p>
+                </div>
+              ) : (
+                <EmptyChatDashboard
+                  language={language}
+                  sessionUserId={session.user.id}
+                  myNickname={nickname}
+                  isSupportMode={isSupportMode}
+                  onToggleSupport={() => {
+                    setIsSupportMode((prev) => {
+                      const next = !prev;
+                      if (next) {
+                        setProfessionalMode(false);
+                      }
+                      writeSupportModeToStorage(next);
+                      return next;
+                    });
+                  }}
+                  onViewMyProfile={openMyProfile}
+                  onSelectRecipient={(id) => {
+                    setActiveRecipientId(id);
+                    setMobileSidebarOpen(false);
+                  }}
+                  onOpenContactProfile={handleOpenSafetyProfile}
+                  onlineUserIds={onlineUserIds}
+                  aliasByContactId={contactAliases}
+                />
+              )
             ) : (
               filteredMessages.map((m) => (
                 <div
@@ -2396,6 +2499,7 @@ export default function Home() {
               : safetyProfilePayload.dmStatus
           }
           isSelf={safetyProfilePayload.isSelf}
+          onContactAliasUpdated={handleContactAliasUpdated}
         />
       ) : null}
     </motion.div>

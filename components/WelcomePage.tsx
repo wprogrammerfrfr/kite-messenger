@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 import { motion } from "framer-motion";
 import { t, type Language } from "@/lib/translations";
 import { InstallKiteButton } from "@/components/InstallKiteButton";
@@ -37,7 +39,24 @@ const circularLogoBase = {
 };
 
 export default function WelcomePage() {
+  const router = useRouter();
   const [language, setLanguage] = useState<Language>("en");
+  const [welcomeReady, setWelcomeReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void supabase.auth.getSession().then(({ data: { session } }) => {
+      if (cancelled) return;
+      if (session) {
+        router.replace("/chat");
+        return;
+      }
+      setWelcomeReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -76,6 +95,16 @@ export default function WelcomePage() {
   };
 
   const isRtl = language === "fa" || language === "ar";
+
+  if (!welcomeReady) {
+    return (
+      <div
+        className="min-h-screen bg-black"
+        aria-busy="true"
+        aria-label="Loading"
+      />
+    );
+  }
 
   return (
     <div dir={isRtl ? "rtl" : "ltr"} style={pageShellStyle}>
