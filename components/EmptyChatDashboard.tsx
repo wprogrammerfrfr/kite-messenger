@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import { Search } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Search, Wifi } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { t, type Language } from "@/lib/translations";
+import { useResilience } from "@/components/resilience-provider";
 import { findProfileByDiscoverQuery } from "@/lib/profile-lookup";
 import {
   createPendingDmRequest,
@@ -42,6 +43,35 @@ export function EmptyChatDashboard({
   aliasByContactId,
   onDmRequestCreated,
 }: Props) {
+  const { isOnline, isConnectionSlow } = useResilience();
+  const [connectionTipOpen, setConnectionTipOpen] = useState(false);
+
+  const connectionTier = !isOnline
+    ? "offline"
+    : isConnectionSlow
+      ? "weak"
+      : "excellent";
+
+  const connectionTooltip =
+    connectionTier === "excellent"
+      ? t(language, "dashboardWifiTooltipExcellent")
+      : connectionTier === "weak"
+        ? t(language, "dashboardWifiTooltipWeak")
+        : t(language, "dashboardWifiTooltipOffline");
+
+  const wifiIconColor =
+    connectionTier === "excellent"
+      ? "rgba(34, 197, 94, 0.92)"
+      : connectionTier === "weak"
+        ? "rgba(234, 179, 8, 0.95)"
+        : "rgba(239, 68, 68, 0.92)";
+
+  useEffect(() => {
+    if (!connectionTipOpen) return;
+    const tId = window.setTimeout(() => setConnectionTipOpen(false), 4500);
+    return () => window.clearTimeout(tId);
+  }, [connectionTipOpen]);
+
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -137,7 +167,40 @@ export function EmptyChatDashboard({
     : "";
 
   return (
-    <div className="flex min-h-[min(70vh,520px)] flex-col items-center justify-center px-4 py-8">
+    <div className="relative flex min-h-[min(70vh,520px)] flex-col items-center justify-center px-4 py-8">
+      <div className="absolute top-1 z-10 sm:top-2 end-2 sm:end-4">
+        <button
+          type="button"
+          className="relative rounded-full p-2.5 transition-colors hover:bg-white/[0.08] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#FF4500]/55"
+          style={{ color: wifiIconColor }}
+          aria-label={connectionTooltip}
+          title={connectionTooltip}
+          onClick={() => setConnectionTipOpen((open) => !open)}
+        >
+          <Wifi
+            className="h-[22px] w-[22px] sm:h-6 sm:w-6"
+            strokeWidth={2.25}
+            aria-hidden
+            style={{
+              filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.65))",
+            }}
+          />
+        </button>
+        {connectionTipOpen ? (
+          <div
+            role="tooltip"
+            className="absolute end-0 top-full z-20 mt-2 max-w-[min(92vw,300px)] rounded-xl border px-3.5 py-2.5 text-left text-xs leading-snug shadow-lg sm:text-[13px]"
+            style={{
+              borderColor: "rgba(255, 69, 0, 0.5)",
+              background: "var(--panel-bg)",
+              color: "var(--text-primary)",
+              boxShadow: "var(--glow)",
+            }}
+          >
+            {connectionTooltip}
+          </div>
+        ) : null}
+      </div>
       <div className="w-full max-w-md space-y-8">
         <div>
           <label

@@ -179,7 +179,13 @@ type TranslationKey =
   | "fileTooLargeLowBandwidth"
   | "welcomeWhyMetadataTitle"
   | "welcomeWhyMetadataCompare"
-  | "welcomeWhyMetadataDefinition";
+  | "welcomeWhyMetadataDefinition"
+  | "dashboardWifiTooltipExcellent"
+  | "dashboardWifiTooltipWeak"
+  | "dashboardWifiTooltipOffline"
+  | "welcomePrivacyProtocolHeadline"
+  | "welcomePrivacyMetadataPolicy"
+  | "welcomePrivacyThirtyDay";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -405,6 +411,17 @@ const translationsEn: TranslationRecord = {
       "Unlike apps like WhatsApp, Kite does not collect or sell your metadata.",
     welcomeWhyMetadataDefinition:
       "Metadata is “data about data”—it’s the record of who you talk to, when you talk to them, and your physical location. While other apps might encrypt your words, they still track your behavior. Kite refuses to collect this information.",
+    dashboardWifiTooltipExcellent:
+      "Connection Status: Excellent connection. Enable Support Mode in Settings for better performance.",
+    dashboardWifiTooltipWeak:
+      "Connection Status: Weak / slow signal. Enable Support Mode in Settings for better performance.",
+    dashboardWifiTooltipOffline:
+      "Connection Status: Offline. Enable Support Mode in Settings for better performance.",
+    welcomePrivacyProtocolHeadline: "YOUR PRIVACY IS OUR ARCHITECTURE",
+    welcomePrivacyMetadataPolicy:
+      "We do not collect, store, or sell your metadata. Metadata—the 'shadow' of your digital life—includes who you talk to, when you talk, and where you are. While other apps track your behavior, Kite is built to ignore it.",
+    welcomePrivacyThirtyDay:
+      "All message history is permanently purged every 30 days. We believe in the right to a clean slate.",
 };
 
 export const translations: Record<Language, TranslationRecord> = {
@@ -631,6 +648,17 @@ export const translations: Record<Language, TranslationRecord> = {
       "برخلاف برنامه‌هایی مانند واتساپ، Kite فرادادهٔ شما را جمع‌آوری یا نمی‌فروشد.",
     welcomeWhyMetadataDefinition:
       "فراداده یعنی «داده‌ای دربارهٔ داده‌ها»—سوابقی از این‌که با چه کسی و چه زمانی حرف زده‌اید و موقعیت مکانی شما. برنامه‌های دیگر ممکن است متن را رمز کنند، اما رفتار شما را دنبال می‌کنند. Kite از جمع‌آوری این اطلاعات خودداری می‌کند.",
+    dashboardWifiTooltipExcellent:
+      "وضعیت اتصال: عالی. برای عملکرد بهتر، حالت پشتیبانی را از تنظیمات فعال کنید.",
+    dashboardWifiTooltipWeak:
+      "وضعیت اتصال: سیگنال ضعیف / کند. برای عملکرد بهتر، حالت پشتیبانی را از تنظیمات فعال کنید.",
+    dashboardWifiTooltipOffline:
+      "وضعیت اتصال: آفلاین. برای عملکرد بهتر، حالت پشتیبانی را از تنظیمات فعال کنید.",
+    welcomePrivacyProtocolHeadline: "حریم خصوصی شما، معماری ماست",
+    welcomePrivacyMetadataPolicy:
+      "ما فرادادهٔ شما را جمع‌آوری، ذخیره یا نمی‌فروشیم. فراداده—«سایهٔ» زندگی دیجیتال شما—شامل این است که با چه کسی، چه زمانی صحبت می‌کنید و کجا هستید. در حالی که برنامه‌های دیگر رفتار شما را رصد می‌کنند، Kite طوری ساخته شده که آن را نادیده بگیرد.",
+    welcomePrivacyThirtyDay:
+      "تمام تاریخچهٔ پیام‌ها هر ۳۰ روز یک‌بار برای همیشه پاک می‌شود. ما به حق شروع دوباره با صفحه‌ای تمیز معتقدیم.",
   },
   ar: {
     wipeConfirm:
@@ -854,6 +882,17 @@ export const translations: Record<Language, TranslationRecord> = {
       "على عكس تطبيقات مثل واتساب، لا تجمع Kite بياناتك الوصفية ولا تبيعها.",
     welcomeWhyMetadataDefinition:
       "البيانات الوصفية هي «بيانات عن البيانات»—سجل من تتحدث معه ومتى وموقعك الجغرافي. قد تشفّر التطبيقات الأخرى كلماتك لكنها لا تزال تتتبع سلوكك. ترفض Kite جمع هذه المعلومات.",
+    dashboardWifiTooltipExcellent:
+      "حالة الاتصال: ممتازة. فعّل وضع الدعم من الإعدادات لأداء أفضل.",
+    dashboardWifiTooltipWeak:
+      "حالة الاتصال: إشارة ضعيفة / بطيئة. فعّل وضع الدعم من الإعدادات لأداء أفضل.",
+    dashboardWifiTooltipOffline:
+      "حالة الاتصال: غير متصل. فعّل وضع الدعم من الإعدادات لأداء أفضل.",
+    welcomePrivacyProtocolHeadline: "خصوصيتك هي بنيانا المعماري",
+    welcomePrivacyMetadataPolicy:
+      "لا نجمع بياناتك الوصفية ولا نخزّنها ولا نبيعها. البيانات الوصفية—«ظل» حياتك الرقمية—تشمل مع من تتحدث ومتى وأين أنت. بينما تتتبع تطبيقات أخرى سلوكك، بُني Kite ليتجاهل ذلك.",
+    welcomePrivacyThirtyDay:
+      "يُمحى سجل الرسائل بالكامل كل ٣٠ يومًا نهائيًا. نؤمن بحق البدء من صفحة نظيفة.",
   },
   kr: {
     ...translationsEn,
@@ -894,6 +933,17 @@ export const translations: Record<Language, TranslationRecord> = {
       "WhatsApp 같은 앱과 달리 Kite는 메타데이터를 수집하거나 판매하지 않습니다.",
     welcomeWhyMetadataDefinition:
       "메타데이터는 ‘데이터에 관한 데이터’로, 누구와 언제 이야기했는지와 위치 기록을 뜻합니다. 다른 앱은 말을 암호화해도 행동은 추적할 수 있습니다. Kite는 이러한 정보를 수집하지 않습니다.",
+    dashboardWifiTooltipExcellent:
+      "연결 상태: 우수합니다. 더 나은 성능을 위해 설정에서 지원 모드를 켜세요.",
+    dashboardWifiTooltipWeak:
+      "연결 상태: 약함/느림. 더 나은 성능을 위해 설정에서 지원 모드를 켜세요.",
+    dashboardWifiTooltipOffline:
+      "연결 상태: 오프라인. 더 나은 성능을 위해 설정에서 지원 모드를 켜세요.",
+    welcomePrivacyProtocolHeadline: "당신의 프라이버시가 곧 우리의 설계입니다",
+    welcomePrivacyMetadataPolicy:
+      "Kite는 메타데이터를 수집·저장·판매하지 않습니다. 메타데이터는 디지털 생활의 ‘그림자’로, 누구와 언제 이야기하고 어디에 있는지를 포함합니다. 다른 앱이 행동을 추적하는 동안, Kite는 이를 무시하도록 만들어졌습니다.",
+    welcomePrivacyThirtyDay:
+      "모든 메시지 기록은 30일마다 영구적으로 삭제됩니다. 새 출발할 권리를 믿습니다.",
   },
   tr: {
     ...translationsEn,
@@ -934,6 +984,17 @@ export const translations: Record<Language, TranslationRecord> = {
       "WhatsApp gibi uygulamalardan farklı olarak Kite üstverinizi toplamaz veya satmaz.",
     welcomeWhyMetadataDefinition:
       "Üstveri, ‘veri hakkında veri’dir—kiminle ve ne zaman konuştuğunuz ile konumunuzun kaydıdır. Diğer uygulamalar sözcüklerinizi şifrelese bile davranışınızı izleyebilir. Kite bu bilgileri toplamayı reddeder.",
+    dashboardWifiTooltipExcellent:
+      "Bağlantı durumu: Mükemmel. Daha iyi performans için Ayarlar’dan Destek modunu açın.",
+    dashboardWifiTooltipWeak:
+      "Bağlantı durumu: Zayıf / yavaş sinyal. Daha iyi performans için Ayarlar’dan Destek modunu açın.",
+    dashboardWifiTooltipOffline:
+      "Bağlantı durumu: Çevrimdışı. Daha iyi performans için Ayarlar’dan Destek modunu açın.",
+    welcomePrivacyProtocolHeadline: "GİZLİLİĞİNİZ BİZİM MİMARİMİZDİR",
+    welcomePrivacyMetadataPolicy:
+      "Üstverinizi toplamıyor, saklamıyor veya satmıyoruz. Üstveri—dijital yaşamınızın ‘gölgesi’—kiminle konuştuğunuzu, ne zaman konuştuğunuzu ve nerede olduğunuzu içerir. Diğer uygulamalar davranışınızı izlerken Kite bunu görmezden gelmek üzere tasarlandı.",
+    welcomePrivacyThirtyDay:
+      "Tüm mesaj geçmişi her 30 günde bir kalıcı olarak silinir. Temiz bir sayfa hakkına inanıyoruz.",
   },
 };
 

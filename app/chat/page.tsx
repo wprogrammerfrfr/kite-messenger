@@ -45,7 +45,6 @@ import {
 } from "@/lib/support-mode-storage";
 import { LanguageDropdown } from "@/components/LanguageDropdown";
 import { EmptyChatDashboard } from "@/components/EmptyChatDashboard";
-import { ConnectionStatusBar } from "@/components/ConnectionStatusBar";
 import { contactDisplayLabel } from "@/lib/contact-display";
 import {
   areNotificationsGloballyDisabled,
@@ -1977,11 +1976,6 @@ export default function Home() {
       animate={themeToMotionStyle(bodyTheme)}
       transition={{ duration: motionDuration, ease: "easeInOut" }}
     >
-      <ConnectionStatusBar
-        language={language}
-        isOnline={isOnline}
-        isConnectionSlow={isConnectionSlow}
-      />
       <div
         className={`relative flex min-h-0 flex-1 overflow-hidden ${
           isRtlLayout ? "flex-row-reverse" : ""

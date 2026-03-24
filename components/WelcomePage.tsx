@@ -287,6 +287,56 @@ export default function WelcomePage() {
               {t(language, "welcomeMissionBody2")}
             </p>
           </div>
+
+          <div
+            style={{
+              marginTop: 18,
+              border: `2px solid ${ACCENT_ORANGE}`,
+              borderRadius: 16,
+              background: "#050505",
+              padding: "clamp(28px, 5vw, 44px) clamp(22px, 4vw, 40px)",
+              boxShadow:
+                "0 0 0 1px rgba(255, 69, 0, 0.15), 0 24px 48px rgba(0, 0, 0, 0.55)",
+            }}
+          >
+            <h2
+              style={{
+                margin: 0,
+                marginBottom: 20,
+                fontSize: "clamp(0.95rem, 2.4vw, 1.05rem)",
+                fontWeight: 800,
+                letterSpacing: "0.1em",
+                lineHeight: 1.35,
+                color: ACCENT_ORANGE,
+                textTransform: "uppercase",
+              }}
+            >
+              {t(language, "welcomePrivacyProtocolHeadline")}
+            </h2>
+            <p
+              style={{
+                margin: 0,
+                marginBottom: 18,
+                fontSize: "clamp(1rem, 2.2vw, 1.125rem)",
+                lineHeight: 1.75,
+                fontWeight: 500,
+                color: "rgba(245, 245, 244, 0.94)",
+              }}
+            >
+              {t(language, "welcomePrivacyMetadataPolicy")}
+            </p>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "clamp(1rem, 2.2vw, 1.125rem)",
+                lineHeight: 1.75,
+                fontWeight: 500,
+                color: "rgba(245, 245, 244, 0.94)",
+              }}
+            >
+              {t(language, "welcomePrivacyThirtyDay")}
+            </p>
+          </div>
         </section>
 
         <section
