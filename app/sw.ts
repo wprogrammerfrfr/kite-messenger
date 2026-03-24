@@ -73,4 +73,34 @@ const serwist = new Serwist({
   },
 });
 
+self.addEventListener("push", (event: PushEvent) => {
+  let data: { title?: string; body?: string } = {};
+  try {
+    if (event.data) data = event.data.json() as { title?: string; body?: string };
+  } catch {
+    // ignore
+  }
+  const title = typeof data.title === "string" ? data.title : "Kite";
+  const body = typeof data.body === "string" ? data.body : "New message";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      icon: "/kite-mobile-icon.png",
+      badge: "/kite-mobile-icon.png",
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event: NotificationEvent) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        if ("focus" in client) return client.focus();
+      }
+      return self.clients.openWindow("/chat");
+    })
+  );
+});
+
 serwist.addEventListeners();

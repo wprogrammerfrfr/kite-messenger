@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { motion } from "framer-motion";
 import { Search } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { t, type Language } from "@/lib/translations";
@@ -18,13 +17,12 @@ type Props = {
   language: Language;
   sessionUserId: string;
   myNickname: string | null;
-  isSupportMode: boolean;
-  onToggleSupport: () => void;
   onViewMyProfile: () => void;
   onSelectRecipient: (id: string) => void;
   onOpenContactProfile: (payload: SafetyProfileOpenPayload) => void;
   onlineUserIds: Record<string, boolean>;
   aliasByContactId: Record<string, string>;
+  onDmRequestCreated?: () => void;
 };
 
 type PairDm =
@@ -37,13 +35,12 @@ export function EmptyChatDashboard({
   language,
   sessionUserId,
   myNickname,
-  isSupportMode,
-  onToggleSupport,
   onViewMyProfile,
   onSelectRecipient,
   onOpenContactProfile,
   onlineUserIds,
   aliasByContactId,
+  onDmRequestCreated,
 }: Props) {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -127,6 +124,7 @@ export function EmptyChatDashboard({
       return;
     }
     setPairDm({ status: "pending", initiated_by: sessionUserId });
+    onDmRequestCreated?.();
     onSelectRecipient(result.id);
   };
 
@@ -307,46 +305,6 @@ export function EmptyChatDashboard({
           >
             {t(language, "emptyDashboardViewMyProfile")}
           </button>
-        </div>
-
-        <div
-          className="rounded-2xl border-2 p-4"
-          style={{
-            borderColor: isSupportMode ? "#FF4500" : "rgba(255, 69, 0, 0.4)",
-            background: isSupportMode ? "rgba(255, 69, 0, 0.1)" : "rgba(255, 69, 0, 0.04)",
-          }}
-        >
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              <p
-                className="text-sm font-bold uppercase tracking-wide"
-                style={{ color: isSupportMode ? "#FF4500" : "var(--text-primary)" }}
-              >
-                {t(language, "emptyDashboardSupportTitle")}
-              </p>
-              <p className="mt-1 text-xs leading-snug" style={{ color: "var(--text-secondary)" }}>
-                {t(language, "settingsDataSaverHint")}
-              </p>
-            </div>
-            <motion.button
-              type="button"
-              role="switch"
-              aria-checked={isSupportMode}
-              className="relative h-12 w-[4.5rem] shrink-0 rounded-full ring-2 ring-[rgba(255,69,0,0.55)]"
-              style={{
-                background: isSupportMode ? "#FF4500" : "rgba(120, 113, 108, 0.45)",
-              }}
-              onClick={onToggleSupport}
-              whileTap={{ scale: 0.97 }}
-            >
-              <motion.span
-                className="absolute top-1.5 h-9 w-9 rounded-full bg-white shadow-md"
-                initial={false}
-                animate={{ left: isSupportMode ? "calc(100% - 2.375rem)" : "0.25rem" }}
-                transition={{ type: "spring", stiffness: 400, damping: 30 }}
-              />
-            </motion.button>
-          </div>
         </div>
       </div>
     </div>

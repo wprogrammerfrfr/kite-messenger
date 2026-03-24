@@ -14,6 +14,10 @@ export type CachedChatMessage = {
   createdAt?: string;
   isImage?: boolean;
   imageUrl?: string;
+  isFile?: boolean;
+  fileUrl?: string;
+  fileName?: string;
+  fileMime?: string;
   senderId?: string | null;
   receiverId?: string | null;
   isRead?: boolean | null;

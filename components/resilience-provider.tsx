@@ -26,6 +26,8 @@ type ResilienceContextValue = {
   manualLowBandwidth: boolean;
   /** True when online but connection is constrained (for header badge) */
   isLowSignal: boolean;
+  /** Navigator reports slow connection (2G / save-data), without requiring Support Mode. */
+  isConnectionSlow: boolean;
 };
 
 const ResilienceContext = createContext<ResilienceContextValue | null>(null);
@@ -123,6 +125,7 @@ export function ResilienceProvider({ children }: { children: ReactNode }) {
       setManualLowBandwidth,
       manualLowBandwidth,
       isLowSignal,
+      isConnectionSlow: connSlow,
     }),
     [
       isOnline,
@@ -131,6 +134,7 @@ export function ResilienceProvider({ children }: { children: ReactNode }) {
       supportModeOn,
       setManualLowBandwidth,
       isLowSignal,
+      connSlow,
     ]
   );
 
@@ -150,6 +154,7 @@ export function useResilience(): ResilienceContextValue {
       setManualLowBandwidth: () => {},
       manualLowBandwidth: false,
       isLowSignal: false,
+      isConnectionSlow: false,
     };
   }
   return ctx;

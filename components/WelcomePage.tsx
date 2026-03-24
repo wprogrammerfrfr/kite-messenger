@@ -427,6 +427,25 @@ export default function WelcomePage() {
               gap: 14,
             }}
           >
+            <article
+              style={{
+                ...sectionStyle,
+                gridColumn: "1 / -1",
+                maxWidth: "min(100%, 720px)",
+                marginInline: "auto",
+              }}
+            >
+              <h3 style={{ fontSize: 18, fontWeight: 800 }}>
+                {t(language, "welcomeWhyMetadataTitle")}
+              </h3>
+              <p style={{ marginTop: 9, color: "rgba(255,255,255,0.75)", lineHeight: 1.6 }}>
+                {t(language, "welcomeWhyMetadataCompare")}
+              </p>
+              <p style={{ marginTop: 12, color: "rgba(255,255,255,0.75)", lineHeight: 1.6 }}>
+                {t(language, "welcomeWhyMetadataDefinition")}
+              </p>
+            </article>
+
             <article style={sectionStyle}>
               <h3 style={{ fontSize: 18, fontWeight: 800 }}>
                 {t(language, "welcomeWhyTrackingTitle")}

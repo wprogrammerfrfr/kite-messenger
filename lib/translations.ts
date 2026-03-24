@@ -165,7 +165,21 @@ type TranslationKey =
   | "contactAliasCancel"
   | "contactAliasRemove"
   | "contactAliasPublicLine"
-  | "contactAliasSaveError";
+  | "contactAliasSaveError"
+  | "connectionBarConnected"
+  | "connectionBarWeak"
+  | "connectionBarWeakSub"
+  | "connectionBarOffline"
+  | "connectionBarOfflineSub"
+  | "sidebarHomeDashboard"
+  | "sidebarNotificationsDisable"
+  | "sidebarNotificationsEnable"
+  | "notificationNewMessageTitle"
+  | "notificationNewMessageBody"
+  | "fileTooLargeLowBandwidth"
+  | "welcomeWhyMetadataTitle"
+  | "welcomeWhyMetadataCompare"
+  | "welcomeWhyMetadataDefinition";
 
 type TranslationRecord = Record<TranslationKey, string>;
 
@@ -374,6 +388,23 @@ const translationsEn: TranslationRecord = {
     contactAliasRemove: "Remove nickname",
     contactAliasPublicLine: "Profile name: {{name}}",
     contactAliasSaveError: "Could not save nickname.",
+    connectionBarConnected: "Connected",
+    connectionBarWeak: "Weak signal",
+    connectionBarWeakSub: "Consider turning on Support Mode to save data.",
+    connectionBarOffline: "Offline",
+    connectionBarOfflineSub: "Using cached data where available.",
+    sidebarHomeDashboard: "Home dashboard",
+    sidebarNotificationsDisable: "Disable all notifications",
+    sidebarNotificationsEnable: "Enable notifications",
+    notificationNewMessageTitle: "Kite",
+    notificationNewMessageBody: "New message",
+    fileTooLargeLowBandwidth:
+      "File too large for low-bandwidth environments to maintain speed.",
+    welcomeWhyMetadataTitle: "Metadata & your privacy",
+    welcomeWhyMetadataCompare:
+      "Unlike apps like WhatsApp, Kite does not collect or sell your metadata.",
+    welcomeWhyMetadataDefinition:
+      "Metadata is “data about data”—it’s the record of who you talk to, when you talk to them, and your physical location. While other apps might encrypt your words, they still track your behavior. Kite refuses to collect this information.",
 };
 
 export const translations: Record<Language, TranslationRecord> = {
@@ -583,6 +614,23 @@ export const translations: Record<Language, TranslationRecord> = {
     contactAliasRemove: "حذف نام مستعار",
     contactAliasPublicLine: "نام نمایه: {{name}}",
     contactAliasSaveError: "ذخیرهٔ نام مستعار انجام نشد.",
+    connectionBarConnected: "متصل",
+    connectionBarWeak: "سیگنال ضعیف",
+    connectionBarWeakSub: "برای صرفه‌جویی در داده، حالت پشتیبانی را روشن کنید.",
+    connectionBarOffline: "آفلاین",
+    connectionBarOfflineSub: "در صورت امکان از دادهٔ ذخیره‌شده استفاده می‌شود.",
+    sidebarHomeDashboard: "صفحهٔ اصلی داشبورد",
+    sidebarNotificationsDisable: "غیرفعال‌سازی همهٔ اعلان‌ها",
+    sidebarNotificationsEnable: "فعال‌سازی اعلان‌ها",
+    notificationNewMessageTitle: "Kite",
+    notificationNewMessageBody: "پیام جدید",
+    fileTooLargeLowBandwidth:
+      "فایل برای محیط‌های کم‌پهناگران بزرگ است و ممکن است سرعت را کند کند.",
+    welcomeWhyMetadataTitle: "فراداده و حریم خصوصی",
+    welcomeWhyMetadataCompare:
+      "برخلاف برنامه‌هایی مانند واتساپ، Kite فرادادهٔ شما را جمع‌آوری یا نمی‌فروشد.",
+    welcomeWhyMetadataDefinition:
+      "فراداده یعنی «داده‌ای دربارهٔ داده‌ها»—سوابقی از این‌که با چه کسی و چه زمانی حرف زده‌اید و موقعیت مکانی شما. برنامه‌های دیگر ممکن است متن را رمز کنند، اما رفتار شما را دنبال می‌کنند. Kite از جمع‌آوری این اطلاعات خودداری می‌کند.",
   },
   ar: {
     wipeConfirm:
@@ -789,6 +837,23 @@ export const translations: Record<Language, TranslationRecord> = {
     contactAliasRemove: "إزالة الاسم المستعار",
     contactAliasPublicLine: "اسم الملف العام: {{name}}",
     contactAliasSaveError: "تعذر حفظ الاسم المستعار.",
+    connectionBarConnected: "متصل",
+    connectionBarWeak: "إشارة ضعيفة",
+    connectionBarWeakSub: "فعّل وضع الدعم لتوفير البيانات.",
+    connectionBarOffline: "غير متصل",
+    connectionBarOfflineSub: "استخدام البيانات المخزّنة عند الإمكان.",
+    sidebarHomeDashboard: "لوحة الرئيسية",
+    sidebarNotificationsDisable: "تعطيل جميع الإشعارات",
+    sidebarNotificationsEnable: "تفعيل الإشعارات",
+    notificationNewMessageTitle: "Kite",
+    notificationNewMessageBody: "رسالة جديدة",
+    fileTooLargeLowBandwidth:
+      "الملف كبير جداً لبيئات ضعيفة النطاق الترددي للحفاظ على السرعة.",
+    welcomeWhyMetadataTitle: "البيانات الوصفية وخصوصيتك",
+    welcomeWhyMetadataCompare:
+      "على عكس تطبيقات مثل واتساب، لا تجمع Kite بياناتك الوصفية ولا تبيعها.",
+    welcomeWhyMetadataDefinition:
+      "البيانات الوصفية هي «بيانات عن البيانات»—سجل من تتحدث معه ومتى وموقعك الجغرافي. قد تشفّر التطبيقات الأخرى كلماتك لكنها لا تزال تتتبع سلوكك. ترفض Kite جمع هذه المعلومات.",
   },
   kr: {
     ...translationsEn,
@@ -812,6 +877,23 @@ export const translations: Record<Language, TranslationRecord> = {
     contactAliasRemove: "닉네임 삭제",
     contactAliasPublicLine: "프로필 이름: {{name}}",
     contactAliasSaveError: "닉네임을 저장할 수 없습니다.",
+    connectionBarConnected: "연결됨",
+    connectionBarWeak: "약한 신호",
+    connectionBarWeakSub: "데이터 절약을 위해 지원 모드를 켜 보세요.",
+    connectionBarOffline: "오프라인",
+    connectionBarOfflineSub: "가능한 경우 캐시된 데이터를 사용합니다.",
+    sidebarHomeDashboard: "홈 대시보드",
+    sidebarNotificationsDisable: "모든 알림 끄기",
+    sidebarNotificationsEnable: "알림 켜기",
+    notificationNewMessageTitle: "Kite",
+    notificationNewMessageBody: "새 메시지",
+    fileTooLargeLowBandwidth:
+      "저대역폭 환경에서 속도를 유지하기에 파일이 너무 큽니다.",
+    welcomeWhyMetadataTitle: "메타데이터와 개인정보",
+    welcomeWhyMetadataCompare:
+      "WhatsApp 같은 앱과 달리 Kite는 메타데이터를 수집하거나 판매하지 않습니다.",
+    welcomeWhyMetadataDefinition:
+      "메타데이터는 ‘데이터에 관한 데이터’로, 누구와 언제 이야기했는지와 위치 기록을 뜻합니다. 다른 앱은 말을 암호화해도 행동은 추적할 수 있습니다. Kite는 이러한 정보를 수집하지 않습니다.",
   },
   tr: {
     ...translationsEn,
@@ -835,6 +917,23 @@ export const translations: Record<Language, TranslationRecord> = {
     contactAliasRemove: "Takma adı kaldır",
     contactAliasPublicLine: "Profil adı: {{name}}",
     contactAliasSaveError: "Takma ad kaydedilemedi.",
+    connectionBarConnected: "Bağlı",
+    connectionBarWeak: "Zayıf sinyal",
+    connectionBarWeakSub: "Veri tasarrufu için Destek modunu açın.",
+    connectionBarOffline: "Çevrimdışı",
+    connectionBarOfflineSub: "Mümkünse önbelleğe alınmış veri kullanılır.",
+    sidebarHomeDashboard: "Ana panel",
+    sidebarNotificationsDisable: "Tüm bildirimleri kapat",
+    sidebarNotificationsEnable: "Bildirimleri aç",
+    notificationNewMessageTitle: "Kite",
+    notificationNewMessageBody: "Yeni mesaj",
+    fileTooLargeLowBandwidth:
+      "Dosya, düşük bant genişlikli ortamlarda hızı korumak için çok büyük.",
+    welcomeWhyMetadataTitle: "Üstveri ve gizlilik",
+    welcomeWhyMetadataCompare:
+      "WhatsApp gibi uygulamalardan farklı olarak Kite üstverinizi toplamaz veya satmaz.",
+    welcomeWhyMetadataDefinition:
+      "Üstveri, ‘veri hakkında veri’dir—kiminle ve ne zaman konuştuğunuz ile konumunuzun kaydıdır. Diğer uygulamalar sözcüklerinizi şifrelese bile davranışınızı izleyebilir. Kite bu bilgileri toplamayı reddeder.",
   },
 };
 

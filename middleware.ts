@@ -11,6 +11,7 @@ export function middleware(request: NextRequest) {
   const isPublic =
     pathname === "/" ||
     pathname === "/welcome" ||
+    pathname.startsWith("/dashboard") ||
     pathname.startsWith("/chat") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api") ||

@@ -30,7 +30,7 @@ import {
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Menu, Settings, Paperclip, X } from "lucide-react";
+import { Menu, Settings, Paperclip, X, House } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
 import { useResilience } from "@/components/resilience-provider";
@@ -45,7 +45,18 @@ import {
 } from "@/lib/support-mode-storage";
 import { LanguageDropdown } from "@/components/LanguageDropdown";
 import { EmptyChatDashboard } from "@/components/EmptyChatDashboard";
+import { ConnectionStatusBar } from "@/components/ConnectionStatusBar";
 import { contactDisplayLabel } from "@/lib/contact-display";
+import {
+  areNotificationsGloballyDisabled,
+  setNotificationsGloballyDisabled,
+} from "@/lib/kite-notifications";
+import {
+  registerKitePushSubscription,
+  removeKitePushFromServer,
+  unsubscribeKitePushOnDevice,
+} from "@/lib/kite-push-client";
+import { isStandaloneDisplayMode } from "@/lib/pwa-standalone";
 
 /** Brand icon: `public/kite-mobile-icon.png` */
 const KITE_APP_ICON = "/kite-mobile-icon.png";
@@ -161,6 +172,50 @@ const LIGHT_THERAPIST_THEME: ThemeVars = {
 
 const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
 const KEY_MISMATCH_TEXT = "[Secure Message - Key Mismatch]";
+const CHAT_FILE_MAX_BYTES = 5 * 1024 * 1024;
+
+function parseDecryptedPayload(decrypted: string): {
+  text: string;
+  isImage: boolean;
+  imageUrl?: string;
+  isFile: boolean;
+  fileUrl?: string;
+  fileName?: string;
+  fileMime?: string;
+} {
+  try {
+    const parsed = JSON.parse(decrypted) as {
+      type?: string;
+      url?: string;
+      name?: string;
+      mime?: string;
+    };
+    if (parsed.type === "image" && typeof parsed.url === "string") {
+      return {
+        text: parsed.url,
+        isImage: true,
+        imageUrl: parsed.url,
+        isFile: false,
+      };
+    }
+    if (parsed.type === "file" && typeof parsed.url === "string") {
+      const fileName = typeof parsed.name === "string" ? parsed.name : "File";
+      const fileMime =
+        typeof parsed.mime === "string" ? parsed.mime : "application/octet-stream";
+      return {
+        text: fileName,
+        isImage: false,
+        isFile: true,
+        fileUrl: parsed.url,
+        fileName,
+        fileMime,
+      };
+    }
+  } catch {
+    // plain text
+  }
+  return { text: decrypted, isImage: false, isFile: false };
+}
 
 /** Cast theme to a shape Framer Motion's animate prop accepts (CSS custom properties). */
 function themeToMotionStyle(theme: ThemeVars): Record<string, string> {
@@ -172,6 +227,7 @@ export default function Home() {
     isOnline,
     isLowBandwidthMode,
     isLowSignal,
+    isConnectionSlow,
   } = useResilience();
 
   const [professionalMode, setProfessionalMode] = useState(false);
@@ -200,6 +256,10 @@ export default function Home() {
       createdAt?: string;
       isImage?: boolean;
       imageUrl?: string;
+      isFile?: boolean;
+      fileUrl?: string;
+      fileName?: string;
+      fileMime?: string;
       senderId?: string | null;
       receiverId?: string | null;
       isRead?: boolean | null;
@@ -208,7 +268,9 @@ export default function Home() {
   // Sender key pair (current user); recipient key pair used only for recipient's public key for encryption
   const [senderKeys, setSenderKeys] = useState<KeyPair | null>(null);
   const [recipientPublicKey, setRecipientPublicKey] = useState<CryptoKey | null>(null);
-  const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [notificationsMuted, setNotificationsMuted] = useState(false);
+  const languageRef = useRef<Language>("en");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const [activeRecipientId, setActiveRecipientId] = useState<string | null>(null);
@@ -254,6 +316,47 @@ export default function Home() {
   useEffect(() => {
     activeRecipientIdRef.current = activeRecipientId;
   }, [activeRecipientId]);
+
+  useEffect(() => {
+    languageRef.current = language;
+  }, [language]);
+
+  useEffect(() => {
+    const sync = () => setNotificationsMuted(areNotificationsGloballyDisabled());
+    sync();
+    window.addEventListener("kite-notifications-setting", sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener("kite-notifications-setting", sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session?.user || notificationsMuted) return;
+    if (typeof window === "undefined") return;
+    if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY) return;
+    if (!isStandaloneDisplayMode()) return;
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        if (areNotificationsGloballyDisabled()) return;
+        try {
+          if (Notification.permission === "default") {
+            await Notification.requestPermission();
+          }
+          if (Notification.permission !== "granted") return;
+          const { data: { session: s } } = await supabase.auth.getSession();
+          if (!s?.access_token) return;
+          await registerKitePushSubscription(s.access_token);
+        } catch {
+          // ignore
+        }
+      })();
+    }, 2800);
+
+    return () => clearTimeout(timer);
+  }, [session?.user?.id, notificationsMuted]);
 
   const wait = useCallback((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), []);
 
@@ -897,26 +1000,23 @@ export default function Home() {
             let text: string;
             let isImage = false;
             let imageUrl: string | undefined;
+            let isFile = false;
+            let fileUrl: string | undefined;
+            let fileName: string | undefined;
+            let fileMime: string | undefined;
             try {
               const decrypted = await decryptWithRetry(
                 encryptedForViewer,
                 senderKeys.privateKey
               );
-              try {
-                const parsed = JSON.parse(decrypted) as {
-                  type?: string;
-                  url?: string;
-                };
-                if (parsed.type === "image" && typeof parsed.url === "string") {
-                  isImage = true;
-                  imageUrl = parsed.url;
-                  text = parsed.url;
-                } else {
-                  text = decrypted;
-                }
-              } catch {
-                text = decrypted;
-              }
+              const p = parseDecryptedPayload(decrypted);
+              text = p.text;
+              isImage = p.isImage;
+              imageUrl = p.imageUrl;
+              isFile = p.isFile;
+              fileUrl = p.fileUrl;
+              fileName = p.fileName;
+              fileMime = p.fileMime;
             } catch {
               // Final fallback: re-fetch complete row and retry decryption once more.
               if (row.id !== undefined && row.id !== null) {
@@ -935,9 +1035,19 @@ export default function Home() {
                       ? fullRow.content_for_sender
                       : fullRow?.encrypted_content ?? encryptedForViewer;
 
-                  text = await decryptWithRetry(fallbackCipher, senderKeys.privateKey);
+                  const raw = await decryptWithRetry(fallbackCipher, senderKeys.privateKey);
+                  const p = parseDecryptedPayload(raw);
+                  text = p.text;
+                  isImage = p.isImage;
+                  imageUrl = p.imageUrl;
+                  isFile = p.isFile;
+                  fileUrl = p.fileUrl;
+                  fileName = p.fileName;
+                  fileMime = p.fileMime;
                 } catch {
                   text = KEY_MISMATCH_TEXT;
+                  isImage = false;
+                  isFile = false;
                 }
               } else {
                 text = KEY_MISMATCH_TEXT;
@@ -972,6 +1082,32 @@ export default function Home() {
             const id =
               row.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+            if (
+              row.receiver_id === viewerId &&
+              row.sender_id &&
+              row.sender_id !== viewerId &&
+              !areNotificationsGloballyDisabled()
+            ) {
+              const active = activeRecipientIdRef.current;
+              const inFocusChat = active === row.sender_id;
+              const vis =
+                typeof document !== "undefined" &&
+                document.visibilityState === "visible";
+              if (!(inFocusChat && vis)) {
+                try {
+                  if (Notification.permission === "granted") {
+                    const lang = languageRef.current;
+                    new Notification(t(lang, "notificationNewMessageTitle"), {
+                      body: t(lang, "notificationNewMessageBody"),
+                      icon: "/kite-mobile-icon.png",
+                    });
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+            }
+
             setMessages((prev) => {
               if (prev.some((m) => m.id === id)) return prev;
               return [
@@ -983,6 +1119,10 @@ export default function Home() {
                   createdAt: row.created_at,
                   isImage,
                   imageUrl,
+                  isFile,
+                  fileUrl,
+                  fileName,
+                  fileMime,
                   senderId: row.sender_id ?? null,
                   receiverId: row.receiver_id ?? null,
                   isRead: row.is_read ?? null,
@@ -1023,6 +1163,10 @@ export default function Home() {
         createdAt?: string;
         isImage?: boolean;
         imageUrl?: string;
+        isFile?: boolean;
+        fileUrl?: string;
+        fileName?: string;
+        fileMime?: string;
         senderId?: string | null;
         receiverId?: string | null;
         isRead?: boolean | null;
@@ -1052,33 +1196,19 @@ export default function Home() {
             encryptedForViewer,
             senderKeys.privateKey
           );
-          let isImage = false;
-          let imageUrl: string | undefined;
-          let text: string;
-
-          try {
-            const parsed = JSON.parse(decryptedText) as {
-              type?: string;
-              url?: string;
-            };
-            if (parsed.type === "image" && typeof parsed.url === "string") {
-              isImage = true;
-              imageUrl = parsed.url;
-              text = parsed.url;
-            } else {
-              text = decryptedText;
-            }
-          } catch {
-            text = decryptedText;
-          }
+          const p = parseDecryptedPayload(decryptedText);
 
           decrypted.push({
             id,
-            text,
+            text: p.text,
             isSessionMode: Boolean(row.is_session_mode),
             createdAt: row.created_at,
-            isImage,
-            imageUrl,
+            isImage: p.isImage,
+            imageUrl: p.imageUrl,
+            isFile: p.isFile,
+            fileUrl: p.fileUrl,
+            fileName: p.fileName,
+            fileMime: p.fileMime,
             senderId: row.sender_id ?? null,
             receiverId: row.receiver_id ?? null,
             isRead: row.is_read ?? null,
@@ -1338,7 +1468,7 @@ export default function Home() {
     fileInputRef.current?.click();
   };
 
-  const handleImageSelected = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelected = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file || !session || !senderKeys || !activeRecipientId || isSupportMode) return;
     const pendingRecipientBlock =
@@ -1348,12 +1478,24 @@ export default function Home() {
       dmThread.initiatedBy !== session.user.id;
     if (pendingRecipientBlock || dmThread.status === "declined") return;
 
-    setUploadingImage(true);
+    if (file.size > CHAT_FILE_MAX_BYTES) {
+      setSendError(t(language, "fileTooLargeLowBandwidth"));
+      event.target.value = "";
+      return;
+    }
+
+    setUploadingFile(true);
     setSendError(null);
 
     try {
-      const ext = file.name.split(".").pop() || "jpg";
-      const path = `${session.user.id}/${Date.now()}.${ext}`;
+      const rawExt =
+        (file.name.includes(".") && file.name.split(".").pop()) ||
+        (file.type && file.type.split("/").pop()) ||
+        "bin";
+      const ext = rawExt.replace(/[^a-zA-Z0-9.-]/g, "").slice(0, 16) || "bin";
+      const path = `${session.user.id}/${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${ext}`;
+
+      const contentType = file.type?.trim() || "application/octet-stream";
 
       await withPatience(
         async () => {
@@ -1362,9 +1504,10 @@ export default function Home() {
             .upload(path, file, {
               cacheControl: "3600",
               upsert: false,
+              contentType,
             });
           if (uploadError) {
-            throw new Error(uploadError.message ?? "Failed to upload image");
+            throw new Error(uploadError.message ?? "Failed to upload file");
           }
         },
         { patient: isLowBandwidthMode }
@@ -1376,7 +1519,7 @@ export default function Home() {
 
       const publicUrl = publicData?.publicUrl;
       if (!publicUrl) {
-        setSendError("Unable to get image URL");
+        setSendError("Unable to get file URL");
         return;
       }
 
@@ -1407,7 +1550,7 @@ export default function Home() {
           ) {
             const msg = "Waiting for user to initialize secure connection...";
             setSendError(msg);
-            setUploadingImage(false);
+            setUploadingFile(false);
             event.target.value = "";
             return;
           }
@@ -1419,20 +1562,27 @@ export default function Home() {
         } catch {
           const msg = "Waiting for user to initialize secure connection...";
           setSendError(msg);
-          setUploadingImage(false);
+          setUploadingFile(false);
           event.target.value = "";
           return;
         }
       }
 
-      const encryptedText = await encryptMessage(
-        JSON.stringify({ type: "image", url: publicUrl }),
-        keyToUse,
-        senderKeys
-      );
+      const isImageUpload = contentType.startsWith("image/");
+      const attachmentPayload = isImageUpload
+        ? { type: "image" as const, url: publicUrl }
+        : {
+            type: "file" as const,
+            url: publicUrl,
+            name: file.name || "File",
+            mime: contentType,
+          };
+      const payloadJson = JSON.stringify(attachmentPayload);
+
+      const encryptedText = await encryptMessage(payloadJson, keyToUse, senderKeys);
 
       const encryptedForSender = await encryptMessage(
-        JSON.stringify({ type: "image", url: publicUrl }),
+        payloadJson,
         senderKeys.publicKey,
         senderKeys
       );
@@ -1448,7 +1598,7 @@ export default function Home() {
             is_read: false,
           });
           if (insertError) {
-            throw new Error(insertError.message ?? "Failed to send image");
+            throw new Error(insertError.message ?? "Failed to send attachment");
           }
         },
         { patient: isLowBandwidthMode }
@@ -1458,10 +1608,10 @@ export default function Home() {
       setSidebarRefreshNonce((n) => n + 1);
     } catch (err) {
       setSendError(
-        err instanceof Error ? err.message : "Failed to send image"
+        err instanceof Error ? err.message : "Failed to send file"
       );
     } finally {
-      setUploadingImage(false);
+      setUploadingFile(false);
       event.target.value = "";
     }
   };
@@ -1816,7 +1966,7 @@ export default function Home() {
   return (
     <MotionConfig reducedMotion={isLowBandwidthMode ? "always" : "user"}>
     <motion.div
-      className={`relative flex h-[100dvh] max-h-[100dvh] overflow-hidden ${isRtlLayout ? "flex-row-reverse" : ""}`}
+      className="relative flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden"
       dir={isRtlLayout ? "rtl" : "ltr"}
       data-theme={isSupportMode ? "support" : "default"}
       style={{
@@ -1827,6 +1977,16 @@ export default function Home() {
       animate={themeToMotionStyle(bodyTheme)}
       transition={{ duration: motionDuration, ease: "easeInOut" }}
     >
+      <ConnectionStatusBar
+        language={language}
+        isOnline={isOnline}
+        isConnectionSlow={isConnectionSlow}
+      />
+      <div
+        className={`relative flex min-h-0 flex-1 overflow-hidden ${
+          isRtlLayout ? "flex-row-reverse" : ""
+        }`}
+      >
       {/* Mobile overlay backdrop */}
       <button
         type="button"
@@ -1857,7 +2017,20 @@ export default function Home() {
       >
         <div className="border-b p-4" style={{ borderColor: "var(--border)" }}>
           <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
+            <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveRecipientId(null);
+                  setMobileSidebarOpen(false);
+                }}
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition hover:opacity-90"
+                style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
+                aria-label={t(language, "sidebarHomeDashboard")}
+                title={t(language, "sidebarHomeDashboard")}
+              >
+                <House className="h-5 w-5" aria-hidden />
+              </button>
               <div
                 className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border-2"
                 style={{ borderColor: "var(--border)" }}
@@ -1895,11 +2068,36 @@ export default function Home() {
             language={language}
             onlineUserIds={onlineUserIds}
             refreshNonce={sidebarRefreshNonce}
-            onDmRequestCreated={() => setSidebarRefreshNonce((n) => n + 1)}
             lowBandwidth={isLowBandwidthMode}
             onOpenSafetyProfile={handleOpenSafetyProfile}
             aliasByContactId={contactAliases}
           />
+        </div>
+
+        <div className="border-t px-3 py-3" style={{ borderColor: "var(--border)" }}>
+          <button
+            type="button"
+            onClick={async () => {
+              const next = !notificationsMuted;
+              setNotificationsMuted(next);
+              setNotificationsGloballyDisabled(next);
+              if (next) {
+                const { data: { session: s } } = await supabase.auth.getSession();
+                if (s?.access_token) await removeKitePushFromServer(s.access_token);
+                await unsubscribeKitePushOnDevice();
+              }
+            }}
+            className="w-full rounded-xl border-2 px-3 py-4 text-center text-sm font-bold transition hover:opacity-95"
+            style={{
+              borderColor: notificationsMuted ? "var(--border)" : "#FF4500",
+              color: notificationsMuted ? "var(--text-secondary)" : "#FF4500",
+              background: "transparent",
+            }}
+          >
+            {notificationsMuted
+              ? t(language, "sidebarNotificationsEnable")
+              : t(language, "sidebarNotificationsDisable")}
+          </button>
         </div>
 
         <ModeController
@@ -2254,17 +2452,6 @@ export default function Home() {
                   language={language}
                   sessionUserId={session.user.id}
                   myNickname={nickname}
-                  isSupportMode={isSupportMode}
-                  onToggleSupport={() => {
-                    setIsSupportMode((prev) => {
-                      const next = !prev;
-                      if (next) {
-                        setProfessionalMode(false);
-                      }
-                      writeSupportModeToStorage(next);
-                      return next;
-                    });
-                  }}
                   onViewMyProfile={openMyProfile}
                   onSelectRecipient={(id) => {
                     setActiveRecipientId(id);
@@ -2273,6 +2460,7 @@ export default function Home() {
                   onOpenContactProfile={handleOpenSafetyProfile}
                   onlineUserIds={onlineUserIds}
                   aliasByContactId={contactAliases}
+                  onDmRequestCreated={() => setSidebarRefreshNonce((n) => n + 1)}
                 />
               )
             ) : (
@@ -2333,6 +2521,20 @@ export default function Home() {
                           </p>
                         )}
                       </div>
+                    ) : m.isFile && m.fileUrl && !isSupportMode ? (
+                      <a
+                        href={m.fileUrl}
+                        download={m.fileName || "file"}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-semibold underline break-all"
+                        style={{ color: "inherit" }}
+                      >
+                        {m.fileName || m.text}
+                        {m.fileMime ? (
+                          <span className="block text-xs font-normal opacity-80">{m.fileMime}</span>
+                        ) : null}
+                      </a>
                     ) : m.text.startsWith("LOCATION:") ? (
                       <a
                         href={`https://www.google.com/maps?q=${m.text.replace("LOCATION:", "").trim()}`}
@@ -2400,7 +2602,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleOpenFilePicker}
-                  disabled={uploadingImage || !senderKeys || !recipientPublicKey || !activeRecipientId}
+                  disabled={uploadingFile || !senderKeys || !recipientPublicKey || !activeRecipientId}
                   className="inline-flex h-9 w-9 items-center justify-center rounded-full text-xs font-medium transition hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{ color: "var(--text-secondary)" }}
                 >
@@ -2467,9 +2669,9 @@ export default function Home() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/*"
                   className="hidden"
-                  onChange={handleImageSelected}
+                  accept="*/*"
+                  onChange={handleFileSelected}
                 />
               </div>
             </div>
@@ -2484,6 +2686,7 @@ export default function Home() {
           ) : null}
         </div>
       </main>
+      </div>
 
       {safetyProfilePayload ? (
         <SafetyProfileModal
