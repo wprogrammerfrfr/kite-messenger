@@ -7,8 +7,13 @@ import { useRouter } from "next/navigation";
 import { EmptyChatDashboard } from "@/components/EmptyChatDashboard";
 import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
 import { SafetyProfileModal } from "@/components/SafetyProfileModal";
-import { SkeletonChat } from "@/components/SkeletonChat";
+import { SkeletonDiscover } from "@/components/SkeletonDiscover";
 import { t, type Language } from "@/lib/translations";
+import {
+  dashboardAliasCacheKey,
+  readJsonCache,
+  writeJsonCache,
+} from "@/lib/kite-tab-cache";
 
 type ContactAliasRow = {
   contact_id: string;
@@ -73,6 +78,14 @@ export default function DashboardPage() {
 
       const meId = s.user.id;
 
+      const cachedAliases = readJsonCache<{ aliasByContactId: Record<string, string> }>(
+        dashboardAliasCacheKey(meId)
+      );
+      if (cachedAliases?.aliasByContactId) {
+        setAliasByContactId(cachedAliases.aliasByContactId);
+        setLoading(false);
+      }
+
       const { data: meProfile, error: meErr } = await supabase
         .from("profiles")
         .select("preferred_locale")
@@ -97,9 +110,10 @@ export default function DashboardPage() {
           map[r.contact_id] = r.alias;
         });
         setAliasByContactId(map);
+        writeJsonCache(dashboardAliasCacheKey(meId), { aliasByContactId: map });
       }
 
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     };
 
     void load();
@@ -141,19 +155,31 @@ export default function DashboardPage() {
 
   const viewerId = session?.user.id ?? "";
 
-  if (loading || !session) {
-    return (
-      <div className="min-h-screen">
-        <SkeletonChat />
-      </div>
-    );
-  }
-
-  if (!session) {
+  if (!session && !loading) {
     return (
       <div className="min-h-screen bg-stone-950 text-white flex items-center justify-center">
         <div className="rounded-xl border border-white/20 px-6 py-4 text-sm font-semibold">
           {t(language, "authOfflineHint")}
+        </div>
+      </div>
+    );
+  }
+
+  if (loading || !session) {
+    return (
+      <div className="min-h-screen">
+        <div
+          className="min-h-[calc(100dvh-var(--bottom-nav-height))]"
+          style={{ background: appearance === "light" ? "#f5f5f4" : "#0c0a09", color: appearance === "light" ? "#1c1917" : "#ffffff" }}
+        >
+          <div className="mx-auto max-w-5xl px-3 pt-4 pb-10 sm:px-4">
+            <div className="mb-3 rounded-xl bg-black/10 px-2 py-1 backdrop-blur-md">
+              <h1 className="text-center text-xl font-bold">Discover</h1>
+            </div>
+            <div className="rounded-3xl p-2 sm:p-4" style={{ background: appearance === "light" ? "rgba(245,245,244,0.9)" : "rgba(0,0,0,0.35)" }}>
+              <SkeletonDiscover rows={7} />
+            </div>
+          </div>
         </div>
       </div>
     );

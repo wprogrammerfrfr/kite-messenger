@@ -2,10 +2,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { AnimatePresence, motion } from "framer-motion";
 import { CircleUser, MessageSquareText, Route, Film } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
+import {
+  prefetchDashboardAliases,
+  prefetchDiscoverSidebar,
+  prefetchSettingsProfile,
+} from "@/lib/kite-prefetch";
+import type { Language } from "@/lib/translations";
 
 type NavItem = {
   href: string;
@@ -19,6 +24,17 @@ const desktopSidebarWidthPx = 288; // 18rem
 function isActive(pathname: string, href: string) {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function getStoredLangForPrefetch(): Language {
+  if (typeof window === "undefined") return "en";
+  try {
+    const s = localStorage.getItem("nexus-lang");
+    if (s === "fa" || s === "ar" || s === "en" || s === "kr" || s === "tr") return s;
+  } catch {
+    // ignore
+  }
+  return "en";
 }
 
 export default function GlobalNavShell({ children }: { children: ReactNode }) {
@@ -52,6 +68,26 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
       mounted = false;
       subscription.unsubscribe();
     };
+  }, []);
+
+  const prefetchTab = useCallback((href: string) => {
+    void (async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session?.user?.id) return;
+      const uid = session.user.id;
+      const lang = getStoredLangForPrefetch();
+      if (href === "/chat" || href === "/dashboard") {
+        prefetchDiscoverSidebar(uid, lang);
+      }
+      if (href === "/dashboard") {
+        prefetchDashboardAliases(uid);
+      }
+      if (href === "/settings") {
+        prefetchSettingsProfile(uid);
+      }
+    })();
   }, []);
 
   const items: NavItem[] = [
@@ -111,6 +147,8 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
                   <Link
                     key={item.href}
                     href={item.href}
+                    onMouseEnter={() => prefetchTab(item.href)}
+                    onTouchStart={() => prefetchTab(item.href)}
                     className="rounded-xl p-3 flex items-center gap-3 transition hover:bg-white/5"
                     style={{
                       color: active ? "#FF4500" : "rgba(255,255,255,0.85)",
@@ -146,6 +184,8 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
                   <Link
                     key={item.href}
                     href={item.href}
+                    onMouseEnter={() => prefetchTab(item.href)}
+                    onTouchStart={() => prefetchTab(item.href)}
                     aria-label={item.label}
                     className="flex flex-1 flex-col items-center justify-center gap-1 rounded-xl transition"
                     style={{
@@ -178,21 +218,7 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
           hasSession ? "lg:pl-[var(--desktop-sidebar-width)] pb-[var(--bottom-nav-height)]" : ""
         }`}
       >
-        {navMounted ? (
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={pathname}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.18 }}
-            >
-              {children}
-            </motion.div>
-          </AnimatePresence>
-        ) : (
-          <div>{children}</div>
-        )}
+        {children}
       </main>
     </div>
   );

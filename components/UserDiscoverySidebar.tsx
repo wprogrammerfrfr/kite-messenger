@@ -2,46 +2,49 @@
 
 import { supabase } from "@/lib/supabase";
 import { dmPairKey, type DmConnectionStatus } from "@/lib/dm-connections";
-import { useCallback, useEffect, useState } from "react";
+import {
+  fetchSidebarPrivacySnapshot,
+  type SidebarPrivacySnapshot,
+  type SidebarProfileRow,
+} from "@/lib/fetch-sidebar-privacy";
+import { readJsonCache, sidebarPrivacyCacheKey, writeJsonCache } from "@/lib/kite-tab-cache";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, memo } from "react";
 import { t, type Language } from "@/lib/translations";
 import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
 import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
 import { contactDisplayLabel } from "@/lib/contact-display";
+import { SkeletonDiscover } from "@/components/SkeletonDiscover";
 
-type Role = "musician" | "therapist" | "responder" | null;
+type ProfileRow = SidebarProfileRow;
 
-type ProfileRow = {
-  id: string;
-  nickname: string | null;
-  role: Role;
-  lastSeen?: string | null;
-  preferred_locale?: string | null;
-};
-
-type DmConnectionRow = {
-  user_low: string;
-  user_high: string;
-  status: "pending" | "accepted" | "declined";
-  initiated_by: string;
-};
-
-function otherInPair(row: DmConnectionRow, me: string): string {
-  return row.user_low === me ? row.user_high : row.user_low;
+function readSidebarCache(userId: string): SidebarPrivacySnapshot | null {
+  return readJsonCache<SidebarPrivacySnapshot>(sidebarPrivacyCacheKey(userId));
 }
 
-export function UserDiscoverySidebar(props: {
+function applySnapshot(
+  s: SidebarPrivacySnapshot,
+  setters: {
+    setProfilesById: (v: Record<string, ProfileRow>) => void;
+    setDmStatusByPartnerId: (v: Record<string, DmConnectionStatus | null>) => void;
+    setInboxIds: (v: string[]) => void;
+    setRequestIds: (v: string[]) => void;
+  }
+) {
+  setters.setProfilesById(s.profilesById);
+  setters.setDmStatusByPartnerId(s.dmStatusByPartnerId);
+  setters.setInboxIds(s.inboxIds);
+  setters.setRequestIds(s.requestIds);
+}
+
+function UserDiscoverySidebarInner(props: {
   sessionUserId: string;
   activeRecipientId: string | null;
   onSelectRecipientId: (id: string) => void;
   language?: Language;
   onlineUserIds?: Record<string, boolean>;
-  /** Increment from parent after sending a message to refresh inbox/requests. */
   refreshNonce?: number;
-  /** Skip pulse animations (low-bandwidth / data saver). */
   lowBandwidth?: boolean;
-  /** Safety profile modal (nickname / discover name). */
   onOpenSafetyProfile?: (payload: SafetyProfileOpenPayload) => void;
-  /** Local display names for contacts (from `contact_aliases`). */
   aliasByContactId?: Record<string, string>;
 }) {
   const {
@@ -56,167 +59,86 @@ export function UserDiscoverySidebar(props: {
     aliasByContactId = {},
   } = props;
 
-  const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
+  const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>(() => {
+    if (typeof window === "undefined") return {};
+    return readSidebarCache(sessionUserId)?.profilesById ?? {};
+  });
   const [dmStatusByPartnerId, setDmStatusByPartnerId] = useState<
     Record<string, DmConnectionStatus | null>
-  >({});
-  const [inboxIds, setInboxIds] = useState<string[]>([]);
-  const [requestIds, setRequestIds] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
+  >(() => {
+    if (typeof window === "undefined") return {};
+    return readSidebarCache(sessionUserId)?.dmStatusByPartnerId ?? {};
+  });
+  const [inboxIds, setInboxIds] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    return readSidebarCache(sessionUserId)?.inboxIds ?? [];
+  });
+  const [requestIds, setRequestIds] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    return readSidebarCache(sessionUserId)?.requestIds ?? [];
+  });
+  const [loading, setLoading] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return readSidebarCache(sessionUserId) == null;
+  });
   const [loadError, setLoadError] = useState<string | null>(null);
   const [unreadBySender, setUnreadBySender] = useState<Record<string, number>>({});
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const hydratedFromCacheRef = useRef(readSidebarCache(sessionUserId) != null);
 
-  const loadPrivacyLists = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    const me = sessionUserId;
+  const setters = {
+    setProfilesById,
+    setDmStatusByPartnerId,
+    setInboxIds,
+    setRequestIds,
+  };
 
-    try {
-      const { data: connRows, error: connErr } = await supabase
-        .from("dm_connections")
-        .select("user_low, user_high, status, initiated_by")
-        .or(`user_low.eq.${me},user_high.eq.${me}`);
-
-      if (connErr) {
-        if (
-          connErr.message?.includes("relation") ||
-          connErr.message?.includes("does not exist") ||
-          connErr.code === "42P01"
-        ) {
-          setLoadError(
-            "Privacy tables missing. Run the SQL migration in supabase/migrations (dm_connections), then reload."
-          );
-          setInboxIds([me]);
-          setRequestIds([]);
-          setProfilesById({});
-          setLoading(false);
-          return;
-        }
-        throw connErr;
-      }
-
-      const connections = (connRows ?? []) as DmConnectionRow[];
-      const connByPartner = new Map<string, DmConnectionRow>();
-      for (const c of connections) {
-        connByPartner.set(otherInPair(c, me), c);
-      }
-
-      const { data: msgRows, error: msgErr } = await supabase
-        .from("messages")
-        .select("sender_id, receiver_id, created_at")
-        .or(`sender_id.eq.${me},receiver_id.eq.${me}`);
-
-      if (msgErr) throw msgErr;
-
-      const messagePartners = new Set<string>();
-      const latestByPartner: Record<string, number> = {};
-      for (const row of msgRows ?? []) {
-        const s = row.sender_id as string | null;
-        const r = row.receiver_id as string | null;
-        const createdAt = Date.parse((row.created_at as string | null) ?? "");
-        if (s && r) {
-          const partnerId = s === me ? r : r === me ? s : null;
-          if (partnerId) {
-            messagePartners.add(partnerId);
-            if (!Number.isNaN(createdAt)) {
-              latestByPartner[partnerId] = Math.max(latestByPartner[partnerId] ?? 0, createdAt);
-            }
-          }
-        }
-      }
-
-      const inbox = new Set<string>([me]);
-      const requests = new Set<string>();
-
-      const considerPartner = (v: string) => {
-        if (!v || v === me) return;
-        const conn = connByPartner.get(v);
-        if (!conn) {
-          if (messagePartners.has(v)) inbox.add(v);
-          return;
-        }
-        if (conn.status === "accepted") {
-          inbox.add(v);
-          return;
-        }
-        if (conn.status === "declined") {
-          return;
-        }
-        if (conn.status === "pending") {
-          if (conn.initiated_by !== me) {
-            requests.add(v);
-          } else {
-            inbox.add(v);
-          }
-        }
-      };
-
-      for (const v of Array.from(messagePartners)) considerPartner(v);
-      for (const v of Array.from(connByPartner.keys())) considerPartner(v);
-
-      requests.forEach((id) => inbox.delete(id));
-
-      const sortByRecentFirst = (a: string, b: string) => {
-        const aTs = latestByPartner[a] ?? 0;
-        const bTs = latestByPartner[b] ?? 0;
-        if (aTs !== bTs) return bTs - aTs;
-        return a.localeCompare(b);
-      };
-
-      const inboxSorted = Array.from(inbox).sort(sortByRecentFirst);
-      const requestSorted = Array.from(requests).sort(sortByRecentFirst);
-
-      const allIds = Array.from(new Set([...inboxSorted, ...requestSorted]));
-
-      if (allIds.length === 0) {
-        setProfilesById({});
-        setInboxIds([me]);
-        setRequestIds([]);
-        setDmStatusByPartnerId({ [me]: "accepted" });
-        setLoading(false);
-        return;
-      }
-
-      const statusMap: Record<string, DmConnectionStatus | null> = {};
-      for (const id of allIds) {
-        if (id === me) {
-          statusMap[id] = "accepted";
-          continue;
-        }
-        const c = connByPartner.get(id);
-        statusMap[id] = c ? c.status : null;
-      }
-      setDmStatusByPartnerId(statusMap);
-
-      const { data: profRows, error: profErr } = await supabase
-        .from("profiles")
-        .select("id, nickname, role, lastSeen:last_seen, preferred_locale")
-        .in("id", allIds);
-
-      if (profErr) throw profErr;
-
-      const map: Record<string, ProfileRow> = {};
-      for (const p of (profRows ?? []) as ProfileRow[]) {
-        map[p.id] = p;
-      }
-
-      setProfilesById(map);
-      setInboxIds(inboxSorted.filter((id) => id === me || map[id]));
-      setRequestIds(requestSorted.filter((id) => map[id]));
-    } catch {
-      setLoadError(t(language, "conversationsLoadError"));
-      setInboxIds([me]);
-      setRequestIds([]);
-      setProfilesById({});
-    } finally {
+  useLayoutEffect(() => {
+    const cached = readSidebarCache(sessionUserId);
+    hydratedFromCacheRef.current = cached != null;
+    if (cached) {
+      applySnapshot(cached, setters);
+      setLoadError(null);
       setLoading(false);
+    } else {
+      setLoading(true);
+      setProfilesById({});
+      setDmStatusByPartnerId({});
+      setInboxIds([]);
+      setRequestIds([]);
     }
-  }, [sessionUserId, language]);
+  }, [sessionUserId]);
+
+  const revalidatePrivacyLists = useCallback(
+    async (opts?: { showLoading?: boolean }) => {
+      const showLoading = opts?.showLoading ?? !hydratedFromCacheRef.current;
+      if (showLoading) {
+        setLoading(true);
+        setLoadError(null);
+      }
+
+      const result = await fetchSidebarPrivacySnapshot(sessionUserId, language);
+
+      if (result.ok) {
+        const s = result.snapshot;
+        applySnapshot(s, setters);
+        setLoadError(null);
+        writeJsonCache(sidebarPrivacyCacheKey(sessionUserId), s);
+        hydratedFromCacheRef.current = true;
+      } else {
+        setLoadError(result.loadError);
+        applySnapshot(result.fallbackSnapshot, setters);
+      }
+      setLoading(false);
+    },
+    [sessionUserId, language]
+  );
 
   useEffect(() => {
-    void loadPrivacyLists();
-  }, [loadPrivacyLists, refreshNonce]);
+    void revalidatePrivacyLists({
+      showLoading: !hydratedFromCacheRef.current,
+    });
+  }, [revalidatePrivacyLists, refreshNonce]);
 
   /** Realtime “knock”: new pending dm_connection or status change → refresh Requests / Inbox. */
   useEffect(() => {
@@ -233,7 +155,7 @@ export function UserDiscoverySidebar(props: {
           } | null;
           if (!n?.user_low || !n?.user_high) return;
           if (n.user_low !== me && n.user_high !== me) return;
-          void loadPrivacyLists();
+          void revalidatePrivacyLists({ showLoading: false });
         }
       )
       .subscribe();
@@ -241,7 +163,7 @@ export function UserDiscoverySidebar(props: {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [sessionUserId, loadPrivacyLists]);
+  }, [sessionUserId, revalidatePrivacyLists]);
 
   useEffect(() => {
     const me = sessionUserId;
@@ -253,7 +175,7 @@ export function UserDiscoverySidebar(props: {
         (payload) => {
           const row = payload.new as { sender_id?: string | null; receiver_id?: string | null };
           if (row.sender_id !== me && row.receiver_id !== me) return;
-          void loadPrivacyLists();
+          void revalidatePrivacyLists({ showLoading: false });
         }
       )
       .subscribe();
@@ -261,7 +183,7 @@ export function UserDiscoverySidebar(props: {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [sessionUserId, loadPrivacyLists]);
+  }, [sessionUserId, revalidatePrivacyLists]);
 
   const handleAccept = async (otherId: string) => {
     const me = sessionUserId;
@@ -274,7 +196,7 @@ export function UserDiscoverySidebar(props: {
         .eq("user_low", user_low)
         .eq("user_high", user_high)
         .eq("status", "pending");
-      await loadPrivacyLists();
+      await revalidatePrivacyLists({ showLoading: false });
       onSelectRecipientId(otherId);
     } finally {
       setActionBusy(null);
@@ -292,7 +214,7 @@ export function UserDiscoverySidebar(props: {
         .eq("user_low", user_low)
         .eq("user_high", user_high)
         .eq("status", "pending");
-      await loadPrivacyLists();
+      await revalidatePrivacyLists({ showLoading: false });
     } finally {
       setActionBusy(null);
     }
@@ -495,14 +417,14 @@ export function UserDiscoverySidebar(props: {
     );
   };
 
+  const showSkeleton = loading && !hydratedFromCacheRef.current;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
-        {loading ? (
-          <p className="px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
-            {t(language, "loadingUsers")}
-          </p>
-        ) : loadError ? (
+        {showSkeleton ? <SkeletonDiscover rows={6} /> : null}
+
+        {!showSkeleton && loadError ? (
           <p className="px-2 text-xs text-red-500" role="alert">
             {loadError}
           </p>
@@ -563,3 +485,5 @@ export function UserDiscoverySidebar(props: {
     </div>
   );
 }
+
+export const UserDiscoverySidebar = memo(UserDiscoverySidebarInner);

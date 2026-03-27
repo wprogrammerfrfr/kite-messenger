@@ -27,7 +27,7 @@ import {
   ensureDmConnectionAfterSend,
   fetchDmConnectionForPair,
 } from "@/lib/dm-connections";
-import { AnimatePresence, MotionConfig, motion } from "framer-motion";
+import { MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { ArrowLeft, Paperclip, Trash2 } from "lucide-react";
 import Image from "next/image";
@@ -54,6 +54,11 @@ import {
 } from "@/lib/kite-push-client";
 import { isStandaloneDisplayMode } from "@/lib/pwa-standalone";
 import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
+import {
+  dashboardAliasCacheKey,
+  readJsonCache,
+  writeJsonCache,
+} from "@/lib/kite-tab-cache";
 
 interface ThemeVars {
   "--page-bg": string;
@@ -587,10 +592,17 @@ export default function Home() {
 
   const loadContactAliases = useCallback(async () => {
     if (!session?.user?.id) return;
+    const uid = session.user.id;
+    const cached = readJsonCache<{ aliasByContactId: Record<string, string> }>(
+      dashboardAliasCacheKey(uid)
+    );
+    if (cached?.aliasByContactId && Object.keys(cached.aliasByContactId).length > 0) {
+      setContactAliases(cached.aliasByContactId);
+    }
     const { data, error } = await supabase
       .from("contact_aliases")
       .select("contact_id, alias")
-      .eq("user_id", session.user.id);
+      .eq("user_id", uid);
     if (error) return;
     const map: Record<string, string> = {};
     for (const row of data ?? []) {
@@ -602,6 +614,7 @@ export default function Home() {
       if (id && a) map[id] = a;
     }
     setContactAliases(map);
+    writeJsonCache(dashboardAliasCacheKey(uid), { aliasByContactId: map });
   }, [session?.user?.id]);
 
   useEffect(() => {
@@ -1930,7 +1943,7 @@ export default function Home() {
     return <SkeletonChat />;
   }
 
-  const motionDuration = isLowBandwidthMode ? 0 : 0.5;
+  const motionDuration = isLowBandwidthMode ? 0 : 0.2;
 
   return (
     <MotionConfig reducedMotion={isLowBandwidthMode ? "always" : "user"}>
@@ -1944,7 +1957,7 @@ export default function Home() {
       }}
       initial={false}
       animate={themeToMotionStyle(bodyTheme)}
-      transition={{ duration: motionDuration, ease: "easeInOut" }}
+      transition={{ duration: motionDuration, ease: "easeOut" }}
     >
       <main className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
         {!activeRecipientId ? (
