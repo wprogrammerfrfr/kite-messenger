@@ -46,9 +46,8 @@ function connectionSlow(): boolean {
 }
 
 export function ResilienceProvider({ children }: { children: ReactNode }) {
-  const [isOnline, setIsOnline] = useState(
-    typeof navigator !== "undefined" ? navigator.onLine : true
-  );
+  // Must match SSR: avoid reading navigator.onLine in useState (server has no navigator).
+  const [isOnline, setIsOnline] = useState(true);
   const [supportModeOn, setSupportModeOn] = useState(false);
   const [connSlow, setConnSlow] = useState(false);
 
@@ -61,6 +60,7 @@ export function ResilienceProvider({ children }: { children: ReactNode }) {
   }, [syncSupportFromStorage]);
 
   useEffect(() => {
+    setIsOnline(navigator.onLine);
     const onOnline = () => setIsOnline(true);
     const onOffline = () => setIsOnline(false);
     window.addEventListener("online", onOnline);

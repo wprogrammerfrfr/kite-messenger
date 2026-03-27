@@ -1,9 +1,11 @@
 'use client';
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Peer, { type SignalData } from "simple-peer";
 import { supabase } from "@/lib/supabase";
+import { CircleDot } from "lucide-react";
 
 type BridgeStatus = "connecting" | "connected" | "failed";
 type Role = "host" | "peer";
@@ -60,7 +62,7 @@ function statusStyle(status: BridgeStatus) {
   return { text: "Connecting...", color: "text-yellow-400", border: "border-yellow-500/40" };
 }
 
-export default function StudioTestPage() {
+function StudioBridge() {
   const [status, setStatus] = useState<BridgeStatus>("connecting");
   const [statusNote, setStatusNote] = useState("Initializing session...");
   const [inviteLink, setInviteLink] = useState<string | null>(null);
@@ -450,6 +452,65 @@ export default function StudioTestPage() {
             className="mt-2 w-full resize-none rounded-xl border border-stone-800 bg-black/20 p-3 font-mono text-[11px] text-stone-300 outline-none"
             rows={5}
           />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function StudioTestPage() {
+  return (
+    <div className="min-h-screen bg-stone-950 text-white p-6 flex items-center justify-center">
+      <div
+        className="w-full max-w-lg rounded-2xl border border-stone-800 bg-stone-900/40 shadow-2xl p-8"
+        style={{
+          background:
+            "radial-gradient(1200px circle at 20% -10%, rgba(255, 69, 0, 0.22), transparent 40%), radial-gradient(900px circle at 90% 0%, rgba(34, 197, 94, 0.14), transparent 45%), rgba(17, 17, 21, 0.72)",
+        }}
+      >
+        <div className="text-center">
+          <motion.div
+            className="flex items-center gap-3 justify-center"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.35, ease: "easeOut" }}
+          >
+            <motion.span
+              aria-hidden
+              className="relative inline-flex"
+              animate={{ scale: [1, 1.15, 1] }}
+              transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+            >
+              <CircleDot className="h-5 w-5 text-emerald-400" />
+            </motion.span>
+            <div className="text-xs uppercase tracking-widest text-stone-300 font-semibold">
+              Live
+            </div>
+          </motion.div>
+
+          <h1 className="mt-4 text-3xl font-bold text-emerald-400">Kite Studio</h1>
+
+          <motion.p
+            className="mt-5 text-center text-white/90 text-base sm:text-lg"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.1, duration: 0.35, ease: "easeOut" }}
+          >
+            Studio: Professional Collaboration, Zero Latency.
+          </motion.p>
+
+          <p className="mt-2 text-center text-stone-400 text-sm">
+            Coming soon. Developer tooling is available via the Test Lab link.
+          </p>
+
+          <div className="mt-10">
+            <Link
+              href="/studio-bridge"
+              className="w-full inline-flex items-center justify-center rounded-xl px-4 py-3 text-sm font-semibold bg-emerald-500/10 border border-emerald-500/35 hover:bg-emerald-500/20 transition"
+            >
+              Test Lab
+            </Link>
+          </div>
         </div>
       </div>
     </div>

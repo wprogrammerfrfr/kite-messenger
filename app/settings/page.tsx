@@ -1,26 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
-import Link from "next/link";
-import { Sun, Moon } from "lucide-react";
+import { Sun, Moon, AlertTriangle } from "lucide-react";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { getStoredAppearance, setAppearanceMode } from "@/components/theme-provider";
-import { t, type Language } from "@/lib/translations";
 import { InstallKiteButton } from "@/components/InstallKiteButton";
+import { LanguageDropdown } from "@/components/LanguageDropdown";
+import {
+  areNotificationsGloballyDisabled,
+  setNotificationsGloballyDisabled,
+} from "@/lib/kite-notifications";
+import {
+  removeKitePushFromServer,
+  unsubscribeKitePushOnDevice,
+} from "@/lib/kite-push-client";
+import type { Language } from "@/lib/translations";
 
 type Role = "musician" | "therapist" | "responder";
 
 interface Profile {
   nickname: string | null;
+  bio: string | null;
   emergency_contact: string | null;
-  preferred_locale: string | null;
   role: Role | null;
   profile_picture_url: string | null;
 }
-
-const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
 
 const MUSICIAN_THEME = {
   pageBg: "#000000",
@@ -59,17 +65,22 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [resettingKeys, setResettingKeys] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [avatarLightboxOpen, setAvatarLightboxOpen] = useState(false);
+  const [draggingAvatar, setDraggingAvatar] = useState(false);
 
   const [nickname, setNickname] = useState("");
+  const [bio, setBio] = useState("");
   const [emergencyContact, setEmergencyContact] = useState<string>("");
   const [profilePictureUrl, setProfilePictureUrl] = useState<string>("");
   const [role, setRole] = useState<Role>("musician");
 
   const [vibe, setVibe] = useState<Role>("musician");
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
-  const [uiLang, setUiLang] = useState<Language>("en");
+  const [notificationsMuted, setNotificationsMuted] = useState(false);
+  const [language, setLanguage] = useState<Language>("en");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const theme =
     appearance === "light"
@@ -91,18 +102,28 @@ export default function SettingsPage() {
         setVibe("musician");
       }
       setAppearance(getStoredAppearance());
-      const lng = localStorage.getItem("nexus-lang");
-      if (
-        lng === "en" ||
-        lng === "fa" ||
-        lng === "ar" ||
-        lng === "kr" ||
-        lng === "tr"
-      ) {
-        setUiLang(lng);
-      }
     } catch {
       // Ignore storage errors and keep default.
+    }
+  }, []);
+
+  useEffect(() => {
+    const syncNotifications = () =>
+      setNotificationsMuted(areNotificationsGloballyDisabled());
+    syncNotifications();
+    window.addEventListener("kite-notifications-setting", syncNotifications);
+    window.addEventListener("storage", syncNotifications);
+    return () => {
+      window.removeEventListener("kite-notifications-setting", syncNotifications);
+      window.removeEventListener("storage", syncNotifications);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = localStorage.getItem("nexus-lang");
+    if (stored === "fa" || stored === "ar" || stored === "en" || stored === "kr" || stored === "tr") {
+      setLanguage(stored);
     }
   }, []);
 
@@ -125,9 +146,7 @@ export default function SettingsPage() {
         const userId = sessionData.session.user.id;
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select(
-            "nickname, emergency_contact, preferred_locale, role, profile_picture_url"
-          )
+          .select("nickname, bio, emergency_contact, role, profile_picture_url")
           .eq("id", userId)
           .maybeSingle();
 
@@ -139,17 +158,9 @@ export default function SettingsPage() {
         } else if (profile) {
           const typedProfile = profile as Profile;
           setNickname(typedProfile.nickname ?? "");
+          setBio(typedProfile.bio ?? "");
           setEmergencyContact(typedProfile.emergency_contact ?? "");
           setProfilePictureUrl(typedProfile.profile_picture_url ?? "");
-          if (
-            typedProfile.preferred_locale === "en" ||
-            typedProfile.preferred_locale === "fa" ||
-            typedProfile.preferred_locale === "ar" ||
-            typedProfile.preferred_locale === "kr" ||
-            typedProfile.preferred_locale === "tr"
-          ) {
-            setUiLang(typedProfile.preferred_locale);
-          }
           if (
             typedProfile.role === "therapist" ||
             typedProfile.role === "musician" ||
@@ -218,8 +229,8 @@ export default function SettingsPage() {
         {
           id: session.user.id,
           nickname: trimmedNickname || null,
+          bio: bio.trim() || null,
           emergency_contact: emergencyContact.trim() || null,
-          preferred_locale: uiLang,
           profile_picture_url: profilePictureUrl.trim() || null,
           role,
         },
@@ -240,40 +251,39 @@ export default function SettingsPage() {
     }
   };
 
-  const handleResetKeys = async () => {
-    if (!session || resettingKeys) return;
-    const confirmed =
-      typeof window !== "undefined"
-        ? window.confirm(
-            "Reset your encryption keys? This clears local key storage and your uploaded public key."
-          )
-        : false;
-    if (!confirmed) return;
-
-    setResettingKeys(true);
+  const handleAvatarUpload = async (file: File) => {
+    if (!session) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please choose an image file.");
+      return;
+    }
+    setAvatarUploading(true);
     setError(null);
-    setSuccess(null);
-
     try {
-      if (typeof window !== "undefined") {
-        localStorage.removeItem(E2E_KEY_STORAGE_KEY);
-        localStorage.removeItem("nexus-e2e-keypair");
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
+      const path = `${session.user.id}/profile-${Date.now()}-${safeName}`;
+      const { error: uploadError } = await supabase.storage
+        .from("chat-images")
+        .upload(path, file, {
+          cacheControl: "3600",
+          upsert: true,
+          contentType: file.type || "image/jpeg",
+        });
+      if (uploadError) {
+        setError(uploadError.message);
+        return;
       }
-
-      const { error: profileError } = await supabase
-        .from("profiles")
-        .update({ public_key: null })
-        .eq("id", session.user.id);
-
-      if (profileError) {
-        setError(profileError.message);
-      } else {
-        setSuccess("Encryption keys reset. Reopen chat to generate and sync a new key.");
+      const { data } = supabase.storage.from("chat-images").getPublicUrl(path);
+      if (!data?.publicUrl) {
+        setError("Could not generate image URL.");
+        return;
       }
+      setProfilePictureUrl(data.publicUrl);
+      setSuccess("Profile picture updated.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to reset keys.");
+      setError(err instanceof Error ? err.message : "Failed to upload profile picture.");
     } finally {
-      setResettingKeys(false);
+      setAvatarUploading(false);
     }
   };
 
@@ -281,9 +291,7 @@ export default function SettingsPage() {
     if (!session || deletingAccount) return;
     const ok =
       typeof window !== "undefined"
-        ? window.confirm(
-            "Permanently delete your account? This removes your profile, all messages, and your login. This cannot be undone."
-          )
+        ? window.confirm("Are you sure? This cannot be undone.")
         : false;
     if (!ok) return;
 
@@ -310,89 +318,32 @@ export default function SettingsPage() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center px-4"
+      className="min-h-[calc(100dvh-var(--bottom-nav-height))] px-4 py-6 sm:py-8"
       style={{ background: theme.pageBg, color: theme.textPrimary }}
     >
       <div
-        className="w-full max-w-xl rounded-2xl border shadow-xl backdrop-blur-xl p-6 sm:p-8"
+        className="mx-auto w-full max-w-2xl rounded-3xl border shadow-xl backdrop-blur-xl p-6 sm:p-8"
         style={{
           background: theme.panelBg,
           borderColor: theme.border,
         }}
       >
         <InstallKiteButton
-          language={uiLang}
+          language="en"
           variant="compact"
           className="mb-5"
         />
 
-        <div className="flex flex-col gap-4 mb-6 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">
-              Settings
-            </h1>
-            <p
-              className="text-xs sm:text-sm mt-1"
-              style={{ color: theme.textSecondary }}
-            >
-              Update how Kite knows you.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <div
-              className="flex items-center gap-2 rounded-xl border px-2 py-1.5"
-              style={{ borderColor: theme.border }}
-            >
-              <span
-                className="text-[10px] font-semibold uppercase tracking-wide"
-                style={{ color: theme.textSecondary }}
-              >
-                {t(uiLang, "settingsAppearanceLabel")}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  const next = appearance === "dark" ? "light" : "dark";
-                  setAppearance(next);
-                  setAppearanceMode(next);
-                }}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg transition hover:opacity-90"
-                style={{
-                  background: theme.accent,
-                  color: appearance === "dark" ? "#fff" : "#000",
-                }}
-                title={
-                  appearance === "dark"
-                    ? t(uiLang, "settingsThemeLight")
-                    : t(uiLang, "settingsThemeDark")
-                }
-                aria-label={
-                  appearance === "dark"
-                    ? t(uiLang, "settingsThemeLight")
-                    : t(uiLang, "settingsThemeDark")
-                }
-              >
-                {appearance === "dark" ? (
-                  <Sun className="h-4 w-4" aria-hidden />
-                ) : (
-                  <Moon className="h-4 w-4" aria-hidden />
-                )}
-              </button>
-            </div>
-
-            <Link
-              href="/chat"
-              className="inline-flex items-center rounded-xl px-3 py-2 text-xs sm:text-sm font-medium border transition-colors"
-              style={{
-                borderColor: theme.border,
-                color: theme.textPrimary,
-                background: "transparent",
-              }}
-            >
-              ← Back to Chat
-            </Link>
-          </div>
+        <div className="mb-6 text-center">
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            Profile Hub
+          </h1>
+          <p
+            className="mt-1 text-xs sm:text-sm"
+            style={{ color: theme.textSecondary }}
+          >
+            Manage your identity and account preferences.
+          </p>
         </div>
 
         {loading ? (
@@ -405,18 +356,97 @@ export default function SettingsPage() {
         ) : !session ? (
           <p className="text-sm text-red-500">{error ?? "Not authenticated."}</p>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <p
-              className="rounded-xl border px-3 py-2.5 text-xs leading-relaxed sm:text-sm"
-              style={{
-                borderColor: "rgba(255, 69, 0, 0.35)",
-                background: "rgba(255, 69, 0, 0.06)",
-                color: theme.textSecondary,
-              }}
-              role="note"
-            >
-              {t(uiLang, "settingsSupportModeDataHint")}
-            </p>
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <section className="rounded-2xl border px-4 py-5 sm:px-6" style={{ borderColor: theme.border }}>
+              <div className="flex flex-col items-center text-center">
+              <div
+                className={`h-24 w-24 rounded-full overflow-hidden ${draggingAvatar ? "ring-2 ring-amber-400" : ""}`}
+                style={{ borderColor: theme.border }}
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  if (profilePictureUrl) {
+                    setAvatarLightboxOpen(true);
+                    return;
+                  }
+                  fileInputRef.current?.click();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    if (profilePictureUrl) {
+                      setAvatarLightboxOpen(true);
+                    } else {
+                      fileInputRef.current?.click();
+                    }
+                  }
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDraggingAvatar(true);
+                }}
+                onDragLeave={() => setDraggingAvatar(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDraggingAvatar(false);
+                  const file = e.dataTransfer.files?.[0];
+                  if (file) void handleAvatarUpload(file);
+                }}
+              >
+                {profilePictureUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={profilePictureUrl}
+                    alt="Your avatar"
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div
+                    className="h-full w-full flex items-center justify-center bg-black/10"
+                    style={{ background: "rgba(255,255,255,0.03)" }}
+                  >
+                    <span className="text-2xl" style={{ color: theme.textSecondary, fontWeight: 700 }}>
+                      {(nickname.trim()[0] ?? "").toUpperCase()}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void handleAvatarUpload(file);
+                  e.currentTarget.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={avatarUploading}
+                className="mt-3 rounded-xl px-3 py-1.5 text-xs font-semibold"
+                style={{ background: "rgba(255,255,255,0.12)", color: theme.textPrimary }}
+              >
+                {avatarUploading ? "Uploading..." : "Upload Photo"}
+              </button>
+              <div className="mt-4 w-full">
+                <div
+                  className="text-xs uppercase tracking-[0.18em] font-medium"
+                  style={{ color: theme.textSecondary }}
+                >
+                  Your Profile
+                </div>
+                <div className="mt-1 text-xl font-semibold" style={{ color: theme.textPrimary }}>
+                  {nickname.trim() ? nickname.trim() : "Your name"}
+                </div>
+                <div className="mx-auto mt-2 max-w-lg text-sm" style={{ color: theme.textSecondary, lineHeight: 1.5 }}>
+                  {bio.trim() ? bio.trim() : "Add a bio to show your vibe."}
+                </div>
+              </div>
+              </div>
+            </section>
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium uppercase tracking-[0.18em]">
@@ -437,11 +467,142 @@ export default function SettingsPage() {
             </div>
 
             <div className="space-y-1.5">
+              <label className="text-xs font-medium uppercase tracking-[0.18em]">
+                Bio
+              </label>
+              <textarea
+                value={bio}
+                onChange={(e) => setBio(e.target.value)}
+                placeholder="A short line about you (optional)."
+                className="w-full min-h-[96px] rounded-xl px-3 py-2.5 text-sm outline-none border resize-none"
+                style={{
+                  background: theme.inputBg,
+                  borderColor: theme.border,
+                  color: theme.textPrimary,
+                }}
+              />
+            </div>
+
+            <section className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: theme.border }}>
+              <div className="mb-4">
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em]" style={{ color: theme.textPrimary }}>
+                  Preferences
+                </h2>
+                <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
+                  Appearance and account controls.
+                </p>
+              </div>
+
+              <div
+                className="mb-4 flex items-center justify-between rounded-xl border px-3 py-2"
+                style={{ borderColor: theme.border }}
+              >
+                <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: theme.textSecondary }}>
+                  Appearance
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = appearance === "dark" ? "light" : "dark";
+                    setAppearance(next);
+                    setAppearanceMode(next);
+                  }}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg transition hover:opacity-90"
+                  style={{
+                    background: theme.accent,
+                    color: appearance === "dark" ? "#fff" : "#000",
+                  }}
+                  title={
+                    appearance === "dark"
+                      ? "Switch to light mode"
+                      : "Switch to dark mode"
+                  }
+                  aria-label={
+                    appearance === "dark"
+                      ? "Switch to light mode"
+                      : "Switch to dark mode"
+                  }
+                >
+                  {appearance === "dark" ? (
+                    <Sun className="h-4 w-4" aria-hidden />
+                  ) : (
+                    <Moon className="h-4 w-4" aria-hidden />
+                  )}
+                </button>
+              </div>
+
+              <div
+                className="mb-4 flex items-center justify-between rounded-xl border px-3 py-2"
+                style={{ borderColor: theme.border }}
+              >
+                <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: theme.textSecondary }}>
+                  Notifications
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const next = !notificationsMuted;
+                    setNotificationsMuted(next);
+                    setNotificationsGloballyDisabled(next);
+                    if (next) {
+                      const {
+                        data: { session: s },
+                      } = await supabase.auth.getSession();
+                      if (s?.access_token) await removeKitePushFromServer(s.access_token);
+                      await unsubscribeKitePushOnDevice();
+                    }
+                  }}
+                  className="rounded-lg px-3 py-1.5 text-xs font-semibold hover:brightness-110 active:scale-95 transition-transform"
+                  style={{
+                    background: notificationsMuted ? "rgba(255,255,255,0.08)" : theme.accent,
+                    color: notificationsMuted ? theme.textSecondary : vibe === "therapist" ? "#fff" : "#000",
+                  }}
+                >
+                  {notificationsMuted ? "Enable" : "Disable"}
+                </button>
+              </div>
+
+              <div
+                className="mb-4 flex items-center justify-between rounded-xl border px-3 py-2"
+                style={{ borderColor: theme.border }}
+              >
+                <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: theme.textSecondary }}>
+                  Language
+                </span>
+                <LanguageDropdown
+                  value={language}
+                  onChange={(next) => {
+                    setLanguage(next);
+                    try {
+                      localStorage.setItem("nexus-lang", next);
+                      document.cookie = `nexus-lang=${next}; path=/; max-age=${60 * 60 * 24 * 365}`;
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                  compact
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  await supabase.auth.signOut();
+                  if (typeof window !== "undefined") {
+                    window.location.href = "/";
+                  }
+                }}
+                className="w-full rounded-xl px-3 py-2 text-sm font-bold text-white bg-red-600 border border-red-500 hover:brightness-110 active:scale-95 transition-transform"
+              >
+                Log Out
+              </button>
+
+            <div className="space-y-1.5">
               <label
                 htmlFor="emergency-contact-number"
                 className="text-xs font-medium uppercase tracking-[0.18em]"
               >
-                {t(uiLang, "settingsEmergencyNumberLabel")}
+                Emergency Contact Number
               </label>
               <input
                 id="emergency-contact-number"
@@ -464,7 +625,7 @@ export default function SettingsPage() {
                 className="text-xs leading-relaxed"
                 style={{ color: theme.textSecondary }}
               >
-                {t(uiLang, "settingsEmergencyNumberSubtext")}
+                Visible only to your approved contacts in emergency workflows.
               </p>
             </div>
 
@@ -548,6 +709,7 @@ export default function SettingsPage() {
                 </p>
               </div>
             )}
+            </section>
 
             {error && (
               <div className="rounded-xl border px-3 py-2 text-xs text-red-500 border-red-400/70 bg-red-500/5">
@@ -573,45 +735,33 @@ export default function SettingsPage() {
               {saving ? "Saving…" : "Save Changes"}
             </button>
 
-            <p
-              className="text-xs leading-relaxed rounded-xl border px-3 py-2.5"
-              style={{
-                borderColor: "rgba(255, 69, 0, 0.35)",
-                color: theme.textSecondary,
-                background: "rgba(255, 69, 0, 0.06)",
-              }}
-            >
-              Resetting keys will generate a new set of End-to-End Encryption (E2EE) keys.{" "}
-              <strong className="text-red-400">
-                Warning: You will lose access to previous message history encrypted with your old keys.
-              </strong>{" "}
-              Use only if you suspect your current keys are compromised.
-            </p>
-            <button
-              type="button"
-              onClick={handleResetKeys}
-              disabled={resettingKeys}
-              className="inline-flex w-full items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold border transition disabled:opacity-60 disabled:cursor-not-allowed"
-              style={{
-                borderColor: theme.border,
-                color: theme.textPrimary,
-                background: "transparent",
-              }}
-            >
-              {resettingKeys ? "Resetting Keys…" : "Reset Keys"}
-            </button>
-
             <button
               type="button"
               onClick={() => void handleDeleteAccount()}
               disabled={deletingAccount}
-              className="inline-flex w-full items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold transition disabled:opacity-60 disabled:cursor-not-allowed border border-red-500/60 bg-red-950/40 text-red-200 hover:bg-red-950/70"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white bg-red-700 border border-red-600 hover:brightness-110 active:scale-95 transition-transform disabled:cursor-not-allowed"
             >
+              <AlertTriangle className="h-4 w-4" aria-hidden />
               {deletingAccount ? "Deleting account…" : "Delete account"}
             </button>
           </form>
         )}
       </div>
+      {avatarLightboxOpen && profilePictureUrl ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4"
+          onClick={() => setAvatarLightboxOpen(false)}
+          role="dialog"
+          aria-label="Profile image preview"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={profilePictureUrl}
+            alt="Profile preview"
+            className="max-h-[90vh] max-w-[95vw] rounded-2xl object-contain"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

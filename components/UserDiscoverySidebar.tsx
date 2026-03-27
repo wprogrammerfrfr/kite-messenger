@@ -104,18 +104,25 @@ export function UserDiscoverySidebar(props: {
 
       const { data: msgRows, error: msgErr } = await supabase
         .from("messages")
-        .select("sender_id, receiver_id")
+        .select("sender_id, receiver_id, created_at")
         .or(`sender_id.eq.${me},receiver_id.eq.${me}`);
 
       if (msgErr) throw msgErr;
 
       const messagePartners = new Set<string>();
+      const latestByPartner: Record<string, number> = {};
       for (const row of msgRows ?? []) {
         const s = row.sender_id as string | null;
         const r = row.receiver_id as string | null;
+        const createdAt = Date.parse((row.created_at as string | null) ?? "");
         if (s && r) {
-          if (s === me) messagePartners.add(r);
-          else if (r === me) messagePartners.add(s);
+          const partnerId = s === me ? r : r === me ? s : null;
+          if (partnerId) {
+            messagePartners.add(partnerId);
+            if (!Number.isNaN(createdAt)) {
+              latestByPartner[partnerId] = Math.max(latestByPartner[partnerId] ?? 0, createdAt);
+            }
+          }
         }
       }
 
@@ -150,12 +157,15 @@ export function UserDiscoverySidebar(props: {
 
       requests.forEach((id) => inbox.delete(id));
 
-      const inboxSorted = Array.from(inbox).sort((a, b) => {
-        if (a === me) return -1;
-        if (b === me) return 1;
+      const sortByRecentFirst = (a: string, b: string) => {
+        const aTs = latestByPartner[a] ?? 0;
+        const bTs = latestByPartner[b] ?? 0;
+        if (aTs !== bTs) return bTs - aTs;
         return a.localeCompare(b);
-      });
-      const requestSorted = Array.from(requests).sort((a, b) => a.localeCompare(b));
+      };
+
+      const inboxSorted = Array.from(inbox).sort(sortByRecentFirst);
+      const requestSorted = Array.from(requests).sort(sortByRecentFirst);
 
       const allIds = Array.from(new Set([...inboxSorted, ...requestSorted]));
 
@@ -223,6 +233,26 @@ export function UserDiscoverySidebar(props: {
           } | null;
           if (!n?.user_low || !n?.user_high) return;
           if (n.user_low !== me && n.user_high !== me) return;
+          void loadPrivacyLists();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [sessionUserId, loadPrivacyLists]);
+
+  useEffect(() => {
+    const me = sessionUserId;
+    const channel = supabase
+      .channel(`sidebar-messages-${me}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        (payload) => {
+          const row = payload.new as { sender_id?: string | null; receiver_id?: string | null };
+          if (row.sender_id !== me && row.receiver_id !== me) return;
           void loadPrivacyLists();
         }
       )
@@ -374,30 +404,22 @@ export function UserDiscoverySidebar(props: {
     return (
       <div
         key={p.id}
-        className="w-full rounded-lg px-2 py-2 transition-colors"
-        style={{
-          background: isActive ? "rgba(255, 69, 0, 0.14)" : "transparent",
-          border: isActive ? "2px solid #FF4500" : "1px solid transparent",
-          boxShadow: isActive ? "0 0 0 1px rgba(255, 69, 0, 0.25)" : undefined,
-        }}
+        className={`mb-3 rounded-2xl bg-white dark:bg-white/5 p-4 hover:bg-orange-50 dark:hover:bg-white/10 transition-all border border-orange-400/50 dark:border-none ${
+          isActive ? "ring-1 ring-orange-500/30 bg-orange-50 dark:bg-white/15" : ""
+        }`}
       >
         <div className="flex items-start justify-between gap-2 px-2 py-1.5 text-sm">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                className="min-w-0 truncate text-left font-medium underline-offset-2 hover:underline"
+                className="min-w-0 truncate text-left text-base font-semibold underline-offset-2 hover:underline"
                 style={{ color: "var(--text-primary)" }}
                 onClick={openSafetyProfile}
                 aria-label={`${t(language, "safetyProfileOpenProfileAria")}: ${displayName}`}
               >
                 {displayName}
               </button>
-              {isMe ? (
-                <span className="shrink-0 text-xs" style={{ color: "var(--text-secondary)" }}>
-                  {t(language, "youLabel")}
-                </span>
-              ) : null}
             </div>
             <button
               type="button"
@@ -462,8 +484,8 @@ export function UserDiscoverySidebar(props: {
               type="button"
               disabled={busy}
               onClick={() => void handleDecline(p.id)}
-              className="flex-1 rounded-lg border px-2 py-1.5 text-xs font-medium transition disabled:opacity-50"
-              style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+              className="flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition disabled:opacity-50"
+              style={{ background: "rgba(255,255,255,0.08)", color: "var(--text-secondary)" }}
             >
               {t(language, "messageRequestDecline")}
             </button>
@@ -507,7 +529,7 @@ export function UserDiscoverySidebar(props: {
                 {t(language, "sidebarNoRequests")}
               </p>
             ) : (
-              <div className="space-y-1 pb-4">
+              <div className="space-y-3 pb-4">
                 {requestIds.map((id) => {
                   const p = profilesById[id];
                   if (!p) return null;
@@ -527,7 +549,7 @@ export function UserDiscoverySidebar(props: {
                 {t(language, "noMatchingUsers")}
               </p>
             ) : (
-              <div className="space-y-1">
+              <div className="space-y-3">
                 {inboxIds.map((id) => {
                   const p = profilesById[id];
                   if (!p) return null;

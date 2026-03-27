@@ -11,6 +11,7 @@ import {
   type KeyPair,
 } from "@/lib/crypto";
 import { t, type Language } from "@/lib/translations";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 import { Auth } from "@/components/Auth";
@@ -19,7 +20,6 @@ import {
   SafetyProfileModal,
   type SafetyProfileOpenPayload,
 } from "@/components/SafetyProfileModal";
-import { ModeController } from "@/components/ModeController";
 import {
   acceptDmConnection,
   declineDmConnection,
@@ -27,11 +27,9 @@ import {
   ensureDmConnectionAfterSend,
   fetchDmConnectionForPair,
 } from "@/lib/dm-connections";
-import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Menu, Settings, Paperclip, X, House } from "lucide-react";
-import Link from "next/link";
+import { ArrowLeft, Paperclip, Trash2 } from "lucide-react";
 import Image from "next/image";
 import { useResilience } from "@/components/resilience-provider";
 import { withPatience } from "@/lib/network-patience";
@@ -43,9 +41,8 @@ import {
   readSupportModeFromStorage,
   writeSupportModeToStorage,
 } from "@/lib/support-mode-storage";
-import { LanguageDropdown } from "@/components/LanguageDropdown";
-import { EmptyChatDashboard } from "@/components/EmptyChatDashboard";
 import { contactDisplayLabel } from "@/lib/contact-display";
+import { SkeletonChat } from "@/components/SkeletonChat";
 import {
   areNotificationsGloballyDisabled,
   setNotificationsGloballyDisabled,
@@ -56,45 +53,7 @@ import {
   unsubscribeKitePushOnDevice,
 } from "@/lib/kite-push-client";
 import { isStandaloneDisplayMode } from "@/lib/pwa-standalone";
-
-/** Brand icon: `public/kite-mobile-icon.png` */
-const KITE_APP_ICON = "/kite-mobile-icon.png";
-
-function KiteBrandMark({
-  lowBandwidth,
-  size = 36,
-}: {
-  lowBandwidth: boolean;
-  size?: number;
-}) {
-  if (lowBandwidth) {
-    return (
-      <div
-        className="flex shrink-0 items-center justify-center rounded-full border-2 font-bold text-black"
-        style={{
-          width: size,
-          height: size,
-          borderColor: "var(--border)",
-          background: "#FF4500",
-          fontSize: Math.max(12, size * 0.38),
-        }}
-        aria-hidden
-      >
-        K
-      </div>
-    );
-  }
-  return (
-    <Image
-      src={KITE_APP_ICON}
-      alt=""
-      width={size}
-      height={size}
-      className="h-full w-full object-cover"
-      priority
-    />
-  );
-}
+import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
 
 interface ThemeVars {
   "--page-bg": string;
@@ -282,8 +241,7 @@ export default function Home() {
   // Presence: users currently connected to "online-users".
   const [onlineUserIds, setOnlineUserIds] = useState<Record<string, boolean>>({});
 
-  /** Mobile / tablet: sidebar hidden until hamburger opens (overlay). Desktop lg+: always visible. */
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const router = useRouter();
   const [sidebarRefreshNonce, setSidebarRefreshNonce] = useState(0);
   const [nicknameBannerDismissed, setNicknameBannerDismissed] = useState(false);
   /** DM row for active thread: null status = no row yet (composer allowed). */
@@ -296,13 +254,24 @@ export default function Home() {
     role: string | null;
     preferred_locale: string | null;
     lastSeen: string | null;
+    profilePictureUrl: string | null;
   } | null>(null);
   const [myProfileBadges, setMyProfileBadges] = useState<{
     role: string | null;
     preferred_locale: string | null;
-  }>({ role: null, preferred_locale: null });
+    profilePictureUrl: string | null;
+  }>({ role: null, preferred_locale: null, profilePictureUrl: null });
+  const [chatImageLightboxUrl, setChatImageLightboxUrl] = useState<string | null>(null);
   const [safetyProfilePayload, setSafetyProfilePayload] =
     useState<SafetyProfileOpenPayload | null>(null);
+
+  const searchParams = useSearchParams();
+
+  // Support deep-linking into a thread from `/dashboard` (e.g. `?recipient=<id>`).
+  useEffect(() => {
+    const recipient = searchParams.get("recipient");
+    setActiveRecipientId(recipient ?? null);
+  }, [searchParams]);
   /** Local-only labels for contacts (`contact_aliases`). */
   const [contactAliases, setContactAliases] = useState<Record<string, string>>({});
   const [dmActionBusy, setDmActionBusy] = useState(false);
@@ -571,7 +540,7 @@ export default function Home() {
     const loadProfile = async () => {
       const { data, error } = await supabase
         .from("profiles")
-        .select("nickname, role, preferred_locale")
+        .select("nickname, role, preferred_locale, profile_picture_url")
         .eq("id", session.user.id)
         .maybeSingle();
 
@@ -579,7 +548,7 @@ export default function Home() {
 
       if (error || !data) {
         setNickname(null);
-        setMyProfileBadges({ role: null, preferred_locale: null });
+        setMyProfileBadges({ role: null, preferred_locale: null, profilePictureUrl: null });
         return;
       }
 
@@ -598,6 +567,8 @@ export default function Home() {
           data.preferred_locale === "tr"
             ? data.preferred_locale
             : null,
+        profilePictureUrl:
+          typeof data.profile_picture_url === "string" ? data.profile_picture_url : null,
       });
     };
 
@@ -661,12 +632,17 @@ export default function Home() {
 
       if (other === me) {
         setActiveRecipientNickname(nickname?.trim() ? nickname.trim() : null);
-        setActiveRecipientMeta(null);
+        setActiveRecipientMeta({
+          role: myProfileBadges.role,
+          preferred_locale: myProfileBadges.preferred_locale,
+          lastSeen: null,
+          profilePictureUrl: myProfileBadges.profilePictureUrl,
+        });
         return;
       }
       const { data } = await supabase
         .from("profiles")
-        .select("nickname, role, preferred_locale, last_seen")
+        .select("nickname, role, preferred_locale, last_seen, profile_picture_url")
         .eq("id", other)
         .maybeSingle();
       if (cancelled) return;
@@ -689,6 +665,8 @@ export default function Home() {
                   : null,
               lastSeen:
                 typeof data.last_seen === "string" ? data.last_seen : null,
+              profilePictureUrl:
+                typeof data.profile_picture_url === "string" ? data.profile_picture_url : null,
             }
           : null
       );
@@ -697,7 +675,15 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [session, activeRecipientId, nickname, sidebarRefreshNonce]);
+  }, [
+    session,
+    activeRecipientId,
+    nickname,
+    sidebarRefreshNonce,
+    myProfileBadges.role,
+    myProfileBadges.preferred_locale,
+    myProfileBadges.profilePictureUrl,
+  ]);
 
   // Realtime: partner accepted/declined or row inserted → refresh thread gatekeeping.
   useEffect(() => {
@@ -1739,6 +1725,10 @@ export default function Home() {
     activeRecipientId ? contactAliases[activeRecipientId] : undefined,
     t(language, "anonymousLabel")
   );
+  const recipientStatusText =
+    activeRecipientId && onlineUserIds[activeRecipientId]
+      ? "Online"
+      : formatRelativeLastSeen(activeRecipientMeta?.lastSeen ?? null, language) || "Offline";
 
   const handleOpenSafetyProfile = useCallback(
     (payload: SafetyProfileOpenPayload) => {
@@ -1765,29 +1755,6 @@ export default function Home() {
     },
     []
   );
-
-  const openMyProfile = useCallback(() => {
-    if (!session?.user?.id) return;
-    handleOpenSafetyProfile({
-      target: {
-        id: session.user.id,
-        nickname: nickname?.trim() ?? "",
-        localAlias: null,
-        role: myProfileBadges.role,
-        preferred_locale: myProfileBadges.preferred_locale,
-        isOnline: true,
-        lastSeen: null,
-      },
-      dmStatus: "accepted",
-      isSelf: true,
-    });
-  }, [
-    session?.user?.id,
-    nickname,
-    myProfileBadges.role,
-    myProfileBadges.preferred_locale,
-    handleOpenSafetyProfile,
-  ]);
 
   const openActiveRecipientProfile = useCallback(() => {
     if (!session?.user?.id || !activeRecipientId) return;
@@ -1841,6 +1808,7 @@ export default function Home() {
     !session ||
     !activeRecipientId ||
     isRecipientMessageRequest ||
+    isSenderAwaitingAccept ||
     isThreadDeclined;
 
   const handleAcceptMessageRequest = async () => {
@@ -1878,6 +1846,49 @@ export default function Home() {
     }
   };
 
+  const handleSelectRecipient = useCallback(
+    (id: string) => {
+      setActiveRecipientId(id);
+      router.push(`/chat?recipient=${encodeURIComponent(id)}`);
+    },
+    [router]
+  );
+
+  const handleBackToList = useCallback(() => {
+    setActiveRecipientId(null);
+    router.push("/chat");
+  }, [router]);
+
+  const handleWipeConversation = useCallback(async () => {
+    if (!session?.user?.id || !activeRecipientId) return;
+    const confirmed =
+      typeof window !== "undefined"
+        ? window.confirm("Wipe this chat? This cannot be undone.")
+        : false;
+    if (!confirmed) return;
+
+    const myId = session.user.id;
+    const otherId = activeRecipientId;
+    const pairFilter = `and(sender_id.eq.${myId},receiver_id.eq.${otherId}),and(sender_id.eq.${otherId},receiver_id.eq.${myId})`;
+
+    const { error } = await supabase.from("messages").delete().or(pairFilter);
+    if (error) {
+      setSendError(error.message ?? "Failed to wipe chat.");
+      return;
+    }
+
+    setMessages((prev) =>
+      prev.filter(
+        (m) =>
+          !(
+            (m.senderId === myId && m.receiverId === otherId) ||
+            (m.senderId === otherId && m.receiverId === myId)
+          )
+      )
+    );
+    handleBackToList();
+  }, [activeRecipientId, handleBackToList, session?.user?.id]);
+
   const canSend =
     Boolean(trimmedInput) &&
     Boolean(senderKeys) &&
@@ -1900,34 +1911,7 @@ export default function Home() {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    if (mobileSidebarOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "";
-    }
-    return () => {
-      document.body.style.overflow = "";
-    };
-  }, [mobileSidebarOpen]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const mq = window.matchMedia("(min-width: 1024px)");
-    const closeOnDesktop = () => {
-      if (mq.matches) setMobileSidebarOpen(false);
-    };
-    mq.addEventListener("change", closeOnDesktop);
-    return () => mq.removeEventListener("change", closeOnDesktop);
-  }, []);
-
   const isRtlLayout = language === "fa" || language === "ar";
-  const isLtr = !isRtlLayout;
-  const sidebarSlideClosed = isLtr ? "-translate-x-full" : "translate-x-full";
-  const sidebarSlideOpen = "translate-x-0";
-  const sidebarPos = isLtr ? "left-0" : "right-0";
-  const sidebarBorder = isLtr ? "border-r" : "border-l";
 
   const bodyTheme: ThemeVars = isSupportMode
     ? SUPPORT_THEME
@@ -1943,29 +1927,15 @@ export default function Home() {
     return <Auth />;
   }
   if (!senderKeys) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-black text-white">
-        <div className="rounded-xl border border-white/20 px-6 py-4 text-sm font-semibold">
-          Loading secure keys...
-        </div>
-      </div>
-    );
+    return <SkeletonChat />;
   }
 
   const motionDuration = isLowBandwidthMode ? 0 : 0.5;
-  const handleLanguageChange = (lang: Language) => {
-    setLanguage(lang);
-    try {
-      localStorage.setItem("nexus-lang", lang);
-    } catch {
-      // ignore
-    }
-  };
 
   return (
     <MotionConfig reducedMotion={isLowBandwidthMode ? "always" : "user"}>
     <motion.div
-      className="relative flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden"
+      className="relative flex h-[calc(100dvh-var(--bottom-nav-height))] max-h-[calc(100dvh-var(--bottom-nav-height))] flex-col overflow-hidden"
       dir={isRtlLayout ? "rtl" : "ltr"}
       data-theme={isSupportMode ? "support" : "default"}
       style={{
@@ -1976,398 +1946,99 @@ export default function Home() {
       animate={themeToMotionStyle(bodyTheme)}
       transition={{ duration: motionDuration, ease: "easeInOut" }}
     >
-      <div
-        className={`relative flex min-h-0 flex-1 overflow-hidden ${
-          isRtlLayout ? "flex-row-reverse" : ""
-        }`}
-      >
-      {/* Mobile overlay backdrop */}
-      <button
-        type="button"
-        aria-label="Close sidebar"
-        className={`fixed inset-0 z-40 bg-black/50 transition-opacity lg:hidden ${
-          mobileSidebarOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
-        }`}
-        onClick={() => setMobileSidebarOpen(false)}
-      />
-
-      {/* Sidebar: overlay drawer on small screens; normal column from lg */}
-      <motion.aside
-        className={`fixed inset-y-0 z-50 flex h-full w-[min(18rem,85vw)] shrink-0 flex-col backdrop-blur-xl shadow-2xl transition-transform duration-300 ease-out lg:relative lg:z-0 lg:h-full lg:w-72 lg:max-w-none lg:translate-x-0 lg:shadow-none ${sidebarPos} ${sidebarBorder} ${
-          mobileSidebarOpen ? sidebarSlideOpen : `${sidebarSlideClosed} lg:translate-x-0`
-        }`}
-        style={{
-          background: "var(--sidebar-bg)",
-          borderColor: "var(--border)",
-          boxShadow: "var(--glow)",
-        }}
-        initial={false}
-        animate={{
-          background: bodyTheme["--sidebar-bg"],
-          borderColor: bodyTheme["--border"],
-          boxShadow: bodyTheme["--glow"],
-        }}
-        transition={{ duration: motionDuration, ease: "easeInOut" }}
-      >
-        <div className="border-b p-4" style={{ borderColor: "var(--border)" }}>
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveRecipientId(null);
-                  setMobileSidebarOpen(false);
-                }}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition hover:opacity-90"
-                style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
-                aria-label={t(language, "sidebarHomeDashboard")}
-                title={t(language, "sidebarHomeDashboard")}
-              >
-                <House className="h-5 w-5" aria-hidden />
-              </button>
-              <div
-                className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full border-2"
-                style={{ borderColor: "var(--border)" }}
-              >
-                <KiteBrandMark lowBandwidth={isLowBandwidthMode} size={36} />
-              </div>
-              <h1 className="truncate text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
-                Kite
-              </h1>
-            </div>
-            <button
-              type="button"
-              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition hover:opacity-80 lg:hidden"
-              style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
-              onClick={() => setMobileSidebarOpen(false)}
-              aria-label="Close menu"
-            >
-              <X className="h-5 w-5" aria-hidden />
-            </button>
-          </div>
-          <div className="mt-2 flex items-center justify-end">
-            <LanguageDropdown value={language} onChange={handleLanguageChange} compact />
-          </div>
-          {/* Mode subtext (Musician / Therapist / Support) removed per product cleanup */}
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-2">
-          <UserDiscoverySidebar
-            sessionUserId={session.user.id}
-            activeRecipientId={activeRecipientId}
-            onSelectRecipientId={(id) => {
-              setActiveRecipientId(id);
-              setMobileSidebarOpen(false);
-            }}
-            language={language}
-            onlineUserIds={onlineUserIds}
-            refreshNonce={sidebarRefreshNonce}
-            lowBandwidth={isLowBandwidthMode}
-            onOpenSafetyProfile={handleOpenSafetyProfile}
-            aliasByContactId={contactAliases}
-          />
-        </div>
-
-        <div className="border-t px-3 py-3" style={{ borderColor: "var(--border)" }}>
-          <button
-            type="button"
-            onClick={async () => {
-              const next = !notificationsMuted;
-              setNotificationsMuted(next);
-              setNotificationsGloballyDisabled(next);
-              if (next) {
-                const { data: { session: s } } = await supabase.auth.getSession();
-                if (s?.access_token) await removeKitePushFromServer(s.access_token);
-                await unsubscribeKitePushOnDevice();
-              }
-            }}
-            className="w-full rounded-xl border-2 px-3 py-4 text-center text-sm font-bold transition hover:opacity-95"
-            style={{
-              borderColor: notificationsMuted ? "var(--border)" : "#FF4500",
-              color: notificationsMuted ? "var(--text-secondary)" : "#FF4500",
-              background: "transparent",
-            }}
-          >
-            {notificationsMuted
-              ? t(language, "sidebarNotificationsEnable")
-              : t(language, "sidebarNotificationsDisable")}
-          </button>
-        </div>
-
-        <ModeController
-          professionalMode={professionalMode}
-          isSupportMode={isSupportMode}
-          language={language}
-          showProfessionalUI={SHOW_PROFESSIONAL_AND_ROLE_UI}
-          professionalDisabled={isSupportMode}
-          onToggleProfessional={() =>
-            setProfessionalMode((prev) => {
-              if (isSupportMode) return prev;
-              const next = !prev;
-              try {
-                localStorage.setItem(
-                  "nexus-professional-mode",
-                  next ? "therapist" : "musician"
-                );
-              } catch {
-                // Ignore storage failures.
-              }
-              return next;
-            })
-          }
-          onToggleSupport={() => {
-            setIsSupportMode((prev) => {
-              const next = !prev;
-              if (next) {
-                setProfessionalMode(false);
-              }
-              writeSupportModeToStorage(next);
-              return next;
-            });
-          }}
-          isOwnKeySyncing={isOwnKeySyncing}
-          hasOwnKeyInDb={hasOwnKeyInDb}
-        />
-
-        <div className="border-t p-4" style={{ borderColor: "var(--border)" }}>
-          <button
-            type="button"
-            onClick={async () => {
-              await supabase.auth.signOut();
-              if (typeof window !== "undefined") {
-                window.location.href = "/";
-              }
-            }}
-            className="w-full rounded-xl border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/10"
-            style={{
-              borderColor: "var(--border)",
-              color: "var(--text-primary)",
-            }}
-          >
-            {isSupportMode
-              ? t(language, "quickExit")
-              : t(language, "quickExitLogout")}
-          </button>
-        </div>
-      </motion.aside>
-
-      {/* Main chat area */}
       <main className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
-        {session &&
-          !nickname &&
-          !nicknameBannerDismissed && (
-            <div
-              className="mx-3 mt-2 flex items-start gap-3 rounded-xl border px-3 py-2.5 sm:mx-4 sm:mt-3"
-              style={{
-                borderColor: "rgba(255, 69, 0, 0.45)",
-                background: "rgba(255, 69, 0, 0.08)",
-              }}
-              role="status"
-            >
-              <p className="min-w-0 flex-1 text-xs sm:text-sm" style={{ color: "var(--text-primary)" }}>
-                {t(language, "nicknameOnboardingBanner")}
-              </p>
-              <Link
-                href="/settings"
-                className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold text-black"
-                style={{ background: "#FF4500" }}
-              >
-                {t(language, "nicknameOnboardingCta")}
-              </Link>
-              <button
-                type="button"
-                className="shrink-0 rounded-lg p-1 text-lg leading-none opacity-70 hover:opacity-100"
-                style={{ color: "var(--text-primary)" }}
-                aria-label={t(language, "nicknameOnboardingDismiss")}
-                onClick={() => {
-                  try {
-                    localStorage.setItem("kite-nickname-banner-dismissed", "1");
-                  } catch {
-                    // ignore
-                  }
-                  setNicknameBannerDismissed(true);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          )}
-
-        {/* Header: hamburger + brand + status badges */}
-        <motion.header
-          className="flex shrink-0 flex-col gap-2 border-b px-3 py-2 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-4 sm:py-3 lg:px-6"
-          style={{
-            background: "var(--panel-bg)",
-            borderColor: "var(--border)",
-            boxShadow: professionalMode ? "none" : "var(--glow)",
-          }}
-          initial={false}
-          animate={{
-            background: bodyTheme["--panel-bg"],
-            borderColor: bodyTheme["--border"],
-            boxShadow: bodyTheme["--glow"] === "none" ? "none" : bodyTheme["--glow"],
-          }}
-          transition={{ duration: motionDuration, ease: "easeInOut" }}
-        >
-          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-            <button
-              type="button"
-              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border transition hover:bg-white/10 lg:hidden"
-              style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
-              onClick={() => setMobileSidebarOpen(true)}
-              aria-label="Open menu"
-            >
-              <Menu className="h-5 w-5" aria-hidden />
-            </button>
-            <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">
-              <div
-                className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full border-2"
-                style={{ borderColor: "var(--border)" }}
-              >
-                <KiteBrandMark lowBandwidth={isLowBandwidthMode} size={32} />
+        {!activeRecipientId ? (
+          <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
+            <p className="mb-3 px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+              Select a conversation to start
+            </p>
+            <UserDiscoverySidebar
+              sessionUserId={session.user.id}
+              activeRecipientId={activeRecipientId}
+              onSelectRecipientId={handleSelectRecipient}
+              language={language}
+              onlineUserIds={onlineUserIds}
+              refreshNonce={sidebarRefreshNonce}
+              lowBandwidth={isLowBandwidthMode}
+              onOpenSafetyProfile={handleOpenSafetyProfile}
+              aliasByContactId={contactAliases}
+            />
+          </div>
+        ) : (
+          <>
+            <div className="shrink-0 px-3 pt-3 sm:px-4">
+              <div className="mx-auto grid w-full max-w-full grid-cols-3 items-center gap-2 rounded-xl bg-black/10 px-2 py-1 backdrop-blur-md lg:max-w-2xl">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !isSupportMode;
+                      setIsSupportMode(next);
+                      writeSupportModeToStorage(next);
+                    }}
+                    className="rounded-xl px-2 py-1.5 text-xs font-bold"
+                    style={{
+                      background: isSupportMode ? "#f59e0b" : "rgba(251,191,36,0.2)",
+                      color: isSupportMode ? "#111827" : "#fbbf24",
+                    }}
+                  >
+                    Support
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBackToList}
+                    className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-white/10"
+                    style={{ color: "var(--text-secondary)" }}
+                    aria-label="Back to chats"
+                  >
+                    <ArrowLeft className="h-4 w-4" aria-hidden />
+                    Chats
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={openActiveRecipientProfile}
+                  className="mx-auto flex min-w-0 max-w-full flex-col items-center justify-center rounded-xl px-2 py-1 hover:bg-white/10"
+                  style={{ color: "var(--text-primary)" }}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    {activeRecipientMeta?.profilePictureUrl ? (
+                      <span
+                        role="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setChatImageLightboxUrl(activeRecipientMeta.profilePictureUrl);
+                        }}
+                        className="h-8 w-8 shrink-0 overflow-hidden rounded-full"
+                        aria-label="Open profile picture"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={activeRecipientMeta.profilePictureUrl}
+                          alt={`${recipientDisplayName} profile`}
+                          className="h-full w-full object-cover"
+                        />
+                      </span>
+                    ) : null}
+                    <span className="truncate text-xl font-bold">{recipientDisplayName}</span>
+                  </div>
+                  <span className="text-xs" style={{ color: "#a8a29e" }}>
+                    {recipientStatusText}
+                  </span>
+                </button>
+                <div className="flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={() => void handleWipeConversation()}
+                    className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold"
+                    style={{ color: "#ef4444" }}
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden />
+                    Wipe Chat
+                  </button>
+                </div>
               </div>
-              <span className="text-sm font-semibold sm:text-base" style={{ color: "var(--text-primary)" }}>
-                Kite
-              </span>
-              {!isOnline ? (
-                <span
-                  className="rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                  style={{
-                    borderColor: "var(--border)",
-                    color: "var(--text-secondary)",
-                    background: "var(--panel-bg)",
-                  }}
-                >
-                  {t(language, "offlineBadge")}
-                </span>
-              ) : isLowSignal ? (
-                <span
-                  className="rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                  style={{
-                    borderColor: "var(--border)",
-                    color: "var(--accent)",
-                    background: "var(--panel-bg)",
-                  }}
-                >
-                  {t(language, "lowSignalBadge")}
-                </span>
-              ) : null}
             </div>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
-            <AnimatePresence mode="wait">
-              {!isSupportMode && professionalMode ? (
-                <motion.span
-                  key="secure"
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  transition={{ duration: 0.2 }}
-                  className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium"
-                  style={{
-                    background: "var(--accent)",
-                    color: "#fff",
-                  }}
-                >
-                  <span aria-hidden>🔒</span>
-                  {t(language, "secureEncrypted")}
-                </motion.span>
-              ) : !isSupportMode ? (
-                <motion.span
-                  key="latency"
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  transition={{ duration: 0.2 }}
-                  className="text-sm"
-                  style={{ color: "var(--accent)" }}
-                >
-                  {t(language, "latency24ms")}
-                </motion.span>
-              ) : null}
-            </AnimatePresence>
-
-            <Link
-              href="/settings"
-              className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10"
-              style={{
-                borderColor: "var(--border)",
-                color: "var(--text-primary)",
-              }}
-            >
-              {!isSupportMode && <Settings className="h-4 w-4" aria-hidden />}
-              {nickname && (
-                <span className="truncate max-w-[120px]">
-                  {nickname}
-                </span>
-              )}
-            </Link>
-
-            <button
-              type="button"
-              onClick={async () => {
-                if (!session || !activeRecipientId) return;
-                if (
-                  !window.confirm(
-                    t(language, "wipeConfirm")
-                  )
-                ) {
-                  return;
-                }
-                const myId = session.user.id;
-                await supabase
-                  .from("messages")
-                  .delete()
-                  .or(
-                    `and(sender_id.eq.${myId},receiver_id.eq.${activeRecipientId}),and(sender_id.eq.${activeRecipientId},receiver_id.eq.${myId})`
-                  );
-                setMessages([]);
-              }}
-              className="inline-flex items-center rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10"
-              style={{
-                borderColor: "var(--border)",
-                color: "var(--text-primary)",
-              }}
-            >
-              {!isSupportMode && <span aria-hidden className="mr-1">🗑️</span>}
-              <span>{t(language, "wipeChat")}</span>
-            </button>
-          </div>
-        </motion.header>
-
-        {session && activeRecipientId ? (
-          <div
-            className="shrink-0 border-b px-3 py-2 sm:px-4 lg:px-6"
-            style={{
-              borderColor: "var(--border)",
-              background:
-                appearance === "light"
-                  ? "rgb(245 245 244)"
-                  : "rgba(12, 10, 18, 0.92)",
-            }}
-          >
-            <button
-              type="button"
-              onClick={openActiveRecipientProfile}
-              className="flex w-full min-h-[48px] items-center gap-2 rounded-xl border px-3 py-2.5 text-left transition hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-              style={{ borderColor: "var(--border)" }}
-              aria-label={`${t(language, "safetyProfileOpenProfileAria")}: ${recipientDisplayName}`}
-            >
-              <span
-                className="shrink-0 text-[10px] font-bold uppercase tracking-wider sm:text-xs"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                {t(language, "chatHeaderConversationWith")}
-              </span>
-              <span
-                className="min-w-0 flex-1 truncate text-base font-semibold sm:text-lg"
-                style={{ color: "var(--text-primary)" }}
-              >
-                {recipientDisplayName}
-              </span>
-            </button>
-          </div>
-        ) : null}
 
         {session && activeRecipientId && isRecipientMessageRequest && (
           <div
@@ -2412,15 +2083,14 @@ export default function Home() {
 
         {session && activeRecipientId && isSenderAwaitingAccept && (
           <div
-            className="mx-3 mt-2 rounded-xl border px-3 py-2 text-xs sm:mx-4"
+            className="mx-3 mt-2 rounded-xl px-3 py-2 text-xs sm:mx-4"
             style={{
-              borderColor: "rgba(255, 69, 0, 0.35)",
               background: "rgba(255, 69, 0, 0.08)",
               color: "var(--text-secondary)",
             }}
             role="status"
           >
-            {t(language, "messageSenderPendingNote").replace("{{nickname}}", recipientDisplayName)}
+            {`Waiting for ${recipientDisplayName} to accept your request before you can message.`}
           </div>
         )}
 
@@ -2442,20 +2112,18 @@ export default function Home() {
                   </p>
                 </div>
               ) : (
-                <EmptyChatDashboard
-                  language={language}
-                  sessionUserId={session.user.id}
-                  myNickname={nickname}
-                  onViewMyProfile={openMyProfile}
-                  onSelectRecipient={(id) => {
-                    setActiveRecipientId(id);
-                    setMobileSidebarOpen(false);
+                <div
+                  className="rounded-2xl px-4 py-3"
+                  style={{
+                    background: "var(--panel-bg)",
+                    border: "1px solid var(--border)",
+                    boxShadow: professionalMode ? "none" : "var(--glow)",
                   }}
-                  onOpenContactProfile={handleOpenSafetyProfile}
-                  onlineUserIds={onlineUserIds}
-                  aliasByContactId={contactAliases}
-                  onDmRequestCreated={() => setSidebarRefreshNonce((n) => n + 1)}
-                />
+                >
+                  <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                    Select a conversation to start
+                  </p>
+                </div>
               )
             ) : (
               filteredMessages.map((m) => (
@@ -2575,8 +2243,7 @@ export default function Home() {
 
         {/* Input — hidden for recipient until they accept the message request */}
         <div
-          className="shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] pt-3 sm:p-4 sm:pb-[max(1rem,env(safe-area-inset-bottom,0px))]"
-          style={{ borderColor: "var(--border)" }}
+          className="shrink-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] pt-3 sm:p-4 sm:pb-[max(1rem,env(safe-area-inset-bottom,0px))]"
         >
           {sendError && (
             <p className="mx-auto mb-2 w-full max-w-full px-1 text-sm text-red-500 lg:max-w-2xl" role="alert">
@@ -2679,8 +2346,25 @@ export default function Home() {
             </p>
           ) : null}
         </div>
+          </>
+        )}
       </main>
-      </div>
+
+      {chatImageLightboxUrl ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4"
+          onClick={() => setChatImageLightboxUrl(null)}
+          role="dialog"
+          aria-label="Image preview"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={chatImageLightboxUrl}
+            alt="Preview"
+            className="max-h-[90vh] max-w-[95vw] rounded-2xl object-contain"
+          />
+        </div>
+      ) : null}
 
       {safetyProfilePayload ? (
         <SafetyProfileModal

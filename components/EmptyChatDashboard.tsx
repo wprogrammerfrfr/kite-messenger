@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Search, Wifi } from "lucide-react";
+import { useCallback, useState } from "react";
+import { Search } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { t, type Language } from "@/lib/translations";
-import { useResilience } from "@/components/resilience-provider";
 import { findProfileByDiscoverQuery } from "@/lib/profile-lookup";
 import {
   createPendingDmRequest,
@@ -17,8 +16,7 @@ import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
 type Props = {
   language: Language;
   sessionUserId: string;
-  myNickname: string | null;
-  onViewMyProfile: () => void;
+  appearance?: "light" | "dark";
   onSelectRecipient: (id: string) => void;
   onOpenContactProfile: (payload: SafetyProfileOpenPayload) => void;
   onlineUserIds: Record<string, boolean>;
@@ -35,42 +33,13 @@ type PairDm =
 export function EmptyChatDashboard({
   language,
   sessionUserId,
-  myNickname,
-  onViewMyProfile,
+  appearance = "dark",
   onSelectRecipient,
   onOpenContactProfile,
   onlineUserIds,
   aliasByContactId,
   onDmRequestCreated,
 }: Props) {
-  const { isOnline, isConnectionSlow } = useResilience();
-  const [connectionTipOpen, setConnectionTipOpen] = useState(false);
-
-  const connectionTier = !isOnline
-    ? "offline"
-    : isConnectionSlow
-      ? "weak"
-      : "excellent";
-
-  const connectionTooltip =
-    connectionTier === "excellent"
-      ? t(language, "dashboardWifiTooltipExcellent")
-      : connectionTier === "weak"
-        ? t(language, "dashboardWifiTooltipWeak")
-        : t(language, "dashboardWifiTooltipOffline");
-
-  const wifiIconColor =
-    connectionTier === "excellent"
-      ? "rgba(34, 197, 94, 0.92)"
-      : connectionTier === "weak"
-        ? "rgba(234, 179, 8, 0.95)"
-        : "rgba(239, 68, 68, 0.92)";
-
-  useEffect(() => {
-    if (!connectionTipOpen) return;
-    const tId = window.setTimeout(() => setConnectionTipOpen(false), 4500);
-    return () => window.clearTimeout(tId);
-  }, [connectionTipOpen]);
 
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -113,12 +82,12 @@ export function EmptyChatDashboard({
     }
   }, [query, sessionUserId, language]);
 
-  const publicNick = myNickname?.trim() || "";
-  const youLabel = contactDisplayLabel(
-    publicNick,
-    null,
-    t(language, "anonymousLabel")
-  );
+  const isLight = appearance === "light";
+  const cardClassName = isLight
+    ? "bg-stone-100/80 border border-orange-500/30"
+    : "bg-white/5 border-none";
+  const textPrimary = isLight ? "#1c1917" : "var(--text-primary)";
+  const textSecondary = isLight ? "#57534e" : "var(--text-secondary)";
 
   const dmStatusForProfile: DmConnectionStatus | null =
     pairDm === "idle" || pairDm === "loading" || pairDm === null
@@ -168,45 +137,12 @@ export function EmptyChatDashboard({
 
   return (
     <div className="relative flex min-h-[min(70vh,520px)] flex-col items-center justify-center px-4 py-8">
-      <div className="absolute top-1 z-10 sm:top-2 end-2 sm:end-4">
-        <button
-          type="button"
-          className="relative rounded-full p-2.5 transition-colors hover:bg-white/[0.08] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#FF4500]/55"
-          style={{ color: wifiIconColor }}
-          aria-label={connectionTooltip}
-          title={connectionTooltip}
-          onClick={() => setConnectionTipOpen((open) => !open)}
-        >
-          <Wifi
-            className="h-[22px] w-[22px] sm:h-6 sm:w-6"
-            strokeWidth={2.25}
-            aria-hidden
-            style={{
-              filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.65))",
-            }}
-          />
-        </button>
-        {connectionTipOpen ? (
-          <div
-            role="tooltip"
-            className="absolute end-0 top-full z-20 mt-2 max-w-[min(92vw,300px)] rounded-xl border px-3.5 py-2.5 text-left text-xs leading-snug shadow-lg sm:text-[13px]"
-            style={{
-              borderColor: "rgba(255, 69, 0, 0.5)",
-              background: "var(--panel-bg)",
-              color: "var(--text-primary)",
-              boxShadow: "var(--glow)",
-            }}
-          >
-            {connectionTooltip}
-          </div>
-        ) : null}
-      </div>
       <div className="w-full max-w-md space-y-8">
         <div>
           <label
             htmlFor="empty-dashboard-search"
             className="mb-2 block text-center text-sm font-semibold"
-            style={{ color: "var(--text-primary)" }}
+            style={{ color: textPrimary }}
           >
             {t(language, "emptyDashboardSearchHeading")}
           </label>
@@ -234,7 +170,7 @@ export function EmptyChatDashboard({
                 }}
                 placeholder={t(language, "emptyDashboardSearchPlaceholder")}
                 className="w-full rounded-xl border border-[rgba(255,69,0,0.45)] bg-[var(--input-bg)] py-3 pl-10 pr-3 text-sm outline-none focus:border-[#FF4500] focus:ring-1 focus:ring-[#FF4500]"
-                style={{ color: "var(--text-primary)" }}
+                style={{ color: textPrimary, background: isLight ? "#ffffff" : "var(--input-bg)" }}
                 aria-label={t(language, "emptyDashboardSearchPlaceholder")}
               />
             </div>
@@ -255,24 +191,22 @@ export function EmptyChatDashboard({
           ) : null}
           {searched && !loading && result ? (
             <div
-              className="mt-4 rounded-xl border p-4"
+              className={`mt-4 rounded-xl p-4 ${cardClassName}`}
               style={{
-                borderColor: "var(--border)",
-                background: "var(--panel-bg)",
-                boxShadow: "var(--glow)",
+                color: textPrimary,
               }}
             >
               <button
                 type="button"
                 onClick={openResultProfile}
                 className="w-full text-left text-base font-semibold underline-offset-2 hover:underline"
-                style={{ color: "var(--text-primary)" }}
+                style={{ color: textPrimary }}
               >
                 {displayResultName}
               </button>
               <div className="mt-3 flex flex-col gap-2">
                 {pairDm === "loading" ? (
-                  <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                  <p className="text-xs" style={{ color: textSecondary }}>
                     {t(language, "loadingUsers")}
                   </p>
                 ) : null}
@@ -311,7 +245,7 @@ export function EmptyChatDashboard({
                     type="button"
                     onClick={() => onSelectRecipient(result.id)}
                     className="w-full rounded-lg border-2 py-3 text-sm font-semibold transition hover:opacity-95"
-                    style={{ borderColor: "#FF4500", color: "var(--text-primary)" }}
+                    style={{ borderColor: "#FF4500", color: textPrimary }}
                   >
                     {t(language, "discoverMessageButton")}
                   </button>
@@ -336,38 +270,11 @@ export function EmptyChatDashboard({
           ) : searched && !loading && !result ? (
             <p
               className="mt-4 text-center text-sm"
-              style={{ color: "var(--text-secondary)" }}
+              style={{ color: textSecondary }}
             >
               {t(language, "sidebarNoExactUser")}
             </p>
           ) : null}
-        </div>
-
-        <div
-          className="rounded-2xl border p-5"
-          style={{
-            borderColor: "var(--border)",
-            background: "var(--panel-bg)",
-            boxShadow: "var(--glow)",
-          }}
-        >
-          <p
-            className="text-[11px] font-bold uppercase tracking-wide"
-            style={{ color: "#FF4500" }}
-          >
-            {t(language, "emptyDashboardSelfCardTitle")}
-          </p>
-          <p className="mt-2 text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
-            {youLabel}
-          </p>
-          <button
-            type="button"
-            onClick={onViewMyProfile}
-            className="mt-4 w-full rounded-xl py-3 text-sm font-bold text-black transition hover:opacity-95"
-            style={{ background: "#FF4500" }}
-          >
-            {t(language, "emptyDashboardViewMyProfile")}
-          </button>
         </div>
       </div>
     </div>
