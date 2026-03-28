@@ -63,8 +63,7 @@ export async function fetchSidebarPrivacySnapshot(
       ) {
         return {
           ok: false,
-          loadError:
-            "Privacy tables missing. Run the SQL migration in supabase/migrations (dm_connections), then reload.",
+          loadError: t(language, "discoverPrivacyMigrationRequired"),
           fallbackSnapshot: {
             profilesById: {},
             dmStatusByPartnerId: {},

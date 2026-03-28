@@ -177,12 +177,12 @@ function UserDiscoverySidebarInner(props: {
               {isOnline ? (
                 <span className="inline-flex items-center gap-2">
                   <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                  Online
+                  {t(language, "safetyProfileBadgeOnline")}
                 </span>
               ) : lastSeenText ? (
                 lastSeenText
               ) : (
-                "Offline"
+                t(language, "safetyProfileBadgeOffline")
               )}
             </button>
           </div>
@@ -196,7 +196,7 @@ function UserDiscoverySidebarInner(props: {
                     lowBandwidth ? "" : "animate-pulse"
                   }`}
                   style={{ background: "#FF4500" }}
-                  aria-label="New messages"
+                  aria-label={t(language, "chatInboxNewMessagesAria")}
                 />
               ) : (
                 <span
@@ -205,7 +205,10 @@ function UserDiscoverySidebarInner(props: {
                     background: "#FF4500",
                     color: "#000000",
                   }}
-                  aria-label={`${unreadCount} new messages`}
+                  aria-label={t(language, "chatInboxNewMessagesCountAria").replace(
+                    "{{n}}",
+                    String(unreadCount)
+                  )}
                 >
                   {unreadCount}
                 </span>

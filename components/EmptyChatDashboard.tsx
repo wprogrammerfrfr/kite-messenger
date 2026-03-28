@@ -168,10 +168,10 @@ export function EmptyChatDashboard({
                     void runSearch();
                   }
                 }}
-                placeholder={t(language, "emptyDashboardSearchPlaceholder")}
+                placeholder={t(language, "discoverSearchBarPlaceholder")}
                 className="w-full rounded-xl border border-[rgba(255,69,0,0.45)] bg-[var(--input-bg)] py-3 pl-10 pr-3 text-sm outline-none focus:border-[#FF4500] focus:ring-1 focus:ring-[#FF4500]"
                 style={{ color: textPrimary, background: isLight ? "#ffffff" : "var(--input-bg)" }}
-                aria-label={t(language, "emptyDashboardSearchPlaceholder")}
+                aria-label={t(language, "discoverSearchBarPlaceholder")}
               />
             </div>
             <button

@@ -16,7 +16,15 @@ import {
   removeKitePushFromServer,
   unsubscribeKitePushOnDevice,
 } from "@/lib/kite-push-client";
-import type { Language } from "@/lib/translations";
+import {
+  hasStoredLanguageChoice,
+  NEXUS_LANG_CHANGE_EVENT,
+  parsePreferredLocale,
+  persistClientLanguage,
+  readStoredLanguage,
+  t,
+  type Language,
+} from "@/lib/translations";
 import { SkeletonProfile } from "@/components/SkeletonProfile";
 import {
   readJsonCache,
@@ -32,6 +40,7 @@ interface Profile {
   emergency_contact: string | null;
   role: Role | null;
   profile_picture_url: string | null;
+  preferred_locale: string | null;
 }
 
 const MUSICIAN_THEME = {
@@ -85,7 +94,7 @@ export const ProfileHub = memo(function ProfileHub() {
   const [vibe, setVibe] = useState<Role>("musician");
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
   const [notificationsMuted, setNotificationsMuted] = useState(false);
-  const [language, setLanguage] = useState<Language>("en");
+  const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
   const [personalNotes, setPersonalNotes] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const notesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -129,10 +138,14 @@ export const ProfileHub = memo(function ProfileHub() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const stored = localStorage.getItem("nexus-lang");
-    if (stored === "fa" || stored === "ar" || stored === "en" || stored === "kr" || stored === "tr") {
-      setLanguage(stored);
-    }
+    const sync = () => setLanguage(readStoredLanguage());
+    sync();
+    window.addEventListener("storage", sync);
+    window.addEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    };
   }, []);
 
   useEffect(() => {
@@ -217,7 +230,7 @@ export const ProfileHub = memo(function ProfileHub() {
 
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("nickname, bio, emergency_contact, role, profile_picture_url")
+          .select("nickname, bio, emergency_contact, role, profile_picture_url, preferred_locale")
           .eq("id", userId)
           .maybeSingle();
 
@@ -238,6 +251,11 @@ export const ProfileHub = memo(function ProfileHub() {
             typedProfile.role === "responder"
           ) {
             setRole(typedProfile.role);
+          }
+          const plFromServer = parsePreferredLocale(typedProfile.preferred_locale ?? null);
+          if (plFromServer && !hasStoredLanguageChoice()) {
+            setLanguage(plFromServer);
+            persistClientLanguage(plFromServer);
           }
           writeJsonCache(settingsProfileCacheKey(userId), {
             nickname: typedProfile.nickname ?? "",
@@ -264,7 +282,7 @@ export const ProfileHub = memo(function ProfileHub() {
         typeof navigator !== "undefined" && !navigator.onLine;
       if (!offline) {
         setSession(null);
-        setError("You must be logged in to view settings.");
+        setError(t(readStoredLanguage(), "profileMustLoginSettings"));
       }
       setLoading(false);
     };
@@ -302,7 +320,7 @@ export const ProfileHub = memo(function ProfileHub() {
         }
 
         if (existing) {
-          setError("Nickname already taken.");
+          setError(t(language, "profileNicknameTaken"));
           setSaving(false);
           return;
         }
@@ -316,6 +334,7 @@ export const ProfileHub = memo(function ProfileHub() {
           emergency_contact: emergencyContact.trim() || null,
           profile_picture_url: profilePictureUrl.trim() || null,
           role,
+          preferred_locale: language,
         },
         { onConflict: "id" }
       );
@@ -323,7 +342,7 @@ export const ProfileHub = memo(function ProfileHub() {
       if (upsertError) {
         setError(upsertError.message);
       } else {
-        setSuccess("Profile updated successfully.");
+        setSuccess(t(language, "profileUpdatedSuccess"));
         writeJsonCache(settingsProfileCacheKey(session.user.id), {
           nickname: trimmedNickname,
           bio: bio.trim(),
@@ -334,7 +353,7 @@ export const ProfileHub = memo(function ProfileHub() {
       }
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to update profile. Try again."
+        err instanceof Error ? err.message : t(language, "profileUpdateFailedGeneric")
       );
     } finally {
       setSaving(false);
@@ -344,7 +363,7 @@ export const ProfileHub = memo(function ProfileHub() {
   const handleAvatarUpload = async (file: File) => {
     if (!session) return;
     if (!file.type.startsWith("image/")) {
-      setError("Please choose an image file.");
+      setError(t(language, "profileChooseImageFile"));
       return;
     }
     setAvatarUploading(true);
@@ -365,13 +384,15 @@ export const ProfileHub = memo(function ProfileHub() {
       }
       const { data } = supabase.storage.from("chat-images").getPublicUrl(path);
       if (!data?.publicUrl) {
-        setError("Could not generate image URL.");
+        setError(t(language, "profileCouldNotGenerateImageUrl"));
         return;
       }
       setProfilePictureUrl(data.publicUrl);
-      setSuccess("Profile picture updated.");
+      setSuccess(t(language, "profilePictureUpdatedSuccess"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to upload profile picture.");
+      setError(
+        err instanceof Error ? err.message : t(language, "profileUploadPictureFailed")
+      );
     } finally {
       setAvatarUploading(false);
     }
@@ -381,7 +402,7 @@ export const ProfileHub = memo(function ProfileHub() {
     if (!session || deletingAccount) return;
     const ok =
       typeof window !== "undefined"
-        ? window.confirm("Are you sure? This cannot be undone.")
+        ? window.confirm(t(language, "profileDeleteAccountConfirm"))
         : false;
     if (!ok) return;
 
@@ -393,14 +414,14 @@ export const ProfileHub = memo(function ProfileHub() {
       const res = await fetch("/api/account/delete", { method: "POST" });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
-        setError(body.error ?? "Could not delete account.");
+        setError(body.error ?? t(language, "profileCouldNotDeleteAccount"));
         return;
       }
       if (typeof window !== "undefined") {
         window.location.href = "/";
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed.");
+      setError(err instanceof Error ? err.message : t(language, "profileDeleteFailed"));
     } finally {
       setDeletingAccount(false);
     }
@@ -419,27 +440,29 @@ export const ProfileHub = memo(function ProfileHub() {
         }}
       >
         <InstallKiteButton
-          language="en"
+          language={language}
           variant="compact"
           className="mb-5"
         />
 
         <div className="mb-6 text-center">
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Profile Hub
+            {t(language, "profileHubTitle")}
           </h1>
           <p
             className="mt-1 text-xs sm:text-sm"
             style={{ color: theme.textSecondary }}
           >
-            Manage your identity and account preferences.
+            {t(language, "profileHubSubtitle")}
           </p>
         </div>
 
         {loading ? (
           <SkeletonProfile />
         ) : !session ? (
-          <p className="text-sm text-red-500">{error ?? "Not authenticated."}</p>
+          <p className="text-sm text-red-500">
+            {error ?? t(language, "profileNotAuthenticated")}
+          </p>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-6">
             <section className="rounded-2xl border px-4 py-5 sm:px-6" style={{ borderColor: theme.border }}>
@@ -482,7 +505,7 @@ export const ProfileHub = memo(function ProfileHub() {
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={profilePictureUrl}
-                    alt="Your avatar"
+                    alt={t(language, "profileYourAvatarAlt")}
                     className="h-full w-full object-cover"
                   />
                 ) : (
@@ -514,20 +537,22 @@ export const ProfileHub = memo(function ProfileHub() {
                 className="mt-3 rounded-xl px-3 py-1.5 text-xs font-semibold"
                 style={{ background: "rgba(255,255,255,0.12)", color: theme.textPrimary }}
               >
-                {avatarUploading ? "Uploading..." : "Upload Photo"}
+                {avatarUploading
+                  ? t(language, "profileUploadingPhoto")
+                  : t(language, "profileUploadPhoto")}
               </button>
               <div className="mt-4 w-full">
                 <div
                   className="text-xs uppercase tracking-[0.18em] font-medium"
                   style={{ color: theme.textSecondary }}
                 >
-                  Your Profile
+                  {t(language, "profileCardYourProfile")}
                 </div>
                 <div className="mt-1 text-xl font-semibold" style={{ color: theme.textPrimary }}>
-                  {nickname.trim() ? nickname.trim() : "Your name"}
+                  {nickname.trim() ? nickname.trim() : t(language, "profileCardNamePlaceholder")}
                 </div>
                 <div className="mx-auto mt-2 max-w-lg text-sm" style={{ color: theme.textSecondary, lineHeight: 1.5 }}>
-                  {bio.trim() ? bio.trim() : "Add a bio to show your vibe."}
+                  {bio.trim() ? bio.trim() : t(language, "profileCardBioPlaceholder")}
                 </div>
               </div>
               </div>
@@ -535,13 +560,13 @@ export const ProfileHub = memo(function ProfileHub() {
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium uppercase tracking-[0.18em]">
-                Nickname
+                {t(language, "profileNicknameLabel")}
               </label>
               <input
                 type="text"
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
-                placeholder="How should Kite address you?"
+                placeholder={t(language, "profileNicknamePlaceholder")}
                 className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
                 style={{
                   background: theme.inputBg,
@@ -553,12 +578,12 @@ export const ProfileHub = memo(function ProfileHub() {
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium uppercase tracking-[0.18em]">
-                Bio
+                {t(language, "profileBioLabel")}
               </label>
               <textarea
                 value={bio}
                 onChange={(e) => setBio(e.target.value)}
-                placeholder="A short line about you (optional)."
+                placeholder={t(language, "profileBioPlaceholder")}
                 className="w-full min-h-[96px] rounded-xl px-3 py-2.5 text-sm outline-none border resize-none"
                 style={{
                   background: theme.inputBg,
@@ -579,17 +604,17 @@ export const ProfileHub = memo(function ProfileHub() {
                   className="text-sm font-semibold uppercase tracking-[0.16em]"
                   style={{ color: theme.textPrimary }}
                 >
-                  Personal Notes
+                  {t(language, "profilePersonalNotesTitle")}
                 </h2>
                 <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
-                  Private scratchpad — stored only on this device.
+                  {t(language, "profilePersonalNotesHint")}
                 </p>
               </div>
               <textarea
                 value={personalNotes}
                 onChange={(e) => onPersonalNotesChange(e.target.value)}
                 onBlur={() => persistPersonalNotes(personalNotes)}
-                placeholder="Jot ideas, session notes, or reminders…"
+                placeholder={t(language, "profilePersonalNotesPlaceholder")}
                 rows={5}
                 className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border resize-y font-mono leading-relaxed"
                 style={{
@@ -604,10 +629,10 @@ export const ProfileHub = memo(function ProfileHub() {
             <section className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: theme.border }}>
               <div className="mb-4">
                 <h2 className="text-sm font-semibold uppercase tracking-[0.16em]" style={{ color: theme.textPrimary }}>
-                  Preferences
+                  {t(language, "profilePreferencesTitle")}
                 </h2>
                 <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
-                  Appearance, notifications, and language.
+                  {t(language, "profilePreferencesSubtitle")}
                 </p>
               </div>
 
@@ -616,7 +641,7 @@ export const ProfileHub = memo(function ProfileHub() {
                 style={{ borderColor: theme.border }}
               >
                 <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: theme.textSecondary }}>
-                  Appearance
+                  {t(language, "appearance")}
                 </span>
                 <button
                   type="button"
@@ -632,13 +657,13 @@ export const ProfileHub = memo(function ProfileHub() {
                   }}
                   title={
                     appearance === "dark"
-                      ? "Switch to light mode"
-                      : "Switch to dark mode"
+                      ? t(language, "profileSwitchToLightMode")
+                      : t(language, "profileSwitchToDarkMode")
                   }
                   aria-label={
                     appearance === "dark"
-                      ? "Switch to light mode"
-                      : "Switch to dark mode"
+                      ? t(language, "profileSwitchToLightMode")
+                      : t(language, "profileSwitchToDarkMode")
                   }
                 >
                   {appearance === "dark" ? (
@@ -654,7 +679,7 @@ export const ProfileHub = memo(function ProfileHub() {
                 style={{ borderColor: theme.border }}
               >
                 <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: theme.textSecondary }}>
-                  Notifications
+                  {t(language, "profileNotificationsLabel")}
                 </span>
                 <button
                   type="button"
@@ -676,7 +701,9 @@ export const ProfileHub = memo(function ProfileHub() {
                     color: notificationsMuted ? theme.textSecondary : vibe === "therapist" ? "#fff" : "#000",
                   }}
                 >
-                  {notificationsMuted ? "Enable" : "Disable"}
+                  {notificationsMuted
+                    ? t(language, "sidebarNotificationsEnable")
+                    : t(language, "sidebarNotificationsDisable")}
                 </button>
               </div>
 
@@ -685,18 +712,22 @@ export const ProfileHub = memo(function ProfileHub() {
                 style={{ borderColor: theme.border }}
               >
                 <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: theme.textSecondary }}>
-                  Language
+                  {t(language, "language")}
                 </span>
                 <LanguageDropdown
                   value={language}
                   onChange={(next) => {
                     setLanguage(next);
-                    try {
-                      localStorage.setItem("nexus-lang", next);
-                      document.cookie = `nexus-lang=${next}; path=/; max-age=${60 * 60 * 24 * 365}`;
-                    } catch {
-                      // ignore
-                    }
+                    persistClientLanguage(next);
+                    void (async () => {
+                      const { data } = await supabase.auth.getSession();
+                      const uid = data?.session?.user?.id;
+                      if (!uid) return;
+                      await supabase
+                        .from("profiles")
+                        .update({ preferred_locale: next })
+                        .eq("id", uid);
+                    })();
                   }}
                   compact
                 />
@@ -706,10 +737,10 @@ export const ProfileHub = memo(function ProfileHub() {
             <section className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: theme.border }}>
               <div className="mb-4">
                 <h2 className="text-sm font-semibold uppercase tracking-[0.16em]" style={{ color: theme.textPrimary }}>
-                  Contact &amp; profile
+                  {t(language, "profileContactSectionTitle")}
                 </h2>
                 <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
-                  Saved with your account when you press Save Changes.
+                  {t(language, "profileContactSectionSubtitle")}
                 </p>
               </div>
 
@@ -718,7 +749,7 @@ export const ProfileHub = memo(function ProfileHub() {
                 htmlFor="emergency-contact-number"
                 className="text-xs font-medium uppercase tracking-[0.18em]"
               >
-                Emergency Contact Number
+                {t(language, "settingsEmergencyNumberLabel")}
               </label>
               <input
                 id="emergency-contact-number"
@@ -741,32 +772,14 @@ export const ProfileHub = memo(function ProfileHub() {
                 className="text-xs leading-relaxed"
                 style={{ color: theme.textSecondary }}
               >
-                Visible only to your approved contacts in emergency workflows.
+                {t(language, "profileEmergencyContactHint")}
               </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium uppercase tracking-[0.18em]">
-                Profile Picture URL
-              </label>
-              <input
-                type="url"
-                value={profilePictureUrl}
-                onChange={(e) => setProfilePictureUrl(e.target.value)}
-                placeholder="Optional image URL"
-                className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
-                style={{
-                  background: theme.inputBg,
-                  borderColor: theme.border,
-                  color: theme.textPrimary,
-                }}
-              />
             </div>
 
             {SHOW_PROFESSIONAL_AND_ROLE_UI && (
               <div className="space-y-1.5">
                 <label className="text-xs font-medium uppercase tracking-[0.18em]">
-                  Role
+                  {t(language, "profileRoleLabel")}
                 </label>
                 <div className="grid grid-cols-3 gap-2 rounded-xl border p-1">
                   <button
@@ -784,7 +797,7 @@ export const ProfileHub = memo(function ProfileHub() {
                           : theme.textSecondary,
                     }}
                   >
-                    Musician
+                    {t(language, "roleMusician")}
                   </button>
                   <button
                     type="button"
@@ -799,7 +812,7 @@ export const ProfileHub = memo(function ProfileHub() {
                           : theme.textSecondary,
                     }}
                   >
-                    Therapist
+                    {t(language, "roleTherapist")}
                   </button>
                   <button
                     type="button"
@@ -814,14 +827,14 @@ export const ProfileHub = memo(function ProfileHub() {
                           : theme.textSecondary,
                     }}
                   >
-                    Responder
+                    {t(language, "roleResponder")}
                   </button>
                 </div>
                 <p
                   className="text-xs"
                   style={{ color: theme.textSecondary }}
                 >
-                  This helps us personalize your workspace and recommendations.
+                  {t(language, "profileRolePersonalizeHint")}
                 </p>
               </div>
             )}
@@ -848,7 +861,9 @@ export const ProfileHub = memo(function ProfileHub() {
                 color: vibe === "therapist" ? "#fff" : "#000",
               }}
             >
-              {saving ? "Saving…" : "Save Changes"}
+              {saving
+                ? t(language, "profileSavingChanges")
+                : t(language, "profileSaveChanges")}
             </button>
 
             <button
@@ -861,7 +876,7 @@ export const ProfileHub = memo(function ProfileHub() {
               }}
               className="mt-3 w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-white bg-red-600/90 border border-red-500/80 hover:bg-red-600 transition-colors"
             >
-              Log Out
+              {t(language, "profileLogOut")}
             </button>
 
             <button
@@ -871,7 +886,9 @@ export const ProfileHub = memo(function ProfileHub() {
               className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white bg-red-700 border border-red-600 hover:brightness-110 active:scale-95 transition-transform disabled:cursor-not-allowed"
             >
               <AlertTriangle className="h-4 w-4" aria-hidden />
-              {deletingAccount ? "Deleting account…" : "Delete account"}
+              {deletingAccount
+                ? t(language, "profileDeletingAccount")
+                : t(language, "profileDeleteAccount")}
             </button>
           </form>
         )}
@@ -881,12 +898,12 @@ export const ProfileHub = memo(function ProfileHub() {
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4"
           onClick={() => setAvatarLightboxOpen(false)}
           role="dialog"
-          aria-label="Profile image preview"
+          aria-label={t(language, "chatProfileImagePreviewAria")}
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={profilePictureUrl}
-            alt="Profile preview"
+            alt={t(language, "profileProfilePreviewAlt")}
             className="max-h-[90vh] max-w-[95vw] rounded-2xl object-contain"
           />
         </div>

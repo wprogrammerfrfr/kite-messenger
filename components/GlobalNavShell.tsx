@@ -3,14 +3,19 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { CircleUser, MessageSquareText, Route, Film } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   prefetchDashboardAliases,
   prefetchDiscoverSidebar,
   prefetchSettingsProfile,
 } from "@/lib/kite-prefetch";
-import type { Language } from "@/lib/translations";
+import {
+  NEXUS_LANG_CHANGE_EVENT,
+  readStoredLanguage,
+  t,
+  type Language,
+} from "@/lib/translations";
 
 type NavItem = {
   href: string;
@@ -27,24 +32,38 @@ function isActive(pathname: string, href: string) {
 }
 
 function getStoredLangForPrefetch(): Language {
-  if (typeof window === "undefined") return "en";
-  try {
-    const s = localStorage.getItem("nexus-lang");
-    if (s === "fa" || s === "ar" || s === "en" || s === "kr" || s === "tr") return s;
-  } catch {
-    // ignore
-  }
-  return "en";
+  return readStoredLanguage();
 }
 
 export default function GlobalNavShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [navMounted, setNavMounted] = useState(false);
   const [hasSession, setHasSession] = useState<boolean | null>(null);
+  const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
 
   useEffect(() => {
     setNavMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = () => setLanguage(readStoredLanguage());
+    sync();
+    window.addEventListener("storage", sync);
+    window.addEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const isRTL = language === "fa" || language === "ar";
+    document.documentElement.dir = isRTL ? "rtl" : "ltr";
+    document.documentElement.lang =
+      language === "kr" ? "ko" : language === "tr" ? "tr" : language;
+  }, [language]);
 
   useEffect(() => {
     let mounted = true;
@@ -98,28 +117,31 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
     })();
   }, []);
 
-  const items: NavItem[] = [
-    {
-      href: "/chat",
-      label: "Chats",
-      icon: <MessageSquareText className="h-5 w-5" aria-hidden />,
-    },
-    {
-      href: "/dashboard",
-      label: "Discover",
-      icon: <Route className="h-5 w-5" aria-hidden />,
-    },
-    {
-      href: "/studio-test",
-      label: "Studio",
-      icon: <Film className="h-5 w-5" aria-hidden />,
-    },
-    {
-      href: "/settings",
-      label: "Profile",
-      icon: <CircleUser className="h-5 w-5" aria-hidden />,
-    },
-  ];
+  const items: NavItem[] = useMemo(
+    () => [
+      {
+        href: "/chat",
+        label: t(language, "navTabChats"),
+        icon: <MessageSquareText className="h-5 w-5" aria-hidden />,
+      },
+      {
+        href: "/dashboard",
+        label: t(language, "navTabDiscover"),
+        icon: <Route className="h-5 w-5" aria-hidden />,
+      },
+      {
+        href: "/studio-test",
+        label: t(language, "navTabStudio"),
+        icon: <Film className="h-5 w-5" aria-hidden />,
+      },
+      {
+        href: "/settings",
+        label: t(language, "navTabProfile"),
+        icon: <CircleUser className="h-5 w-5" aria-hidden />,
+      },
+    ],
+    [language]
+  );
 
   return (
     <div
@@ -145,7 +167,7 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
           >
             <div className="px-2 py-2">
               <div className="text-xs uppercase tracking-widest font-semibold text-stone-500">
-                Kite
+                {t(language, "navAppBrand")}
               </div>
             </div>
             <div className="flex flex-col gap-1 px-1">

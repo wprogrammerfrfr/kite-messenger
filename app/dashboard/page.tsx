@@ -14,7 +14,15 @@ const SafetyProfileModal = dynamic(
 );
 import { SkeletonDiscover } from "@/components/SkeletonDiscover";
 import { DiscoverRequestInbox } from "@/components/DiscoverRequestInbox";
-import { t, type Language } from "@/lib/translations";
+import {
+  hasStoredLanguageChoice,
+  NEXUS_LANG_CHANGE_EVENT,
+  parsePreferredLocale,
+  persistClientLanguage,
+  readStoredLanguage,
+  t,
+  type Language,
+} from "@/lib/translations";
 import {
   dashboardAliasCacheKey,
   readJsonCache,
@@ -28,24 +36,11 @@ type ContactAliasRow = {
 
 type PresenceMap = Record<string, boolean>;
 
-function getStoredLanguage(): Language {
-  if (typeof window === "undefined") return "en";
-  try {
-    const stored = localStorage.getItem("nexus-lang");
-    if (stored === "fa" || stored === "ar" || stored === "en" || stored === "kr" || stored === "tr") {
-      return stored;
-    }
-  } catch {
-    // ignore
-  }
-  return "en";
-}
-
 export default function DashboardPage() {
   const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
-  const [language, setLanguage] = useState<Language>("en");
+  const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
 
   const [onlineUserIds, setOnlineUserIds] = useState<PresenceMap>({});
@@ -55,7 +50,7 @@ export default function DashboardPage() {
     useState<SafetyProfileOpenPayload | null>(null);
 
   useEffect(() => {
-    setLanguage(getStoredLanguage());
+    setLanguage(readStoredLanguage());
     if (typeof window !== "undefined") {
       try {
         setAppearance(localStorage.getItem("kite-appearance") === "light" ? "light" : "dark");
@@ -63,6 +58,17 @@ export default function DashboardPage() {
         setAppearance("dark");
       }
     }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = () => setLanguage(readStoredLanguage());
+    window.addEventListener("storage", sync);
+    window.addEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    };
   }, []);
 
   useEffect(() => {
@@ -121,9 +127,10 @@ export default function DashboardPage() {
         .maybeSingle();
 
       if (!meErr) {
-        const pl = meProfile?.preferred_locale as string | null | undefined;
-        if (!cancelled && (pl === "fa" || pl === "ar" || pl === "en" || pl === "kr" || pl === "tr")) {
+        const pl = parsePreferredLocale(meProfile?.preferred_locale as string | null | undefined);
+        if (!cancelled && pl && !hasStoredLanguageChoice()) {
           setLanguage(pl);
+          persistClientLanguage(pl);
         }
       }
 
@@ -202,7 +209,9 @@ export default function DashboardPage() {
         >
           <div className="mx-auto max-w-5xl px-3 pt-4 pb-10 sm:px-4">
             <div className="mb-3 rounded-xl bg-black/10 px-2 py-1 backdrop-blur-md">
-              <h1 className="text-center text-xl font-bold">Discover</h1>
+              <h1 className="text-center text-xl font-bold">
+                {t(language, "discoverPageTitle")}
+              </h1>
             </div>
             <div className="rounded-3xl p-2 sm:p-4" style={{ background: appearance === "light" ? "rgba(245,245,244,0.9)" : "rgba(0,0,0,0.35)" }}>
               <SkeletonDiscover rows={7} />
@@ -222,7 +231,9 @@ export default function DashboardPage() {
     >
       <div className="mx-auto max-w-5xl px-3 pt-4 pb-10 sm:px-4">
         <div className="mb-3 rounded-xl bg-black/10 px-2 py-1 backdrop-blur-md">
-          <h1 className="text-center text-xl font-bold">Discover</h1>
+          <h1 className="text-center text-xl font-bold">
+            {t(language, "discoverPageTitle")}
+          </h1>
         </div>
         <DiscoverRequestInbox
           sessionUserId={session.user.id}

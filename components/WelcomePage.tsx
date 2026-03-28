@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { motion } from "framer-motion";
-import { t, type Language } from "@/lib/translations";
+import { NEXUS_LANG_CHANGE_EVENT, t, type Language } from "@/lib/translations";
 import { InstallKiteButton } from "@/components/InstallKiteButton";
 import { LanguageDropdown } from "@/components/LanguageDropdown";
 
@@ -89,6 +89,7 @@ export default function WelcomePage() {
     setLanguage(lang);
     try {
       localStorage.setItem("nexus-lang", lang);
+      window.dispatchEvent(new Event(NEXUS_LANG_CHANGE_EVENT));
     } catch {
       // Ignore localStorage failures
     }

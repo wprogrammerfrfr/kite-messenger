@@ -98,12 +98,12 @@ export function DiscoverRequestInbox({
               {isOnline ? (
                 <span className="inline-flex items-center gap-2">
                   <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                  Online
+                  {t(language, "safetyProfileBadgeOnline")}
                 </span>
               ) : lastSeenText ? (
                 lastSeenText
               ) : (
-                "Offline"
+                t(language, "safetyProfileBadgeOffline")
               )}
             </p>
           </div>

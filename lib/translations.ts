@@ -93,6 +93,7 @@ type TranslationKey =
   | "sidebarNoExactUser"
   | "discoverSearchButton"
   | "conversationsLoadError"
+  | "discoverPrivacyMigrationRequired"
   | "sidebarDiscoverTitle"
   | "messageRequestBannerTitle"
   | "messageRequestBannerBody"
@@ -105,7 +106,8 @@ type TranslationKey =
   | "openChatButton"
   | "settingsThemeLight"
   | "settingsThemeDark"
-  | "settingsAppearanceLabel"
+  | "appearance"
+  | "language"
   | "discoverAlreadyFriends"
   | "discoverMessageButton"
   | "discoverRequestSentWaiting"
@@ -183,6 +185,73 @@ type TranslationKey =
   | "dashboardWifiTooltipExcellent"
   | "dashboardWifiTooltipWeak"
   | "dashboardWifiTooltipOffline"
+  | "navAppBrand"
+  | "navTabChats"
+  | "navTabDiscover"
+  | "navTabStudio"
+  | "navTabProfile"
+  | "discoverPageTitle"
+  | "chatLoadingShort"
+  | "chatAppTitle"
+  | "chatBackToChatsAria"
+  | "chatWipeConversationConfirm"
+  | "chatOpenProfilePictureAria"
+  | "chatProfileImagePreviewAria"
+  | "chatFailedToWipe"
+  | "chatInboxNewMessagesAria"
+  | "chatInboxNewMessagesCountAria"
+  | "profileHubTitle"
+  | "profileHubSubtitle"
+  | "profilePersonalNotesTitle"
+  | "profilePersonalNotesHint"
+  | "profilePersonalNotesPlaceholder"
+  | "profilePreferencesTitle"
+  | "profilePreferencesSubtitle"
+  | "profileContactSectionTitle"
+  | "profileContactSectionSubtitle"
+  | "profileNicknameLabel"
+  | "profileNicknamePlaceholder"
+  | "profileBioLabel"
+  | "profileBioPlaceholder"
+  | "profileUploadPhoto"
+  | "profileUploadingPhoto"
+  | "profileCardYourProfile"
+  | "profileCardNamePlaceholder"
+  | "profileCardBioPlaceholder"
+  | "profileSaveChanges"
+  | "profileSavingChanges"
+  | "profileLogOut"
+  | "profileDeleteAccount"
+  | "profileDeletingAccount"
+  | "profileNotAuthenticated"
+  | "profileMustLoginSettings"
+  | "profileNicknameTaken"
+  | "profileUpdatedSuccess"
+  | "profileChooseImageFile"
+  | "profileCouldNotGenerateImageUrl"
+  | "profilePictureUpdatedSuccess"
+  | "profileUpdateFailedGeneric"
+  | "profileUploadPictureFailed"
+  | "profileDeleteAccountConfirm"
+  | "profileCouldNotDeleteAccount"
+  | "profileDeleteFailed"
+  | "profileYourAvatarAlt"
+  | "profileProfilePreviewAlt"
+  | "profileEmergencyContactHint"
+  | "profileRoleLabel"
+  | "profileRolePersonalizeHint"
+  | "profileSwitchToLightMode"
+  | "profileSwitchToDarkMode"
+  | "profileNotificationsLabel"
+  | "discoverSearchBarPlaceholder"
+  | "chatHeaderRecipientLastSeen"
+  | "chatEmptySelectConversation"
+  | "chatMessageSessionModeLabel"
+  | "chatSupportModeToggleAria"
+  | "chatAwaitingAcceptComposer"
+  | "chatRecipientProfileAlt"
+  | "chatSendMessageAria"
+  | "chatSendingAria"
   | "welcomePrivacyProtocolHeadline"
   | "welcomePrivacyMetadataPolicy"
   | "welcomePrivacyThirtyDay";
@@ -304,6 +373,8 @@ const translationsEn: TranslationRecord = {
     sidebarNoExactUser: "No users found with that name.",
     discoverSearchButton: "Search",
     conversationsLoadError: "Could not load conversations.",
+    discoverPrivacyMigrationRequired:
+      "Privacy tables missing. Run the SQL migration in supabase/migrations (dm_connections), then reload.",
     sidebarDiscoverTitle: "Find a friend",
     messageRequestBannerTitle: "Message request",
     messageRequestBannerBody:
@@ -318,7 +389,8 @@ const translationsEn: TranslationRecord = {
     openChatButton: "Open chat",
     settingsThemeLight: "Light",
     settingsThemeDark: "Dark",
-    settingsAppearanceLabel: "Appearance",
+    appearance: "Appearance",
+    language: "Language",
     discoverAlreadyFriends: "Already friends",
     discoverMessageButton: "Message",
     discoverRequestSentWaiting: "Request sent — waiting for them to accept.",
@@ -417,6 +489,76 @@ const translationsEn: TranslationRecord = {
       "Connection Status: Weak / slow signal. Enable Support Mode in Settings for better performance.",
     dashboardWifiTooltipOffline:
       "Connection Status: Offline. Enable Support Mode in Settings for better performance.",
+    navAppBrand: "Kite",
+    navTabChats: "Chats",
+    navTabDiscover: "Discover",
+    navTabStudio: "Studio",
+    navTabProfile: "Profile",
+    discoverPageTitle: "Discover",
+    chatLoadingShort: "Loading…",
+    chatAppTitle: "Kite",
+    chatBackToChatsAria: "Back to chats",
+    chatWipeConversationConfirm: "Wipe this chat? This cannot be undone.",
+    chatOpenProfilePictureAria: "Open profile picture",
+    chatProfileImagePreviewAria: "Profile image preview",
+    chatFailedToWipe: "Failed to wipe chat.",
+    chatInboxNewMessagesAria: "New messages",
+    chatInboxNewMessagesCountAria: "{{n}} new messages",
+    profileHubTitle: "Profile Hub",
+    profileHubSubtitle: "Manage your identity and account preferences.",
+    profilePersonalNotesTitle: "Personal Notes",
+    profilePersonalNotesHint: "Private scratchpad — stored only on this device.",
+    profilePersonalNotesPlaceholder: "Jot ideas, session notes, or reminders…",
+    profilePreferencesTitle: "Preferences",
+    profilePreferencesSubtitle: "Appearance, notifications, and language.",
+    profileContactSectionTitle: "Contact & profile",
+    profileContactSectionSubtitle: "Saved with your account when you press Save Changes.",
+    profileNicknameLabel: "Nickname",
+    profileNicknamePlaceholder: "How should Kite address you?",
+    profileBioLabel: "Bio",
+    profileBioPlaceholder: "A short line about you (optional).",
+    profileUploadPhoto: "Upload Photo",
+    profileUploadingPhoto: "Uploading...",
+    profileCardYourProfile: "Your Profile",
+    profileCardNamePlaceholder: "Your name",
+    profileCardBioPlaceholder: "Add a bio to show your vibe.",
+    profileSaveChanges: "Save Changes",
+    profileSavingChanges: "Saving…",
+    profileLogOut: "Log Out",
+    profileDeleteAccount: "Delete account",
+    profileDeletingAccount: "Deleting account…",
+    profileNotAuthenticated: "Not authenticated.",
+    profileMustLoginSettings: "You must be logged in to view settings.",
+    profileNicknameTaken: "Nickname already taken.",
+    profileUpdatedSuccess: "Profile updated successfully.",
+    profileChooseImageFile: "Please choose an image file.",
+    profileCouldNotGenerateImageUrl: "Could not generate image URL.",
+    profilePictureUpdatedSuccess: "Profile picture updated.",
+    profileUpdateFailedGeneric: "Failed to update profile. Try again.",
+    profileUploadPictureFailed: "Failed to upload profile picture.",
+    profileDeleteAccountConfirm: "Are you sure? This cannot be undone.",
+    profileCouldNotDeleteAccount: "Could not delete account.",
+    profileDeleteFailed: "Delete failed.",
+    profileYourAvatarAlt: "Your avatar",
+    profileProfilePreviewAlt: "Profile preview",
+    profileEmergencyContactHint:
+      "Visible only to your approved contacts in emergency workflows.",
+    profileRoleLabel: "Role",
+    profileRolePersonalizeHint:
+      "This helps us personalize your workspace and recommendations.",
+    profileSwitchToLightMode: "Switch to light mode",
+    profileSwitchToDarkMode: "Switch to dark mode",
+    profileNotificationsLabel: "Notifications",
+    discoverSearchBarPlaceholder: "Find a user by nickname",
+    chatHeaderRecipientLastSeen: "Last seen {{time}}",
+    chatEmptySelectConversation: "Select a conversation to start",
+    chatMessageSessionModeLabel: "Session mode",
+    chatSupportModeToggleAria: "Toggle Support Mode",
+    chatAwaitingAcceptComposer:
+      "Waiting for {{nickname}} to accept your request before you can message.",
+    chatRecipientProfileAlt: "{{name}} profile",
+    chatSendMessageAria: "Send message",
+    chatSendingAria: "Sending message",
     welcomePrivacyProtocolHeadline: "YOUR PRIVACY IS OUR ARCHITECTURE",
     welcomePrivacyMetadataPolicy:
       "We do not collect, store, or sell your metadata. Metadata—the 'shadow' of your digital life—includes who you talk to, when you talk, and where you are. While other apps track your behavior, Kite is built to ignore it.",
@@ -526,7 +668,7 @@ export const translations: Record<Language, TranslationRecord> = {
     selectUserToStart: "برای شروع گفتگو، یک کاربر را از نوار کناری انتخاب کنید.",
     readStatus: "خوانده شد",
     sentStatus: "ارسال شد",
-    sidebarRequests: "درخواست‌ها",
+    sidebarRequests: "درخواست‌های در انتظار",
     sidebarInbox: "صندوق ورودی",
     sidebarNoRequests: "درخواست پیامی نیست.",
     messageRequestAccept: "پذیرفتن",
@@ -540,6 +682,8 @@ export const translations: Record<Language, TranslationRecord> = {
     sidebarNoExactUser: "کاربری با این نام پیدا نشد.",
     discoverSearchButton: "جستجو",
     conversationsLoadError: "بارگذاری گفتگوها انجام نشد.",
+    discoverPrivacyMigrationRequired:
+      "جدول‌های حریم خصوصی موجود نیست. مهاجرت SQL در supabase/migrations (dm_connections) را اجرا کنید، سپس صفحه را بارگذاری مجدد کنید.",
     sidebarDiscoverTitle: "پیدا کردن دوست",
     messageRequestBannerTitle: "درخواست پیام",
     messageRequestBannerBody:
@@ -554,7 +698,8 @@ export const translations: Record<Language, TranslationRecord> = {
     openChatButton: "باز کردن گفتگو",
     settingsThemeLight: "روشن",
     settingsThemeDark: "تاریک",
-    settingsAppearanceLabel: "ظاهر",
+    appearance: "ظاهر",
+    language: "زبان",
     discoverAlreadyFriends: "از قبل دوست هستید",
     discoverMessageButton: "پیام",
     discoverRequestSentWaiting: "درخواست ارسال شد — در انتظار پذیرش.",
@@ -617,7 +762,7 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomeMissionBody2:
       "این پلتفرم سبک، رمزنگاری‌شدهٔ سرتاسری و بادوام است. برای فعالان بشردوستانه، افراد در بحران، و کاربرانی ساخته شده که امنیتشان به اتصالی قابل اعتماد، خصوصی و کم‌مصرف وابسته است.",
     installKiteForOffline: "نصب Kite برای دسترسی آفلاین",
-    emptyDashboardSearchHeading: "یافتن کاربر با نام مستعار",
+    emptyDashboardSearchHeading: "پیدا کردن کاربر با نام مستعار",
     emptyDashboardSearchPlaceholder: "نام مستعار دقیق",
     emptyDashboardSearchError: "جستجو ناموفق بود. دوباره تلاش کنید.",
     emptyDashboardSelfCardTitle: "پروفایل شما",
@@ -654,6 +799,76 @@ export const translations: Record<Language, TranslationRecord> = {
       "وضعیت اتصال: سیگنال ضعیف / کند. برای عملکرد بهتر، حالت پشتیبانی را از تنظیمات فعال کنید.",
     dashboardWifiTooltipOffline:
       "وضعیت اتصال: آفلاین. برای عملکرد بهتر، حالت پشتیبانی را از تنظیمات فعال کنید.",
+    navAppBrand: "Kite",
+    navTabChats: "گفتگوها",
+    navTabDiscover: "کشف",
+    navTabStudio: "استودیو",
+    navTabProfile: "پروفایل",
+    discoverPageTitle: "کشف",
+    chatLoadingShort: "در حال بارگذاری…",
+    chatAppTitle: "Kite",
+    chatBackToChatsAria: "بازگشت به گفتگوها",
+    chatWipeConversationConfirm: "این گفتگو پاک شود؟ این کار برگشت‌پذیر نیست.",
+    chatOpenProfilePictureAria: "باز کردن تصویر پروفایل",
+    chatProfileImagePreviewAria: "پیش‌نمایش تصویر پروفایل",
+    chatFailedToWipe: "پاک کردن گفتگو انجام نشد.",
+    chatInboxNewMessagesAria: "پیام‌های جدید",
+    chatInboxNewMessagesCountAria: "{{n}} پیام جدید",
+    profileHubTitle: "مرکز پروفایل",
+    profileHubSubtitle: "هویت و ترجیحات حساب خود را مدیریت کنید.",
+    profilePersonalNotesTitle: "یادداشت‌های شخصی",
+    profilePersonalNotesHint: "فقط روی این دستگاه ذخیره می‌شود — خصوصی.",
+    profilePersonalNotesPlaceholder: "ایده، یادداشت جلسه یا یادآور…",
+    profilePreferencesTitle: "ترجیحات",
+    profilePreferencesSubtitle: "ظاهر، اعلان‌ها و زبان.",
+    profileContactSectionTitle: "تماس و پروفایل",
+    profileContactSectionSubtitle: "با فشردن ذخیره تغییرات در حساب شما ذخیره می‌شود.",
+    profileNicknameLabel: "نام مستعار",
+    profileNicknamePlaceholder: "Kite شما را چطور صدا بزند؟",
+    profileBioLabel: "بیو",
+    profileBioPlaceholder: "یک خط کوتاه دربارهٔ خودتان (اختیاری).",
+    profileUploadPhoto: "آپلود عکس",
+    profileUploadingPhoto: "در حال آپلود...",
+    profileCardYourProfile: "پروفایل شما",
+    profileCardNamePlaceholder: "نام شما",
+    profileCardBioPlaceholder: "بیویی اضافه کنید تا حالتان مشخص شود.",
+    profileSaveChanges: "ذخیره تغییرات",
+    profileSavingChanges: "در حال ذخیره…",
+    profileLogOut: "خروج از حساب",
+    profileDeleteAccount: "حذف حساب",
+    profileDeletingAccount: "در حال حذف حساب…",
+    profileNotAuthenticated: "احراز هویت نشده‌اید.",
+    profileMustLoginSettings: "برای دیدن تنظیمات باید وارد شوید.",
+    profileNicknameTaken: "این نام مستعار قبلاً گرفته شده است.",
+    profileUpdatedSuccess: "پروفایل با موفقیت به‌روز شد.",
+    profileChooseImageFile: "لطفاً یک فایل تصویری انتخاب کنید.",
+    profileCouldNotGenerateImageUrl: "تولید آدرس تصویر ممکن نشد.",
+    profilePictureUpdatedSuccess: "تصویر پروفایل به‌روز شد.",
+    profileUpdateFailedGeneric: "به‌روزرسانی پروفایل ناموفق بود. دوباره تلاش کنید.",
+    profileUploadPictureFailed: "آپلود تصویر پروفایل ناموفق بود.",
+    profileDeleteAccountConfirm: "مطمئن هستید؟ این کار برگشت‌پذیر نیست.",
+    profileCouldNotDeleteAccount: "حذف حساب انجام نشد.",
+    profileDeleteFailed: "حذف ناموفق بود.",
+    profileYourAvatarAlt: "آواتار شما",
+    profileProfilePreviewAlt: "پیش‌نمایش پروفایل",
+    profileEmergencyContactHint:
+      "فقط برای مخاطبین تأییدشده شما در سناریوهای اضطراری دیده می‌شود.",
+    profileRoleLabel: "نقش",
+    profileRolePersonalizeHint:
+      "به ما کمک می‌کند فضای کار و پیشنهادها را شخصی‌سازی کنیم.",
+    profileSwitchToLightMode: "رفتن به حالت روشن",
+    profileSwitchToDarkMode: "رفتن به حالت تاریک",
+    profileNotificationsLabel: "اعلان‌ها",
+    discoverSearchBarPlaceholder: "پیدا کردن کاربر با نام مستعار",
+    chatHeaderRecipientLastSeen: "آخرین بازدید {{time}}",
+    chatEmptySelectConversation: "یک گفتگو را برای شروع انتخاب کنید",
+    chatMessageSessionModeLabel: "حالت جلسه",
+    chatSupportModeToggleAria: "تغییر حالت پشتیبانی",
+    chatAwaitingAcceptComposer:
+      "در انتظار پذیرش درخواست توسط {{nickname}} هستید؛ پس از آن می‌توانید پیام بفرستید.",
+    chatRecipientProfileAlt: "پروفایل {{name}}",
+    chatSendMessageAria: "ارسال پیام",
+    chatSendingAria: "در حال ارسال پیام",
     welcomePrivacyProtocolHeadline: "حریم خصوصی شما، معماری ماست",
     welcomePrivacyMetadataPolicy:
       "ما فرادادهٔ شما را جمع‌آوری، ذخیره یا نمی‌فروشیم. فراداده—«سایهٔ» زندگی دیجیتال شما—شامل این است که با چه کسی، چه زمانی صحبت می‌کنید و کجا هستید. در حالی که برنامه‌های دیگر رفتار شما را رصد می‌کنند، Kite طوری ساخته شده که آن را نادیده بگیرد.",
@@ -760,7 +975,7 @@ export const translations: Record<Language, TranslationRecord> = {
     selectUserToStart: "اختر مستخدمًا من الشريط الجانبي لبدء الدردشة.",
     readStatus: "تمت القراءة",
     sentStatus: "تم الإرسال",
-    sidebarRequests: "الطلبات",
+    sidebarRequests: "الطلبات المعلقة",
     sidebarInbox: "صندوق الوارد",
     sidebarNoRequests: "لا توجد طلبات رسائل.",
     messageRequestAccept: "قبول",
@@ -774,6 +989,8 @@ export const translations: Record<Language, TranslationRecord> = {
     sidebarNoExactUser: "لم يُعثر على مستخدم بهذا الاسم.",
     discoverSearchButton: "بحث",
     conversationsLoadError: "تعذر تحميل المحادثات.",
+    discoverPrivacyMigrationRequired:
+      "جداول الخصوصية غير موجودة. نفّذ ترحيل SQL في supabase/migrations (dm_connections) ثم أعد التحميل.",
     sidebarDiscoverTitle: "العثور على صديق",
     messageRequestBannerTitle: "طلب رسالة",
     messageRequestBannerBody:
@@ -788,7 +1005,8 @@ export const translations: Record<Language, TranslationRecord> = {
     openChatButton: "فتح الدردشة",
     settingsThemeLight: "فاتح",
     settingsThemeDark: "داكن",
-    settingsAppearanceLabel: "المظهر",
+    appearance: "المظهر",
+    language: "اللغة",
     discoverAlreadyFriends: "أصدقاء مسبقًا",
     discoverMessageButton: "رسالة",
     discoverRequestSentWaiting: "تم إرسال الطلب — بانتظار القبول.",
@@ -888,6 +1106,76 @@ export const translations: Record<Language, TranslationRecord> = {
       "حالة الاتصال: إشارة ضعيفة / بطيئة. فعّل وضع الدعم من الإعدادات لأداء أفضل.",
     dashboardWifiTooltipOffline:
       "حالة الاتصال: غير متصل. فعّل وضع الدعم من الإعدادات لأداء أفضل.",
+    navAppBrand: "Kite",
+    navTabChats: "المحادثات",
+    navTabDiscover: "اكتشف",
+    navTabStudio: "الاستوديو",
+    navTabProfile: "الملف الشخصي",
+    discoverPageTitle: "اكتشف",
+    chatLoadingShort: "جارٍ التحميل…",
+    chatAppTitle: "Kite",
+    chatBackToChatsAria: "العودة إلى المحادثات",
+    chatWipeConversationConfirm: "مسح هذه المحادثة؟ لا يمكن التراجع.",
+    chatOpenProfilePictureAria: "فتح صورة الملف الشخصي",
+    chatProfileImagePreviewAria: "معاينة صورة الملف الشخصي",
+    chatFailedToWipe: "تعذر مسح المحادثة.",
+    chatInboxNewMessagesAria: "رسائل جديدة",
+    chatInboxNewMessagesCountAria: "{{n}} رسائل جديدة",
+    profileHubTitle: "مركز الملف الشخصي",
+    profileHubSubtitle: "إدارة هويتك وتفضيلات الحساب.",
+    profilePersonalNotesTitle: "ملاحظات شخصية",
+    profilePersonalNotesHint: "مسودة خاصة — تُحفظ على هذا الجهاز فقط.",
+    profilePersonalNotesPlaceholder: "أفكار أو ملاحظات جلسات أو تذكيرات…",
+    profilePreferencesTitle: "التفضيلات",
+    profilePreferencesSubtitle: "المظهر والإشعارات واللغة.",
+    profileContactSectionTitle: "جهة الاتصال والملف",
+    profileContactSectionSubtitle: "يُحفظ مع حسابك عند الضغط على حفظ التغييرات.",
+    profileNicknameLabel: "الاسم المستعار",
+    profileNicknamePlaceholder: "كيف يجب أن يناديك Kite؟",
+    profileBioLabel: "نبذة",
+    profileBioPlaceholder: "سطر قصير عنك (اختياري).",
+    profileUploadPhoto: "رفع صورة",
+    profileUploadingPhoto: "جارٍ الرفع...",
+    profileCardYourProfile: "ملفك الشخصي",
+    profileCardNamePlaceholder: "اسمك",
+    profileCardBioPlaceholder: "أضف نبذة لإظهار أسلوبك.",
+    profileSaveChanges: "حفظ التغييرات",
+    profileSavingChanges: "جارٍ الحفظ…",
+    profileLogOut: "تسجيل الخروج",
+    profileDeleteAccount: "حذف الحساب",
+    profileDeletingAccount: "جارٍ حذف الحساب…",
+    profileNotAuthenticated: "غير مصادق.",
+    profileMustLoginSettings: "يجب تسجيل الدخول لعرض الإعدادات.",
+    profileNicknameTaken: "الاسم المستعار مستخدم بالفعل.",
+    profileUpdatedSuccess: "تم تحديث الملف الشخصي بنجاح.",
+    profileChooseImageFile: "يُرجى اختيار ملف صورة.",
+    profileCouldNotGenerateImageUrl: "تعذر إنشاء رابط الصورة.",
+    profilePictureUpdatedSuccess: "تم تحديث صورة الملف الشخصي.",
+    profileUpdateFailedGeneric: "فشل تحديث الملف الشخصي. حاول مرة أخرى.",
+    profileUploadPictureFailed: "فشل رفع صورة الملف الشخصي.",
+    profileDeleteAccountConfirm: "هل أنت متأكد؟ لا يمكن التراجع.",
+    profileCouldNotDeleteAccount: "تعذر حذف الحساب.",
+    profileDeleteFailed: "فشل الحذف.",
+    profileYourAvatarAlt: "صورتك الرمزية",
+    profileProfilePreviewAlt: "معاينة الملف الشخصي",
+    profileEmergencyContactHint:
+      "يظهر فقط لجهات الاتصال المعتمدة لديك في سيناريوهات الطوارئ.",
+    profileRoleLabel: "الدور",
+    profileRolePersonalizeHint:
+      "يساعدنا على تخصيص مساحة العمل والتوصيات.",
+    profileSwitchToLightMode: "التبديل إلى الوضع الفاتح",
+    profileSwitchToDarkMode: "التبديل إلى الوضع الداكن",
+    profileNotificationsLabel: "الإشعارات",
+    discoverSearchBarPlaceholder: "البحث عن مستخدم بالاسم المستعار",
+    chatHeaderRecipientLastSeen: "آخر ظهور {{time}}",
+    chatEmptySelectConversation: "اختر محادثة للبدء",
+    chatMessageSessionModeLabel: "وضع الجلسة",
+    chatSupportModeToggleAria: "تبديل وضع الدعم",
+    chatAwaitingAcceptComposer:
+      "بانتظار قبول {{nickname}} لطلبك قبل أن تتمكن من المراسلة.",
+    chatRecipientProfileAlt: "ملف {{name}} الشخصي",
+    chatSendMessageAria: "إرسال الرسالة",
+    chatSendingAria: "جارٍ إرسال الرسالة",
     welcomePrivacyProtocolHeadline: "خصوصيتك هي بنيانا المعماري",
     welcomePrivacyMetadataPolicy:
       "لا نجمع بياناتك الوصفية ولا نخزّنها ولا نبيعها. البيانات الوصفية—«ظل» حياتك الرقمية—تشمل مع من تتحدث ومتى وأين أنت. بينما تتتبع تطبيقات أخرى سلوكك، بُني Kite ليتجاهل ذلك.",
@@ -902,6 +1190,23 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomeMissionBody2:
       "플랫폼은 경량·종단간 암호화·회복력을 갖추도록 설계되었습니다. 인도주의 활동가, 위기 상황에 있는 개인, 그리고 신뢰할 수 있고 사적이며 데이터 소비가 적은 연결에 안전이 달린 이용자를 위해 만들어졌습니다.",
     installKiteForOffline: "오프라인 접속을 위해 Kite 설치",
+    appearance: "모양",
+    language: "언어",
+    discoverPrivacyMigrationRequired:
+      "개인정보 테이블이 없습니다. supabase/migrations(dm_connections)의 SQL 마이그레이션을 실행한 뒤 새로고침하세요.",
+    wipeChat: "대화 지우기",
+    sendButton: "보내기",
+    supportModeLabel: "지원 모드",
+    sidebarRequests: "대기 중인 요청",
+    relativeLastSeenJustNow: "방금",
+    relativeLastSeenOneMinute: "1분 전",
+    relativeLastSeenMinutes: "{{n}}분 전",
+    relativeLastSeenOneHour: "1시간 전",
+    relativeLastSeenHours: "{{n}}시간 전",
+    relativeLastSeenOneDay: "1일 전",
+    relativeLastSeenDays: "{{n}}일 전",
+    safetyProfileLastSeenOneMin: "마지막 접속 1분 전",
+    safetyProfileLastSeenMins: "마지막 접속 {{mins}}분 전",
     emptyDashboardSearchHeading: "닉네임으로 사용자 찾기",
     emptyDashboardSearchPlaceholder: "정확한 닉네임",
     emptyDashboardSearchError: "검색에 실패했습니다. 다시 시도하세요.",
@@ -942,6 +1247,76 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomePrivacyProtocolHeadline: "당신의 프라이버시가 곧 우리의 설계입니다",
     welcomePrivacyMetadataPolicy:
       "Kite는 메타데이터를 수집·저장·판매하지 않습니다. 메타데이터는 디지털 생활의 ‘그림자’로, 누구와 언제 이야기하고 어디에 있는지를 포함합니다. 다른 앱이 행동을 추적하는 동안, Kite는 이를 무시하도록 만들어졌습니다.",
+    navAppBrand: "Kite",
+    navTabChats: "채팅",
+    navTabDiscover: "탐색",
+    navTabStudio: "스튜디오",
+    navTabProfile: "프로필",
+    discoverPageTitle: "탐색",
+    chatLoadingShort: "로딩 중…",
+    chatAppTitle: "Kite",
+    chatBackToChatsAria: "채팅 목록으로",
+    chatWipeConversationConfirm: "이 대화를 삭제할까요? 되돌릴 수 없습니다.",
+    chatOpenProfilePictureAria: "프로필 사진 열기",
+    chatProfileImagePreviewAria: "프로필 이미지 미리보기",
+    chatFailedToWipe: "대화를 지우지 못했습니다.",
+    chatInboxNewMessagesAria: "새 메시지",
+    chatInboxNewMessagesCountAria: "새 메시지 {{n}}개",
+    profileHubTitle: "프로필 허브",
+    profileHubSubtitle: "신원과 계정 설정을 관리합니다.",
+    profilePersonalNotesTitle: "개인 메모",
+    profilePersonalNotesHint: "개인용 메모장 — 이 기기에만 저장됩니다.",
+    profilePersonalNotesPlaceholder: "아이디어, 세션 메모, 알림…",
+    profilePreferencesTitle: "환경설정",
+    profilePreferencesSubtitle: "모양, 알림, 언어.",
+    profileContactSectionTitle: "연락처 및 프로필",
+    profileContactSectionSubtitle: "변경 저장을 누르면 계정에 저장됩니다.",
+    profileNicknameLabel: "닉네임",
+    profileNicknamePlaceholder: "Kite가 어떻게 부를까요?",
+    profileBioLabel: "소개",
+    profileBioPlaceholder: "짧은 한 줄 소개(선택).",
+    profileUploadPhoto: "사진 업로드",
+    profileUploadingPhoto: "업로드 중...",
+    profileCardYourProfile: "내 프로필",
+    profileCardNamePlaceholder: "이름",
+    profileCardBioPlaceholder: "소개를 추가해 분위기를 보여주세요.",
+    profileSaveChanges: "변경 저장",
+    profileSavingChanges: "저장 중…",
+    profileLogOut: "로그아웃",
+    profileDeleteAccount: "계정 삭제",
+    profileDeletingAccount: "계정 삭제 중…",
+    profileNotAuthenticated: "로그인되지 않았습니다.",
+    profileMustLoginSettings: "설정을 보려면 로그인해야 합니다.",
+    profileNicknameTaken: "이 닉네임은 이미 사용 중입니다.",
+    profileUpdatedSuccess: "프로필이 업데이트되었습니다.",
+    profileChooseImageFile: "이미지 파일을 선택해 주세요.",
+    profileCouldNotGenerateImageUrl: "이미지 URL을 만들 수 없습니다.",
+    profilePictureUpdatedSuccess: "프로필 사진이 업데이트되었습니다.",
+    profileUpdateFailedGeneric: "프로필을 업데이트하지 못했습니다. 다시 시도하세요.",
+    profileUploadPictureFailed: "프로필 사진 업로드에 실패했습니다.",
+    profileDeleteAccountConfirm: "정말 진행할까요? 되돌릴 수 없습니다.",
+    profileCouldNotDeleteAccount: "계정을 삭제할 수 없습니다.",
+    profileDeleteFailed: "삭제에 실패했습니다.",
+    profileYourAvatarAlt: "내 아바타",
+    profileProfilePreviewAlt: "프로필 미리보기",
+    profileEmergencyContactHint:
+      "비상 시나리오에서 승인한 연락처에게만 표시됩니다.",
+    profileRoleLabel: "역할",
+    profileRolePersonalizeHint:
+      "작업 공간과 추천을 맞춤화하는 데 도움이 됩니다.",
+    profileSwitchToLightMode: "라이트 모드로 전환",
+    profileSwitchToDarkMode: "다크 모드로 전환",
+    profileNotificationsLabel: "알림",
+    discoverSearchBarPlaceholder: "닉네임으로 사용자 찾기",
+    chatHeaderRecipientLastSeen: "마지막 접속 {{time}}",
+    chatEmptySelectConversation: "대화를 선택해 시작하세요",
+    chatMessageSessionModeLabel: "세션 모드",
+    chatSupportModeToggleAria: "지원 모드 켜기/끄기",
+    chatAwaitingAcceptComposer:
+      "{{nickname}}님이 요청을 수락하면 메시지를 보낼 수 있습니다.",
+    chatRecipientProfileAlt: "{{name}} 프로필",
+    chatSendMessageAria: "메시지 보내기",
+    chatSendingAria: "메시지 보내는 중",
     welcomePrivacyThirtyDay:
       "모든 메시지 기록은 30일마다 영구적으로 삭제됩니다. 새 출발할 권리를 믿습니다.",
   },
@@ -953,7 +1328,24 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomeMissionBody2:
       "Platform hafif, uçtan uca şifreli ve dayanıklı olacak şekilde tasarlanmıştır. İnsani yardım çalışanları, kriz bölgelerindeki bireyler ve güvenliği güvenilir, özel ve düşük veri kullanan bir bağlantıya bağlı olan kullanıcılar için geliştirilmiştir.",
     installKiteForOffline: "Çevrimdışı erişim için Kite’yi yükleyin",
-    emptyDashboardSearchHeading: "Takma ada göre kullanıcı bul",
+    appearance: "Görünüm",
+    language: "Dil",
+    discoverPrivacyMigrationRequired:
+      "Gizlilik tabloları eksik. supabase/migrations (dm_connections) içindeki SQL geçişini çalıştırıp yeniden yükleyin.",
+    wipeChat: "Sohbeti sil",
+    sendButton: "Gönder",
+    supportModeLabel: "Destek modu",
+    sidebarRequests: "Bekleyen İstekler",
+    relativeLastSeenJustNow: "Az önce",
+    relativeLastSeenOneMinute: "1 dakika önce",
+    relativeLastSeenMinutes: "{{n}} dakika önce",
+    relativeLastSeenOneHour: "1 saat önce",
+    relativeLastSeenHours: "{{n}} saat önce",
+    relativeLastSeenOneDay: "1 gün önce",
+    relativeLastSeenDays: "{{n}} gün önce",
+    safetyProfileLastSeenOneMin: "Son görülme: 1 dakika önce",
+    safetyProfileLastSeenMins: "Son görülme: {{mins}} dakika önce",
+    emptyDashboardSearchHeading: "Takma adla kullanıcı bul",
     emptyDashboardSearchPlaceholder: "Tam takma ad",
     emptyDashboardSearchError: "Arama başarısız. Tekrar deneyin.",
     emptyDashboardSelfCardTitle: "Profiliniz",
@@ -993,6 +1385,76 @@ export const translations: Record<Language, TranslationRecord> = {
     welcomePrivacyProtocolHeadline: "GİZLİLİĞİNİZ BİZİM MİMARİMİZDİR",
     welcomePrivacyMetadataPolicy:
       "Üstverinizi toplamıyor, saklamıyor veya satmıyoruz. Üstveri—dijital yaşamınızın ‘gölgesi’—kiminle konuştuğunuzu, ne zaman konuştuğunuzu ve nerede olduğunuzu içerir. Diğer uygulamalar davranışınızı izlerken Kite bunu görmezden gelmek üzere tasarlandı.",
+    navAppBrand: "Kite",
+    navTabChats: "Sohbetler",
+    navTabDiscover: "Keşfet",
+    navTabStudio: "Stüdyo",
+    navTabProfile: "Profil",
+    discoverPageTitle: "Keşfet",
+    chatLoadingShort: "Yükleniyor…",
+    chatAppTitle: "Kite",
+    chatBackToChatsAria: "Sohbetlere dön",
+    chatWipeConversationConfirm: "Bu sohbet silinsin mi? Bu işlem geri alınamaz.",
+    chatOpenProfilePictureAria: "Profil fotoğrafını aç",
+    chatProfileImagePreviewAria: "Profil görseli önizlemesi",
+    chatFailedToWipe: "Sohbet silinemedi.",
+    chatInboxNewMessagesAria: "Yeni mesajlar",
+    chatInboxNewMessagesCountAria: "{{n}} yeni mesaj",
+    profileHubTitle: "Profil merkezi",
+    profileHubSubtitle: "Kimliğinizi ve hesap tercihlerinizi yönetin.",
+    profilePersonalNotesTitle: "Kişisel notlar",
+    profilePersonalNotesHint: "Özel not defteri — yalnızca bu cihazda saklanır.",
+    profilePersonalNotesPlaceholder: "Fikirler, seans notları veya hatırlatmalar…",
+    profilePreferencesTitle: "Tercihler",
+    profilePreferencesSubtitle: "Görünüm, bildirimler ve dil.",
+    profileContactSectionTitle: "İletişim ve profil",
+    profileContactSectionSubtitle: "Değişiklikleri kaydet’e bastığınızda hesabınıza kaydedilir.",
+    profileNicknameLabel: "Takma ad",
+    profileNicknamePlaceholder: "Kite size nasıl seslensin?",
+    profileBioLabel: "Biyografi",
+    profileBioPlaceholder: "Kendiniz hakkında kısa bir satır (isteğe bağlı).",
+    profileUploadPhoto: "Fotoğraf yükle",
+    profileUploadingPhoto: "Yükleniyor...",
+    profileCardYourProfile: "Profiliniz",
+    profileCardNamePlaceholder: "Adınız",
+    profileCardBioPlaceholder: "Tarzınızı göstermek için biyografi ekleyin.",
+    profileSaveChanges: "Değişiklikleri kaydet",
+    profileSavingChanges: "Kaydediliyor…",
+    profileLogOut: "Çıkış yap",
+    profileDeleteAccount: "Hesabı sil",
+    profileDeletingAccount: "Hesap siliniyor…",
+    profileNotAuthenticated: "Oturum açılmadı.",
+    profileMustLoginSettings: "Ayarları görmek için oturum açmalısınız.",
+    profileNicknameTaken: "Bu takma ad zaten alınmış.",
+    profileUpdatedSuccess: "Profil başarıyla güncellendi.",
+    profileChooseImageFile: "Lütfen bir görüntü dosyası seçin.",
+    profileCouldNotGenerateImageUrl: "Görüntü URL’si oluşturulamadı.",
+    profilePictureUpdatedSuccess: "Profil fotoğrafı güncellendi.",
+    profileUpdateFailedGeneric: "Profil güncellenemedi. Tekrar deneyin.",
+    profileUploadPictureFailed: "Profil fotoğrafı yüklenemedi.",
+    profileDeleteAccountConfirm: "Emin misiniz? Bu işlem geri alınamaz.",
+    profileCouldNotDeleteAccount: "Hesap silinemedi.",
+    profileDeleteFailed: "Silme başarısız.",
+    profileYourAvatarAlt: "Avatarınız",
+    profileProfilePreviewAlt: "Profil önizlemesi",
+    profileEmergencyContactHint:
+      "Yalnızca onaylı kişileriniz için acil durum akışlarında görünür.",
+    profileRoleLabel: "Rol",
+    profileRolePersonalizeHint:
+      "Çalışma alanınızı ve önerileri kişiselleştirmemize yardımcı olur.",
+    profileSwitchToLightMode: "Açık moda geç",
+    profileSwitchToDarkMode: "Koyu moda geç",
+    profileNotificationsLabel: "Bildirimler",
+    discoverSearchBarPlaceholder: "Takma adla kullanıcı bul",
+    chatHeaderRecipientLastSeen: "Son görülme {{time}}",
+    chatEmptySelectConversation: "Başlamak için bir sohbet seçin",
+    chatMessageSessionModeLabel: "Oturum modu",
+    chatSupportModeToggleAria: "Destek modunu aç veya kapat",
+    chatAwaitingAcceptComposer:
+      "Mesaj göndermeden önce {{nickname}} kullanıcısının isteğinizi kabul etmesi gerekir.",
+    chatRecipientProfileAlt: "{{name}} profili",
+    chatSendMessageAria: "Mesaj gönder",
+    chatSendingAria: "Mesaj gönderiliyor",
     welcomePrivacyThirtyDay:
       "Tüm mesaj geçmişi her 30 günde bir kalıcı olarak silinir. Temiz bir sayfa hakkına inanıyoruz.",
   },
@@ -1001,5 +1463,54 @@ export const translations: Record<Language, TranslationRecord> = {
 export function t(lang: Language, key: TranslationKey): string {
   const dict = translations[lang] ?? translations.en;
   return dict[key];
+}
+
+/** Dispatched on `window` after `nexus-lang` is updated (same-tab UI sync). */
+export const NEXUS_LANG_CHANGE_EVENT = "nexus-lang-change";
+
+const LANG_COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 365;
+
+export function readStoredLanguage(): Language {
+  if (typeof window === "undefined") return "en";
+  try {
+    const s = localStorage.getItem("nexus-lang");
+    if (s === "fa" || s === "ar" || s === "en" || s === "kr" || s === "tr") return s;
+  } catch {
+    // ignore
+  }
+  return "en";
+}
+
+/**
+ * True when `nexus-lang` is explicitly set in localStorage (any supported code, including "en").
+ * Used to avoid overwriting the user's device choice with `profiles.preferred_locale` (often default "en").
+ */
+export function hasStoredLanguageChoice(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const s = localStorage.getItem("nexus-lang");
+    return s === "fa" || s === "ar" || s === "en" || s === "kr" || s === "tr";
+  } catch {
+    return false;
+  }
+}
+
+export function parsePreferredLocale(value: string | null | undefined): Language | null {
+  if (value === "fa" || value === "ar" || value === "en" || value === "kr" || value === "tr") {
+    return value;
+  }
+  return null;
+}
+
+/** Persist language on the client and broadcast so nav/chat/dashboard stay aligned. */
+export function persistClientLanguage(lang: Language): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem("nexus-lang", lang);
+    document.cookie = `nexus-lang=${lang}; path=/; max-age=${LANG_COOKIE_MAX_AGE_SEC}`;
+    window.dispatchEvent(new Event(NEXUS_LANG_CHANGE_EVENT));
+  } catch {
+    // ignore
+  }
 }
 

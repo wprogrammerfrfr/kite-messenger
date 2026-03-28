@@ -11,22 +11,32 @@ import {
   importPrivateKeyFromBase64,
   type KeyPair,
 } from "@/lib/crypto";
-import { t, type Language } from "@/lib/translations";
+import {
+  NEXUS_LANG_CHANGE_EVENT,
+  readStoredLanguage,
+  t,
+  type Language,
+} from "@/lib/translations";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 import { UserDiscoverySidebar } from "@/components/UserDiscoverySidebar";
 import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
 
+function AuthLazyLoadingFallback() {
+  const lang = readStoredLanguage();
+  return (
+    <div className="flex min-h-[50vh] items-center justify-center text-sm text-stone-400">
+      {t(lang, "chatLoadingShort")}
+    </div>
+  );
+}
+
 const AuthLazy = dynamic(
   () => import("@/components/Auth").then((m) => m.Auth),
   {
     ssr: false,
-    loading: () => (
-      <div className="flex min-h-[50vh] items-center justify-center text-sm text-stone-400">
-        Loading…
-      </div>
-    ),
+    loading: () => <AuthLazyLoadingFallback />,
   }
 );
 
@@ -43,7 +53,7 @@ import {
 } from "@/lib/dm-connections";
 import { MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { ArrowLeft, Paperclip, Trash2 } from "lucide-react";
+import { ArrowLeft, Loader2, MapPin, Paperclip, Send, Trash2 } from "lucide-react";
 import Image from "next/image";
 import { useResilience } from "@/components/resilience-provider";
 import { withPatience } from "@/lib/network-patience";
@@ -247,14 +257,14 @@ export default function Home() {
   const [recipientPublicKey, setRecipientPublicKey] = useState<CryptoKey | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [notificationsMuted, setNotificationsMuted] = useState(false);
-  const languageRef = useRef<Language>("en");
+  const languageRef = useRef<Language>(readStoredLanguage());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const [activeRecipientId, setActiveRecipientId] = useState<string | null>(null);
   const [isOwnKeySyncing, setIsOwnKeySyncing] = useState(false);
   const [hasOwnKeyInDb, setHasOwnKeyInDb] = useState(false);
   const [hasRecipientKey, setHasRecipientKey] = useState(false);
-  const [language, setLanguage] = useState<Language>("en");
+  const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
 
   // Presence: users currently connected to "online-users".
@@ -424,6 +434,17 @@ export default function Home() {
       language === "kr" ? "ko" : language === "tr" ? "tr" : language;
     document.cookie = `nexus-lang=${language}; path=/; max-age=${60 * 60 * 24 * 365}`;
   }, [language]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = () => setLanguage(readStoredLanguage());
+    window.addEventListener("storage", sync);
+    window.addEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
+    };
+  }, []);
 
   // Support Mode dictator: force Professional Mode OFF.
   useEffect(() => {
@@ -1761,10 +1782,18 @@ export default function Home() {
     activeRecipientId ? contactAliases[activeRecipientId] : undefined,
     t(language, "anonymousLabel")
   );
+  const recipientLastSeenFormatted = activeRecipientId
+    ? formatRelativeLastSeen(activeRecipientMeta?.lastSeen ?? null, language)
+    : null;
   const recipientStatusText =
     activeRecipientId && onlineUserIds[activeRecipientId]
-      ? "Online"
-      : formatRelativeLastSeen(activeRecipientMeta?.lastSeen ?? null, language) || "Offline";
+      ? t(language, "safetyProfileBadgeOnline")
+      : recipientLastSeenFormatted
+        ? t(language, "chatHeaderRecipientLastSeen").replace(
+            "{{time}}",
+            recipientLastSeenFormatted
+          )
+        : t(language, "safetyProfileBadgeOffline");
 
   const handleOpenSafetyProfile = useCallback(
     (payload: SafetyProfileOpenPayload) => {
@@ -1899,7 +1928,7 @@ export default function Home() {
     if (!session?.user?.id || !activeRecipientId) return;
     const confirmed =
       typeof window !== "undefined"
-        ? window.confirm("Wipe this chat? This cannot be undone.")
+        ? window.confirm(t(language, "chatWipeConversationConfirm"))
         : false;
     if (!confirmed) return;
 
@@ -1909,7 +1938,7 @@ export default function Home() {
 
     const { error } = await supabase.from("messages").delete().or(pairFilter);
     if (error) {
-      setSendError(error.message ?? "Failed to wipe chat.");
+      setSendError(error.message ?? t(language, "chatFailedToWipe"));
       return;
     }
 
@@ -1923,7 +1952,7 @@ export default function Home() {
       )
     );
     handleBackToList();
-  }, [activeRecipientId, handleBackToList, session?.user?.id]);
+  }, [activeRecipientId, handleBackToList, language, session?.user?.id]);
 
   const canSend =
     Boolean(trimmedInput) &&
@@ -1998,7 +2027,7 @@ export default function Home() {
                 className="text-center text-2xl font-bold tracking-tight"
                 style={{ color: "var(--text-primary)" }}
               >
-                Kite
+                {t(language, "chatAppTitle")}
               </h1>
             </header>
             <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 sm:px-4 sm:pb-4">
@@ -2018,32 +2047,19 @@ export default function Home() {
         ) : (
           <>
             <div className="shrink-0 px-3 pt-3 sm:px-4">
-              <div className="mx-auto grid w-full max-w-full grid-cols-3 items-center gap-2 rounded-xl bg-black/10 px-2 py-1 backdrop-blur-md lg:max-w-2xl">
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = !isSupportMode;
-                      setIsSupportMode(next);
-                      writeSupportModeToStorage(next);
-                    }}
-                    className="rounded-xl px-2 py-1.5 text-xs font-bold"
-                    style={{
-                      background: isSupportMode ? "#f59e0b" : "rgba(251,191,36,0.2)",
-                      color: isSupportMode ? "#111827" : "#fbbf24",
-                    }}
-                  >
-                    Support
-                  </button>
+              <div className="mx-auto grid w-full max-w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-xl bg-black/10 px-2 py-1 backdrop-blur-md lg:max-w-2xl">
+                <div className="flex min-w-0 items-center">
                   <button
                     type="button"
                     onClick={handleBackToList}
                     className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-white/10"
                     style={{ color: "var(--text-secondary)" }}
-                    aria-label="Back to chats"
+                    aria-label={t(language, "chatBackToChatsAria")}
                   >
-                    <ArrowLeft className="h-4 w-4" aria-hidden />
-                    Chats
+                    <ArrowLeft className="h-4 w-4 shrink-0" aria-hidden />
+                    <span className="max-w-[4.5rem] truncate sm:max-w-none">
+                      {t(language, "navTabChats")}
+                    </span>
                   </button>
                 </div>
                 <button
@@ -2052,7 +2068,7 @@ export default function Home() {
                   className="mx-auto flex min-w-0 max-w-full flex-col items-center justify-center rounded-xl px-2 py-1 hover:bg-white/10"
                   style={{ color: "var(--text-primary)" }}
                 >
-                  <div className="flex min-w-0 items-center gap-2">
+                  <div className="flex min-w-0 items-center justify-center gap-2">
                     {activeRecipientMeta?.profilePictureUrl ? (
                       <span
                         role="button"
@@ -2061,12 +2077,15 @@ export default function Home() {
                           setChatImageLightboxUrl(activeRecipientMeta.profilePictureUrl);
                         }}
                         className="h-8 w-8 shrink-0 overflow-hidden rounded-full"
-                        aria-label="Open profile picture"
+                        aria-label={t(language, "chatOpenProfilePictureAria")}
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                           src={activeRecipientMeta.profilePictureUrl}
-                          alt={`${recipientDisplayName} profile`}
+                          alt={t(language, "chatRecipientProfileAlt").replace(
+                            "{{name}}",
+                            recipientDisplayName
+                          )}
                           className="h-full w-full object-cover"
                         />
                       </span>
@@ -2077,15 +2096,47 @@ export default function Home() {
                     {recipientStatusText}
                   </span>
                 </button>
-                <div className="flex items-center justify-end">
+                <div className="flex min-w-0 shrink-0 items-center justify-end gap-2 sm:gap-2.5">
+                  <div className="flex items-center gap-1.5 sm:gap-2">
+                    <span
+                      className="max-w-[6.5rem] truncate text-end text-[10px] font-semibold leading-tight sm:max-w-[9rem] sm:text-xs"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      {t(language, "supportModeLabel")}
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={isSupportMode}
+                      aria-label={t(language, "chatSupportModeToggleAria")}
+                      onClick={() => {
+                        const next = !isSupportMode;
+                        setIsSupportMode(next);
+                        writeSupportModeToStorage(next);
+                      }}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border p-0.5 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500 focus-visible:ring-offset-1 focus-visible:ring-offset-transparent ${
+                        isSupportMode
+                          ? "border-orange-500/60 bg-orange-600"
+                          : "border-stone-600/70 bg-stone-700"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none block h-5 w-5 rounded-full bg-white shadow transition-[margin] duration-200 ease-out ${
+                          isSupportMode ? "ml-auto" : "ml-0"
+                        }`}
+                        aria-hidden
+                      />
+                    </button>
+                  </div>
                   <button
                     type="button"
                     onClick={() => void handleWipeConversation()}
                     className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold"
                     style={{ color: "#ef4444" }}
+                    aria-label={t(language, "wipeChat")}
                   >
-                    <Trash2 className="h-4 w-4" aria-hidden />
-                    Wipe Chat
+                    <Trash2 className="h-4 w-4 shrink-0" aria-hidden />
+                    {t(language, "wipeChat")}
                   </button>
                 </div>
               </div>
@@ -2141,7 +2192,10 @@ export default function Home() {
             }}
             role="status"
           >
-            {`Waiting for ${recipientDisplayName} to accept your request before you can message.`}
+            {t(language, "chatAwaitingAcceptComposer").replace(
+              "{{nickname}}",
+              recipientDisplayName
+            )}
           </div>
         )}
 
@@ -2172,7 +2226,7 @@ export default function Home() {
                   }}
                 >
                   <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-                    Select a conversation to start
+                    {t(language, "chatEmptySelectConversation")}
                   </p>
                 </div>
               )
@@ -2270,7 +2324,9 @@ export default function Home() {
                       </p>
                     )}
                     {m.isSessionMode && (
-                      <p className="mt-1 text-[11px] opacity-80">Session mode</p>
+                      <p className="mt-1 text-[11px] opacity-80">
+                        {t(language, "chatMessageSessionModeLabel")}
+                      </p>
                     )}
                     <div className="mt-1 flex items-center justify-end gap-2 text-[11px] opacity-80">
                       <span>{formatTime(m.createdAt)}</span>
@@ -2304,39 +2360,41 @@ export default function Home() {
           {!composerDisabled ? (
             <div className="mx-auto w-full max-w-full lg:max-w-2xl">
               <div
-                className="flex w-full min-w-0 items-end gap-2 rounded-xl border backdrop-blur-sm px-2"
+                className="flex w-full min-w-0 items-center gap-1.5 rounded-2xl border px-1.5 py-1 backdrop-blur-sm sm:gap-2 sm:px-2"
                 style={{
                   background: "var(--input-bg)",
                   borderColor: "var(--border)",
                   boxShadow: professionalMode ? "none" : "var(--glow)",
                 }}
               >
-                <button
-                  type="button"
-                  onClick={handleOpenFilePicker}
-                  disabled={uploadingFile || !senderKeys || !recipientPublicKey || !activeRecipientId}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-full text-xs font-medium transition hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  {!isSupportMode && <Paperclip className="h-4 w-4" aria-hidden />}
-                  <span className="sr-only">{t(language, "attachImage")}</span>
-                </button>
+                {!isSupportMode ? (
+                  <button
+                    type="button"
+                    onClick={handleOpenFilePicker}
+                    disabled={
+                      uploadingFile || !senderKeys || !recipientPublicKey || !activeRecipientId
+                    }
+                    className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-medium transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    style={{ color: "var(--text-secondary)" }}
+                    aria-label={t(language, "attachImage")}
+                  >
+                    <Paperclip className="h-5 w-5" aria-hidden strokeWidth={2} />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={handleShareLocation}
                   disabled={!locationReady}
-                  className="inline-flex h-9 px-2 items-center justify-center rounded-full text-xs font-medium transition hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-medium transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
                   style={{ color: "var(--text-secondary)" }}
                   title={
                     !locationReady
                       ? t(language, "locationRequiresSecureKeyExchange")
-                      : undefined
+                      : t(language, "shareLocation")
                   }
+                  aria-label={t(language, "shareLocation")}
                 >
-                  <span aria-hidden className="mr-1">
-                    📍
-                  </span>
-                  <span className="hidden sm:inline">{t(language, "shareLocation")}</span>
+                  <MapPin className="h-5 w-5" aria-hidden strokeWidth={2} />
                 </button>
                 <textarea
                   ref={textAreaRef}
@@ -2350,10 +2408,9 @@ export default function Home() {
                     }
                   }}
                   placeholder={t(language, "typePlaceholder")}
-                  className="flex-1 resize-none bg-transparent px-2 py-3 text-sm outline-none placeholder:opacity-60"
+                  className="min-h-[40px] flex-1 resize-none bg-transparent px-1 py-2.5 text-sm outline-none placeholder:opacity-60 sm:px-2"
                   style={{
                     color: "var(--text-primary)",
-                    minHeight: 44,
                     maxHeight: 160,
                     overflowY: "auto",
                     whiteSpace: "pre-wrap",
@@ -2365,18 +2422,25 @@ export default function Home() {
                   type="button"
                   onClick={handleSend}
                   disabled={!canSend}
-                  className="rounded-xl px-4 py-2 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                   style={{
                     background: "var(--accent)",
                     color:
-                    isSupportMode || professionalMode
-                      ? "#fff"
-                      : appearance === "light"
-                        ? "#000000"
-                        : "rgba(12, 10, 18, 0.9)",
+                      isSupportMode || professionalMode
+                        ? "#fff"
+                        : appearance === "light"
+                          ? "#000000"
+                          : "rgba(12, 10, 18, 0.9)",
                   }}
+                  aria-label={
+                    sending ? t(language, "chatSendingAria") : t(language, "chatSendMessageAria")
+                  }
                 >
-                  {sending ? t(language, "sendingButton") : t(language, "sendButton")}
+                  {sending ? (
+                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden strokeWidth={2} />
+                  ) : (
+                    <Send className="h-5 w-5" aria-hidden strokeWidth={2} />
+                  )}
                 </button>
                 <input
                   ref={fileInputRef}
