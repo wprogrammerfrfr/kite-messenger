@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import {
   decryptMessage,
   encryptMessage,
@@ -14,12 +15,25 @@ import { t, type Language } from "@/lib/translations";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
-import { Auth } from "@/components/Auth";
 import { UserDiscoverySidebar } from "@/components/UserDiscoverySidebar";
-import {
-  SafetyProfileModal,
-  type SafetyProfileOpenPayload,
-} from "@/components/SafetyProfileModal";
+import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
+
+const AuthLazy = dynamic(
+  () => import("@/components/Auth").then((m) => m.Auth),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex min-h-[50vh] items-center justify-center text-sm text-stone-400">
+        Loading…
+      </div>
+    ),
+  }
+);
+
+const SafetyProfileModal = dynamic(
+  () => import("@/components/SafetyProfileModal").then((m) => m.SafetyProfileModal),
+  { ssr: false, loading: () => null }
+);
 import {
   acceptDmConnection,
   declineDmConnection,
@@ -423,6 +437,15 @@ export default function Home() {
     let mounted = true;
 
     const getInitialSession = async () => {
+      await new Promise<void>((resolve) => {
+        if (typeof window !== "undefined" && typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => resolve());
+        } else {
+          resolve();
+        }
+      });
+      if (!mounted) return;
+
       const { data, error } = await supabase.auth.getSession();
       if (!mounted) return;
 
@@ -1937,7 +1960,7 @@ export default function Home() {
         : MUSICIAN_THEME;
 
   if (!session) {
-    return <Auth />;
+    return <AuthLazy />;
   }
   if (!senderKeys) {
     return <SkeletonChat />;

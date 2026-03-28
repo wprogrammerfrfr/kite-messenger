@@ -35,12 +35,22 @@ export function DiscoverRequestInbox({
     ? "mb-3 rounded-2xl bg-stone-100/80 border border-orange-500/30 p-4 hover:bg-orange-50/90 transition-all"
     : "mb-3 rounded-2xl bg-white/5 border-none p-4 hover:bg-white/10 transition-all";
 
-  const { profilesById, dmStatusByPartnerId, requestIds, loadError, showSkeleton, handleAccept, handleDecline, actionBusy } =
-    useSidebarPrivacyData(sessionUserId, language, 0, {
+  const {
+    profilesById,
+    dmStatusByPartnerId,
+    requestIds: rawRequestIds,
+    loadError,
+    showSkeleton,
+    handleAccept,
+    handleDecline,
+    actionBusy,
+  } = useSidebarPrivacyData(sessionUserId, language, 0, {
       onAfterAccept: (otherId) => {
         router.push(`/chat?recipient=${encodeURIComponent(otherId)}`);
       },
     });
+
+  const requestIds = rawRequestIds.filter((id) => id !== sessionUserId);
 
   const renderRequestCard = (p: SidebarProfileRow) => {
     const isOnline = Boolean(onlineUserIds[p.id]);

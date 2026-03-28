@@ -45,7 +45,7 @@ export async function fetchSidebarPrivacySnapshot(
   const emptyFallback = (): SidebarPrivacySnapshot => ({
     profilesById: {},
     dmStatusByPartnerId: {},
-    inboxIds: [me],
+    inboxIds: [],
     requestIds: [],
   });
 
@@ -68,7 +68,7 @@ export async function fetchSidebarPrivacySnapshot(
           fallbackSnapshot: {
             profilesById: {},
             dmStatusByPartnerId: {},
-            inboxIds: [me],
+            inboxIds: [],
             requestIds: [],
           },
         };
@@ -106,7 +106,7 @@ export async function fetchSidebarPrivacySnapshot(
       }
     }
 
-    const inbox = new Set<string>([me]);
+    const inbox = new Set<string>();
     const requests = new Set<string>();
 
     const considerPartner = (v: string) => {
@@ -154,33 +154,34 @@ export async function fetchSidebarPrivacySnapshot(
         ok: true,
         snapshot: {
           profilesById: {},
-          inboxIds: [me],
+          inboxIds: [],
           requestIds: [],
-          dmStatusByPartnerId: { [me]: "accepted" },
+          dmStatusByPartnerId: {},
         },
       };
     }
 
     const statusMap: Record<string, DmConnectionStatus | null> = {};
     for (const id of allIds) {
-      if (id === me) {
-        statusMap[id] = "accepted";
-        continue;
-      }
+      if (id === me) continue;
       const c = connByPartner.get(id);
       statusMap[id] = c ? c.status : null;
     }
 
-    const { data: profRows, error: profErr } = await supabase
-      .from("profiles")
-      .select("id, nickname, role, lastSeen:last_seen, preferred_locale")
-      .in("id", allIds);
-
-    if (profErr) throw profErr;
+    const profileQueryIds = allIds.filter((id) => id !== me);
 
     const map: Record<string, SidebarProfileRow> = {};
-    for (const p of (profRows ?? []) as SidebarProfileRow[]) {
-      map[p.id] = p;
+    if (profileQueryIds.length > 0) {
+      const { data: profRows, error: profErr } = await supabase
+        .from("profiles")
+        .select("id, nickname, role, lastSeen:last_seen, preferred_locale")
+        .in("id", profileQueryIds);
+
+      if (profErr) throw profErr;
+
+      for (const p of (profRows ?? []) as SidebarProfileRow[]) {
+        map[p.id] = p;
+      }
     }
 
     return {
@@ -188,8 +189,8 @@ export async function fetchSidebarPrivacySnapshot(
       snapshot: {
         profilesById: map,
         dmStatusByPartnerId: statusMap,
-        inboxIds: inboxSorted.filter((id) => id === me || map[id]),
-        requestIds: requestSorted.filter((id) => map[id]),
+        inboxIds: inboxSorted.filter((id) => id !== me && map[id]),
+        requestIds: requestSorted.filter((id) => id !== me && map[id]),
       },
     };
   } catch {

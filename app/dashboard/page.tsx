@@ -1,12 +1,17 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 import { useRouter } from "next/navigation";
 import { EmptyChatDashboard } from "@/components/EmptyChatDashboard";
 import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
-import { SafetyProfileModal } from "@/components/SafetyProfileModal";
+
+const SafetyProfileModal = dynamic(
+  () => import("@/components/SafetyProfileModal").then((m) => m.SafetyProfileModal),
+  { ssr: false, loading: () => null }
+);
 import { SkeletonDiscover } from "@/components/SkeletonDiscover";
 import { DiscoverRequestInbox } from "@/components/DiscoverRequestInbox";
 import { t, type Language } from "@/lib/translations";
@@ -78,6 +83,15 @@ export default function DashboardPage() {
 
     const load = async () => {
       setLoading(true);
+
+      await new Promise<void>((resolve) => {
+        if (typeof window !== "undefined" && typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => resolve());
+        } else {
+          resolve();
+        }
+      });
+      if (cancelled) return;
 
       const { data, error } = await supabase.auth.getSession();
       if (cancelled) return;

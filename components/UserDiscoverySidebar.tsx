@@ -219,6 +219,8 @@ function UserDiscoverySidebarInner(props: {
     );
   };
 
+  const visibleInboxIds = inboxIds.filter((id) => id !== sessionUserId);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -238,13 +240,13 @@ function UserDiscoverySidebarInner(props: {
             >
               {t(language, "sidebarInbox")}
             </p>
-            {inboxIds.length === 0 ? (
+            {visibleInboxIds.length === 0 ? (
               <p className="px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
                 {t(language, "noMatchingUsers")}
               </p>
             ) : (
               <div className="space-y-3">
-                {inboxIds.map((id) => {
+                {visibleInboxIds.map((id) => {
                   const p = profilesById[id];
                   if (!p) return null;
                   return renderUserRow(p);

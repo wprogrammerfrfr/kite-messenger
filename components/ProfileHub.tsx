@@ -86,7 +86,9 @@ export const ProfileHub = memo(function ProfileHub() {
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
   const [notificationsMuted, setNotificationsMuted] = useState(false);
   const [language, setLanguage] = useState<Language>("en");
+  const [personalNotes, setPersonalNotes] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const notesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const theme =
     appearance === "light"
@@ -133,12 +135,52 @@ export const ProfileHub = memo(function ProfileHub() {
     }
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || !session?.user?.id) return;
+    try {
+      const key = `kite-personal-notes-${session.user.id}`;
+      setPersonalNotes(localStorage.getItem(key) ?? "");
+    } catch {
+      setPersonalNotes("");
+    }
+  }, [session?.user?.id]);
+
+  const persistPersonalNotes = (text: string) => {
+    if (typeof window === "undefined" || !session?.user?.id) return;
+    try {
+      localStorage.setItem(`kite-personal-notes-${session.user.id}`, text);
+    } catch {
+      // ignore quota
+    }
+  };
+
+  const onPersonalNotesChange = (text: string) => {
+    setPersonalNotes(text);
+    if (notesSaveTimerRef.current) clearTimeout(notesSaveTimerRef.current);
+    notesSaveTimerRef.current = setTimeout(() => persistPersonalNotes(text), 400);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (notesSaveTimerRef.current) clearTimeout(notesSaveTimerRef.current);
+    };
+  }, []);
+
   // Fetch session and existing profile.
   useEffect(() => {
     let cancelled = false;
 
     const load = async () => {
       setError(null);
+
+      await new Promise<void>((resolve) => {
+        if (typeof window !== "undefined" && typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => resolve());
+        } else {
+          resolve();
+        }
+      });
+      if (cancelled) return;
 
       const { data: sessionData, error: sessionError } =
         await supabase.auth.getSession();
@@ -526,13 +568,46 @@ export const ProfileHub = memo(function ProfileHub() {
               />
             </div>
 
+            <section
+              className="rounded-2xl border p-4 sm:p-5"
+              style={{ borderColor: theme.border }}
+              aria-labelledby="personal-notes-heading"
+            >
+              <div className="mb-3">
+                <h2
+                  id="personal-notes-heading"
+                  className="text-sm font-semibold uppercase tracking-[0.16em]"
+                  style={{ color: theme.textPrimary }}
+                >
+                  Personal Notes
+                </h2>
+                <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
+                  Private scratchpad — stored only on this device.
+                </p>
+              </div>
+              <textarea
+                value={personalNotes}
+                onChange={(e) => onPersonalNotesChange(e.target.value)}
+                onBlur={() => persistPersonalNotes(personalNotes)}
+                placeholder="Jot ideas, session notes, or reminders…"
+                rows={5}
+                className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border resize-y font-mono leading-relaxed"
+                style={{
+                  background: "rgba(12, 12, 18, 0.95)",
+                  borderColor: "rgba(255, 69, 0, 0.28)",
+                  color: "rgba(245, 245, 244, 0.95)",
+                  minHeight: "7.5rem",
+                }}
+              />
+            </section>
+
             <section className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: theme.border }}>
               <div className="mb-4">
                 <h2 className="text-sm font-semibold uppercase tracking-[0.16em]" style={{ color: theme.textPrimary }}>
                   Preferences
                 </h2>
                 <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
-                  Appearance and account controls.
+                  Appearance, notifications, and language.
                 </p>
               </div>
 
@@ -626,19 +701,17 @@ export const ProfileHub = memo(function ProfileHub() {
                   compact
                 />
               </div>
+            </section>
 
-              <button
-                type="button"
-                onClick={async () => {
-                  await supabase.auth.signOut();
-                  if (typeof window !== "undefined") {
-                    window.location.href = "/";
-                  }
-                }}
-                className="w-full rounded-xl px-3 py-2 text-sm font-bold text-white bg-red-600 border border-red-500 hover:brightness-110 active:scale-95 transition-transform"
-              >
-                Log Out
-              </button>
+            <section className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: theme.border }}>
+              <div className="mb-4">
+                <h2 className="text-sm font-semibold uppercase tracking-[0.16em]" style={{ color: theme.textPrimary }}>
+                  Contact &amp; profile
+                </h2>
+                <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
+                  Saved with your account when you press Save Changes.
+                </p>
+              </div>
 
             <div className="space-y-1.5">
               <label
@@ -780,9 +853,22 @@ export const ProfileHub = memo(function ProfileHub() {
 
             <button
               type="button"
+              onClick={async () => {
+                await supabase.auth.signOut();
+                if (typeof window !== "undefined") {
+                  window.location.href = "/";
+                }
+              }}
+              className="mt-3 w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-white bg-red-600/90 border border-red-500/80 hover:bg-red-600 transition-colors"
+            >
+              Log Out
+            </button>
+
+            <button
+              type="button"
               onClick={() => void handleDeleteAccount()}
               disabled={deletingAccount}
-              className="inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white bg-red-700 border border-red-600 hover:brightness-110 active:scale-95 transition-transform disabled:cursor-not-allowed"
+              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white bg-red-700 border border-red-600 hover:brightness-110 active:scale-95 transition-transform disabled:cursor-not-allowed"
             >
               <AlertTriangle className="h-4 w-4" aria-hidden />
               {deletingAccount ? "Deleting account…" : "Delete account"}

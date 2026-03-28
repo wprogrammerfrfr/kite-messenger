@@ -50,6 +50,14 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
     let mounted = true;
 
     void (async () => {
+      await new Promise<void>((resolve) => {
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => resolve());
+        } else {
+          resolve();
+        }
+      });
+      if (!mounted) return;
       const {
         data: { session },
       } = await supabase.auth.getSession();
