@@ -18,6 +18,7 @@ import {
   type Language,
 } from "@/lib/translations";
 import { useRouter, useSearchParams } from "next/navigation";
+import { dispatchPushAfterOutgoingMessage } from "@/app/actions/notifications";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 import { UserDiscoverySidebar } from "@/components/UserDiscoverySidebar";
@@ -1349,24 +1350,36 @@ export default function Home() {
       );
 
       try {
+        let insertedMessageId: string | null = null;
         await withPatience(
           async () => {
-            const { error } = await supabase.from("messages").insert({
-              encrypted_content: encryptedForRecipient,
-              content_for_sender: encryptedForSender,
-              sender_id: senderId,
-              receiver_id: receiverId,
-              is_session_mode: professionalMode,
-              is_read: false,
-            });
+            const { data, error } = await supabase
+              .from("messages")
+              .insert({
+                encrypted_content: encryptedForRecipient,
+                content_for_sender: encryptedForSender,
+                sender_id: senderId,
+                receiver_id: receiverId,
+                is_session_mode: professionalMode,
+                is_read: false,
+              })
+              .select("id")
+              .single();
             if (error) {
               console.log("Supabase insert error:", error);
               throw new Error(error.message ?? "Failed to send message");
             }
+            insertedMessageId = typeof data?.id === "string" ? data.id : null;
           },
           { patient: isLowBandwidthMode }
         );
         void ensureDmConnectionAfterSend(supabase, senderId, receiverId);
+        if (insertedMessageId && receiverId !== senderId) {
+          void dispatchPushAfterOutgoingMessage(insertedMessageId, {
+            title: t(language, "notificationNewMessageTitle"),
+            body: t(language, "notificationNewMessageBody"),
+          });
+        }
         setSidebarRefreshNonce((n) => n + 1);
         setInputValue("");
         if (textAreaRef.current) {
@@ -1394,6 +1407,7 @@ export default function Home() {
     dmThread.status,
     dmThread.initiatedBy,
     isLowBandwidthMode,
+    language,
   ]);
   // --- NEW FILTERING LOGIC ---
   // This calculates which messages to show based on the person you clicked in the sidebar
@@ -1629,24 +1643,40 @@ export default function Home() {
         senderKeys
       );
 
+      let insertedAttachmentId: string | null = null;
       await withPatience(
         async () => {
-          const { error: insertError } = await supabase.from("messages").insert({
-            encrypted_content: encryptedText,
-            content_for_sender: encryptedForSender,
-            sender_id: session.user.id,
-            receiver_id: activeRecipientId,
-            is_session_mode: professionalMode,
-            is_read: false,
-          });
+          const { data, error: insertError } = await supabase
+            .from("messages")
+            .insert({
+              encrypted_content: encryptedText,
+              content_for_sender: encryptedForSender,
+              sender_id: session.user.id,
+              receiver_id: activeRecipientId,
+              is_session_mode: professionalMode,
+              is_read: false,
+            })
+            .select("id")
+            .single();
           if (insertError) {
             throw new Error(insertError.message ?? "Failed to send attachment");
           }
+          insertedAttachmentId = typeof data?.id === "string" ? data.id : null;
         },
         { patient: isLowBandwidthMode }
       );
 
       void ensureDmConnectionAfterSend(supabase, session.user.id, activeRecipientId);
+      if (
+        insertedAttachmentId &&
+        activeRecipientId &&
+        activeRecipientId !== session.user.id
+      ) {
+        void dispatchPushAfterOutgoingMessage(insertedAttachmentId, {
+          title: t(language, "notificationNewMessageTitle"),
+          body: t(language, "notificationNewMessageBody"),
+        });
+      }
       setSidebarRefreshNonce((n) => n + 1);
     } catch (err) {
       setSendError(
@@ -1738,24 +1768,36 @@ export default function Home() {
             senderKeys
           );
 
+          let insertedLocationId: string | null = null;
           await withPatience(
             async () => {
-              const { error } = await supabase.from("messages").insert({
-                encrypted_content: encryptedText,
-                content_for_sender: encryptedForSender,
-                sender_id: senderId,
-                receiver_id: receiverId,
-                is_session_mode: professionalMode,
-                is_read: false,
-              });
+              const { data, error } = await supabase
+                .from("messages")
+                .insert({
+                  encrypted_content: encryptedText,
+                  content_for_sender: encryptedForSender,
+                  sender_id: senderId,
+                  receiver_id: receiverId,
+                  is_session_mode: professionalMode,
+                  is_read: false,
+                })
+                .select("id")
+                .single();
               if (error) {
                 throw new Error(error.message ?? "Failed to share location");
               }
+              insertedLocationId = typeof data?.id === "string" ? data.id : null;
             },
             { patient: isLowBandwidthMode }
           );
 
           void ensureDmConnectionAfterSend(supabase, senderId, receiverId);
+          if (insertedLocationId && receiverId !== senderId) {
+            void dispatchPushAfterOutgoingMessage(insertedLocationId, {
+              title: t(language, "notificationNewMessageTitle"),
+              body: t(language, "notificationNewMessageBody"),
+            });
+          }
           setSidebarRefreshNonce((n) => n + 1);
         } catch (err) {
           setSendError(
@@ -2062,44 +2104,51 @@ export default function Home() {
                     </span>
                   </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={openActiveRecipientProfile}
-                  className="mx-auto flex min-w-0 max-w-full flex-col items-center justify-center rounded-xl px-2 py-1 hover:bg-white/10"
-                  style={{ color: "var(--text-primary)" }}
-                >
-                  <div className="flex min-w-0 items-center justify-center gap-2">
-                    {activeRecipientMeta?.profilePictureUrl ? (
-                      <span
-                        role="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setChatImageLightboxUrl(activeRecipientMeta.profilePictureUrl);
-                        }}
-                        className="h-8 w-8 shrink-0 overflow-hidden rounded-full"
-                        aria-label={t(language, "chatOpenProfilePictureAria")}
-                      >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={activeRecipientMeta.profilePictureUrl}
-                          alt={t(language, "chatRecipientProfileAlt").replace(
-                            "{{name}}",
-                            recipientDisplayName
-                          )}
-                          className="h-full w-full object-cover"
-                        />
+                <div className="flex min-w-0 w-full flex-1 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={openActiveRecipientProfile}
+                    className="mx-auto flex min-w-0 max-w-full flex-1 flex-col items-center justify-center rounded-xl px-2 py-1 hover:bg-white/10"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    <div className="flex min-w-0 w-full max-w-full items-center justify-center gap-2">
+                      {activeRecipientMeta?.profilePictureUrl ? (
+                        <span
+                          role="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setChatImageLightboxUrl(activeRecipientMeta.profilePictureUrl);
+                          }}
+                          className="h-8 w-8 shrink-0 overflow-hidden rounded-full"
+                          aria-label={t(language, "chatOpenProfilePictureAria")}
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={activeRecipientMeta.profilePictureUrl}
+                            alt={t(language, "chatRecipientProfileAlt").replace(
+                              "{{name}}",
+                              recipientDisplayName
+                            )}
+                            className="h-full w-full object-cover"
+                          />
+                        </span>
+                      ) : null}
+                      <span className="min-w-0 truncate text-center text-xl font-bold">
+                        {recipientDisplayName}
                       </span>
-                    ) : null}
-                    <span className="truncate text-xl font-bold">{recipientDisplayName}</span>
-                  </div>
-                  <span className="text-xs" style={{ color: "#a8a29e" }}>
-                    {recipientStatusText}
-                  </span>
-                </button>
-                <div className="flex min-w-0 shrink-0 items-center justify-end gap-2 sm:gap-2.5">
-                  <div className="flex items-center gap-1.5 sm:gap-2">
+                    </div>
                     <span
-                      className="max-w-[6.5rem] truncate text-end text-[10px] font-semibold leading-tight sm:max-w-[9rem] sm:text-xs"
+                      className="min-w-0 max-w-full truncate text-center text-xs"
+                      style={{ color: "#a8a29e" }}
+                    >
+                      {recipientStatusText}
+                    </span>
+                  </button>
+                </div>
+                <div className="flex shrink-0 items-center gap-3">
+                  <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+                    <span
+                      className="whitespace-nowrap text-end text-[10px] font-semibold leading-tight sm:text-xs"
                       style={{ color: "var(--text-secondary)" }}
                     >
                       {t(language, "supportModeLabel")}
@@ -2131,12 +2180,12 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => void handleWipeConversation()}
-                    className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold"
+                    className="inline-flex shrink-0 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold"
                     style={{ color: "#ef4444" }}
                     aria-label={t(language, "wipeChat")}
                   >
                     <Trash2 className="h-4 w-4 shrink-0" aria-hidden />
-                    {t(language, "wipeChat")}
+                    <span className="hidden sm:inline">{t(language, "wipeChat")}</span>
                   </button>
                 </div>
               </div>
