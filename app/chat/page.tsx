@@ -1961,21 +1961,36 @@ export default function Home() {
     >
       <main className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
         {!activeRecipientId ? (
-          <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
-            <p className="mb-3 px-2 text-sm" style={{ color: "var(--text-secondary)" }}>
-              Select a conversation to start
-            </p>
-            <UserDiscoverySidebar
-              sessionUserId={session.user.id}
-              activeRecipientId={activeRecipientId}
-              onSelectRecipientId={handleSelectRecipient}
-              language={language}
-              onlineUserIds={onlineUserIds}
-              refreshNonce={sidebarRefreshNonce}
-              lowBandwidth={isLowBandwidthMode}
-              onOpenSafetyProfile={handleOpenSafetyProfile}
-              aliasByContactId={contactAliases}
-            />
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <header
+              className="sticky top-0 z-10 shrink-0 px-4 py-3 backdrop-blur-md"
+              style={{
+                background:
+                  appearance === "light"
+                    ? "rgba(245, 245, 244, 0.88)"
+                    : "rgba(0, 0, 0, 0.5)",
+              }}
+            >
+              <h1
+                className="text-center text-2xl font-bold tracking-tight"
+                style={{ color: "var(--text-primary)" }}
+              >
+                Kite
+              </h1>
+            </header>
+            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 sm:px-4 sm:pb-4">
+              <UserDiscoverySidebar
+                sessionUserId={session.user.id}
+                activeRecipientId={activeRecipientId}
+                onSelectRecipientId={handleSelectRecipient}
+                language={language}
+                onlineUserIds={onlineUserIds}
+                refreshNonce={sidebarRefreshNonce}
+                lowBandwidth={isLowBandwidthMode}
+                onOpenSafetyProfile={handleOpenSafetyProfile}
+                aliasByContactId={contactAliases}
+              />
+            </div>
           </div>
         ) : (
           <>

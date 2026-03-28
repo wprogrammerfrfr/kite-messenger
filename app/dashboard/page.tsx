@@ -8,6 +8,7 @@ import { EmptyChatDashboard } from "@/components/EmptyChatDashboard";
 import type { SafetyProfileOpenPayload } from "@/components/SafetyProfileModal";
 import { SafetyProfileModal } from "@/components/SafetyProfileModal";
 import { SkeletonDiscover } from "@/components/SkeletonDiscover";
+import { DiscoverRequestInbox } from "@/components/DiscoverRequestInbox";
 import { t, type Language } from "@/lib/translations";
 import {
   dashboardAliasCacheKey,
@@ -57,6 +58,19 @@ export default function DashboardPage() {
         setAppearance("dark");
       }
     }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onAppearance = () => {
+      try {
+        setAppearance(localStorage.getItem("kite-appearance") === "light" ? "light" : "dark");
+      } catch {
+        setAppearance("dark");
+      }
+    };
+    window.addEventListener("kite-appearance", onAppearance);
+    return () => window.removeEventListener("kite-appearance", onAppearance);
   }, []);
 
   useEffect(() => {
@@ -196,6 +210,14 @@ export default function DashboardPage() {
         <div className="mb-3 rounded-xl bg-black/10 px-2 py-1 backdrop-blur-md">
           <h1 className="text-center text-xl font-bold">Discover</h1>
         </div>
+        <DiscoverRequestInbox
+          sessionUserId={session.user.id}
+          language={language}
+          appearance={appearance}
+          onlineUserIds={onlineUserIds}
+          aliasByContactId={aliasByContactId}
+          onOpenContactProfile={(payload) => setSafetyProfilePayload(payload)}
+        />
         <div className="rounded-3xl p-2 sm:p-4" style={{ background: isLight ? "rgba(245,245,244,0.9)" : "rgba(0,0,0,0.35)" }}>
           <EmptyChatDashboard
             language={language}
