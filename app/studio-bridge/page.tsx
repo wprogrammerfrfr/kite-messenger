@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Peer, { type SignalData } from "simple-peer";
 import { supabase } from "@/lib/supabase";
+import { acquireStudioMicStream, decodePeerDataChunk } from "@/lib/studio-bridge-webrtc";
 
 type BridgeStatus = "connecting" | "connected" | "failed";
 type Role = "host" | "peer";
@@ -75,8 +76,13 @@ export default function StudioBridgePage() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [role, setRole] = useState<Role | null>(null);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  const [pingMs, setPingMs] = useState<number | null>(null);
 
   const peerRef = useRef<Peer.Instance | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const localMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const pingIntervalRef = useRef<number | null>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const mountedRef = useRef(true);
   const statusRef = useRef<BridgeStatus>("connecting");
@@ -106,6 +112,10 @@ export default function StudioBridgePage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+
+    let cancelled = false;
+    /** Effect-owned mic stream for Strict Mode teardown (always stop tracks here). */
+    let micStream: MediaStream | null = null;
 
     const appendIceCandidate = async (
       sessionId: string,
@@ -147,6 +157,7 @@ export default function StudioBridgePage() {
       try {
         addLog("Signaling started");
         setStatusNote("Initializing session...");
+        if (cancelled || !mountedRef.current) return;
 
         const url = new URL(window.location.href);
         const roomParam = url.searchParams.get("room");
@@ -202,15 +213,91 @@ export default function StudioBridgePage() {
           existingRowRef.current = fetched;
         }
 
-        addLog("Initializing simple-peer...");
+        if (cancelled || !mountedRef.current) return;
+
+        setStatusNote("Requesting microphone access...");
+        addLog("getUserMedia (audio only)");
+        let mediaStream: MediaStream;
+        try {
+          mediaStream = await acquireStudioMicStream();
+        } catch (micErr) {
+          console.error(micErr);
+          addLog("Microphone blocked or unavailable");
+          throw new Error("Microphone permission is required for the studio bridge.");
+        }
+
+        if (cancelled || !mountedRef.current) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        const audioTracks = mediaStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          throw new Error("Microphone stream has no audio tracks.");
+        }
+
+        micStream = mediaStream;
+        localStreamRef.current = mediaStream;
+
+        const localEl = localMonitorAudioRef.current;
+        if (localEl) {
+          localEl.srcObject = mediaStream;
+          localEl.muted = true;
+          await localEl.play().catch(() => {
+            // Autoplay policies: stream still flows to the peer.
+          });
+        }
+
+        if (cancelled || !mountedRef.current) {
+          micStream.getTracks().forEach((track) => track.stop());
+          micStream = null;
+          localStreamRef.current = null;
+          return;
+        }
+
+        addLog("Creating simple-peer with resolved mic stream (default browser SDP)...");
         setStatusNote("Starting WebRTC peer...");
 
         const peer = new Peer({
           initiator: isHost,
           trickle: true,
+          stream: mediaStream,
           config: { iceServers: ICE_SERVERS },
         });
         peerRef.current = peer;
+
+        peer.on("stream", (remoteStream: MediaStream) => {
+          if (!mountedRef.current) return;
+          addLog("Remote audio stream received");
+          const remoteEl = remoteAudioRef.current;
+          if (remoteEl) {
+            remoteEl.srcObject = remoteStream;
+            remoteEl.muted = false;
+            void remoteEl.play().catch(() => {
+              addLog("Remote audio play() blocked (tap page if silent)");
+            });
+          }
+        });
+
+        peer.on("data", (chunk: unknown) => {
+          try {
+            const text = decodePeerDataChunk(chunk);
+            const msg = JSON.parse(text) as { t?: string; ts?: number };
+            if (msg.t === "ping" && typeof msg.ts === "number" && activeRole === "peer") {
+              peer.send(JSON.stringify({ t: "pong", ts: msg.ts }));
+            } else if (
+              msg.t === "pong" &&
+              typeof msg.ts === "number" &&
+              activeRole === "host" &&
+              mountedRef.current
+            ) {
+              setPingMs(Math.round(performance.now() - msg.ts));
+            }
+          } catch {
+            // Ignore non-JSON or malformed ping payloads.
+          }
+        });
 
         const enqueueIceAppend = (nextCandidate: IceCandidateRow) => {
           // Queue to avoid concurrent read-modify-write overwrites.
@@ -284,20 +371,54 @@ export default function StudioBridgePage() {
 
         peer.on("connect", () => {
           if (!mountedRef.current) return;
-          addLog("Peer connected");
+          addLog("Peer connected (media + data channel)");
           setStatus("connected");
           setStatusNote("P2P channel established.");
+          setPingMs(null);
+
+          if (activeRole === "host") {
+            if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = window.setInterval(() => {
+              const p = peerRef.current;
+              if (!p || p.destroyed) return;
+              try {
+                p.send(JSON.stringify({ t: "ping", ts: performance.now() }));
+              } catch {
+                // Channel may be closing.
+              }
+            }, 1000);
+          }
         });
 
-        peer.on("error", () => {
+        peer.on("error", (err: unknown) => {
           if (!mountedRef.current) return;
-          addLog("Peer error");
+          const msg =
+            err instanceof Error
+              ? err.message
+              : typeof err === "object" && err !== null && "message" in err
+                ? String((err as { message: unknown }).message)
+                : String(err);
+          const code =
+            typeof err === "object" && err !== null && "code" in err
+              ? String((err as { code: unknown }).code)
+              : "";
+          addLog(`Peer error: ${msg}${code ? ` code=${code}` : ""}`);
+          setPingMs(null);
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = null;
+          }
           setStatus("failed");
-          setStatusNote("WebRTC peer error.");
+          setStatusNote(`WebRTC peer error: ${msg}`);
         });
 
         peer.on("close", () => {
           if (!mountedRef.current) return;
+          setPingMs(null);
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = null;
+          }
           if (statusRef.current !== "connected") {
             addLog("Peer closed");
             setStatus("failed");
@@ -376,8 +497,9 @@ export default function StudioBridgePage() {
             applyRemoteIce(current.ice_candidates, activeRole);
           }
         }
-      } catch {
-        if (!mountedRef.current) return;
+      } catch (err) {
+        if (cancelled || !mountedRef.current) return;
+        console.error(err);
         setStatus("failed");
         setStatusNote("Could not initialize studio signaling bridge.");
       }
@@ -386,12 +508,31 @@ export default function StudioBridgePage() {
     void init();
 
     return () => {
+      cancelled = true;
       void (async () => {
         try {
+          setPingMs(null);
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = null;
+          }
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = null;
+          }
+          if (localMonitorAudioRef.current) {
+            localMonitorAudioRef.current.srcObject = null;
+          }
           channelRef.current?.unsubscribe();
           channelRef.current = null;
+
           peerRef.current?.destroy();
           peerRef.current = null;
+
+          const toStop = micStream ?? localStreamRef.current;
+          toStop?.getTracks().forEach((track) => track.stop());
+          micStream = null;
+          localStreamRef.current = null;
+
           if (cleanupSessionRef.current) {
             await cleanupSessionRef.current();
             cleanupSessionRef.current = null;
@@ -415,9 +556,22 @@ export default function StudioBridgePage() {
 
   return (
     <div className="min-h-screen bg-stone-950 text-white p-8 flex flex-col items-center justify-center">
+      <audio ref={localMonitorAudioRef} className="sr-only" playsInline muted />
+      <audio ref={remoteAudioRef} className="sr-only" playsInline />
+
       <div className="bg-stone-900 p-8 rounded-2xl border border-stone-800 shadow-2xl max-w-md w-full text-center">
         <h1 className="text-3xl font-bold mb-2 text-emerald-400">Kite Studio</h1>
         <p className="text-stone-400 mb-6 italic">Phase 1: The Signaling Bridge</p>
+
+        {status === "connected" && role === "host" ? (
+          <div className="mb-4 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-2 font-mono text-sm text-stone-200">
+            Ping:{" "}
+            <span className="text-emerald-400 tabular-nums">
+              {pingMs === null ? "--" : `${pingMs}`}
+            </span>{" "}
+            ms
+          </div>
+        ) : null}
 
         <div className={`py-4 px-6 bg-stone-950 rounded-xl border mb-4 ${badge.border}`}>
           <span className="text-sm text-stone-500 uppercase tracking-widest font-semibold">
