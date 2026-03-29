@@ -54,7 +54,15 @@ import {
 } from "@/lib/dm-connections";
 import { MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { ArrowLeft, Loader2, MapPin, Paperclip, Send, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Bell,
+  Loader2,
+  MapPin,
+  Paperclip,
+  Send,
+  Trash2,
+} from "lucide-react";
 import Image from "next/image";
 import { useResilience } from "@/components/resilience-provider";
 import { withPatience } from "@/lib/network-patience";
@@ -329,6 +337,48 @@ export default function Home() {
       window.removeEventListener("kite-notifications-setting", sync);
       window.removeEventListener("storage", sync);
     };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    console.log("Current Permission Status:", Notification.permission);
+  }, []);
+
+  const requestNotificationPermission = useCallback(async () => {
+    if (typeof window === "undefined") return;
+    const alertDenied = () => globalThis.alert("Permission Denied");
+    if (!("Notification" in globalThis)) {
+      alertDenied();
+      return;
+    }
+    let permission: NotificationPermission;
+    try {
+      permission = await Notification.requestPermission();
+    } catch {
+      alertDenied();
+      return;
+    }
+    if (permission !== "granted") {
+      alertDenied();
+      return;
+    }
+    try {
+      const {
+        data: { session: s },
+      } = await supabase.auth.getSession();
+      if (!s?.access_token) {
+        alertDenied();
+        return;
+      }
+      const pushResult = await registerKitePushSubscription(s.access_token);
+      if (pushResult.ok) {
+        globalThis.alert("Notifications Enabled!");
+      } else {
+        globalThis.alert(pushResult.error ?? "Permission Denied");
+      }
+    } catch {
+      alertDenied();
+    }
   }, []);
 
   /** Heads-up fallback when the app tab is open: SW posts after each push. */
@@ -2104,12 +2154,24 @@ export default function Home() {
                     : "rgba(0, 0, 0, 0.5)",
               }}
             >
-              <h1
-                className="text-center text-2xl font-bold tracking-tight"
-                style={{ color: "var(--text-primary)" }}
-              >
-                {t(language, "chatAppTitle")}
-              </h1>
+              <div className="relative flex items-center justify-center">
+                <button
+                  type="button"
+                  onClick={() => void requestNotificationPermission()}
+                  className="absolute end-0 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-black/10"
+                  style={{ color: "var(--accent)" }}
+                  aria-label="Sync notifications"
+                >
+                  <Bell className="h-4 w-4 shrink-0" aria-hidden />
+                  <span className="hidden sm:inline">Sync Notifications</span>
+                </button>
+                <h1
+                  className="text-center text-2xl font-bold tracking-tight"
+                  style={{ color: "var(--text-primary)" }}
+                >
+                  {t(language, "chatAppTitle")}
+                </h1>
+              </div>
             </header>
             <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 sm:px-4 sm:pb-4">
               <UserDiscoverySidebar
@@ -2184,7 +2246,17 @@ export default function Home() {
                     </span>
                   </button>
                 </div>
-                <div className="flex shrink-0 items-center gap-3">
+                <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void requestNotificationPermission()}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-white/10"
+                    style={{ color: "var(--accent)" }}
+                    aria-label="Sync notifications"
+                    title="Sync Notifications"
+                  >
+                    <Bell className="h-4 w-4 shrink-0" aria-hidden />
+                  </button>
                   <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
                     <span
                       className="whitespace-nowrap text-end text-[10px] font-semibold leading-tight sm:text-xs"
