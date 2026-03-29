@@ -77,10 +77,7 @@ import {
 } from "@/lib/support-mode-storage";
 import { contactDisplayLabel } from "@/lib/contact-display";
 import { SkeletonChat } from "@/components/SkeletonChat";
-import {
-  areNotificationsGloballyDisabled,
-  setNotificationsGloballyDisabled,
-} from "@/lib/kite-notifications";
+import { areNotificationsGloballyDisabled } from "@/lib/kite-notifications";
 import {
   registerKitePushSubscription,
   unsubscribeKitePushOnDevice,
@@ -170,6 +167,8 @@ const LIGHT_THERAPIST_THEME: ThemeVars = {
 const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
 const KEY_MISMATCH_TEXT = "[Secure Message - Key Mismatch]";
 const CHAT_FILE_MAX_BYTES = 5 * 1024 * 1024;
+/** Initial fetch: newest rows only, then reverse for chronological decrypt/display. */
+const CHAT_INITIAL_MESSAGE_LIMIT = 50;
 
 function parseDecryptedPayload(decrypted: string): {
   text: string;
@@ -268,6 +267,8 @@ export default function Home() {
   const [uploadingFile, setUploadingFile] = useState(false);
   const [notificationsMuted, setNotificationsMuted] = useState(false);
   const [pushResetBusy, setPushResetBusy] = useState(false);
+  /** True after the first messages sync (network or cache) finishes for this session+keys. */
+  const [messagesHydrated, setMessagesHydrated] = useState(false);
   const languageRef = useRef<Language>(readStoredLanguage());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -341,11 +342,6 @@ export default function Home() {
     };
   }, []);
 
-  useEffect(() => {
-    if (typeof window === "undefined" || !("Notification" in window)) return;
-    console.log("Current Permission Status:", Notification.permission);
-  }, []);
-
   const handleResetPushSession = useCallback(async () => {
     if (typeof globalThis.window === "undefined") return;
     if (!globalThis.confirm(t(language, "chatResetSessionConfirm"))) return;
@@ -378,60 +374,23 @@ export default function Home() {
 
   const requestNotificationPermission = useCallback(async () => {
     if (typeof window === "undefined") return;
-    const alertDenied = () => globalThis.alert("Permission Denied");
-    if (!("Notification" in globalThis)) {
-      alertDenied();
-      return;
-    }
-    let permission: NotificationPermission;
+    if (!("Notification" in globalThis)) return;
     try {
-      permission = await Notification.requestPermission();
-    } catch {
-      alertDenied();
-      return;
-    }
-    if (permission !== "granted") {
-      alertDenied();
-      return;
-    }
-    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") return;
       const {
         data: { session: s },
       } = await supabase.auth.getSession();
-      if (!s?.access_token) {
-        alertDenied();
-        return;
-      }
-      const pushResult = await registerKitePushSubscription(s.access_token);
-      if (pushResult.ok) {
-        globalThis.alert("Notifications Enabled!");
-      } else {
-        globalThis.alert(pushResult.error ?? "Permission Denied");
-      }
+      if (!s?.access_token) return;
+      void registerKitePushSubscription(s.access_token);
     } catch {
-      alertDenied();
+      // silent
     }
   }, []);
 
-  /** Heads-up fallback when the app tab is open: SW posts after each push. */
+  /** Standalone PWA: background push registration only after chat messages have loaded; never blocks UI. */
   useEffect(() => {
-    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
-    const onSwMessage = (event: MessageEvent) => {
-      const payload = event.data;
-      if (
-        payload &&
-        typeof payload === "object" &&
-        (payload as { type?: string }).type === "kite-push-message"
-      ) {
-        window.alert("Kite: New Message Received!");
-      }
-    };
-    navigator.serviceWorker.addEventListener("message", onSwMessage);
-    return () => navigator.serviceWorker.removeEventListener("message", onSwMessage);
-  }, []);
-
-  useEffect(() => {
-    if (!session?.user || notificationsMuted) return;
+    if (!session?.user || notificationsMuted || !messagesHydrated) return;
     if (typeof window === "undefined") return;
     if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY) return;
     if (!isStandaloneDisplayMode()) return;
@@ -440,24 +399,20 @@ export default function Home() {
       void (async () => {
         if (areNotificationsGloballyDisabled()) return;
         try {
-          if (Notification.permission === "default") {
-            await Notification.requestPermission();
-          }
           if (Notification.permission !== "granted") return;
-          const { data: { session: s } } = await supabase.auth.getSession();
+          const {
+            data: { session: s },
+          } = await supabase.auth.getSession();
           if (!s?.access_token) return;
-          const pushResult = await registerKitePushSubscription(s.access_token);
-          if (!pushResult.ok) {
-            console.warn("[Kite Push] Registration failed:", pushResult.error);
-          }
-        } catch (e) {
-          console.warn("[Kite Push] Registration threw:", e);
+          await registerKitePushSubscription(s.access_token);
+        } catch {
+          // silent
         }
       })();
-    }, 2800);
+    }, 2000);
 
     return () => clearTimeout(timer);
-  }, [session?.user?.id, notificationsMuted]);
+  }, [session?.user?.id, notificationsMuted, messagesHydrated]);
 
   const wait = useCallback((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), []);
 
@@ -562,15 +517,6 @@ export default function Home() {
     let mounted = true;
 
     const getInitialSession = async () => {
-      await new Promise<void>((resolve) => {
-        if (typeof window !== "undefined" && typeof requestAnimationFrame === "function") {
-          requestAnimationFrame(() => resolve());
-        } else {
-          resolve();
-        }
-      });
-      if (!mounted) return;
-
       const { data, error } = await supabase.auth.getSession();
       if (!mounted) return;
 
@@ -1078,9 +1024,13 @@ export default function Home() {
   // Load messages where the current user is a participant; subscribe to new inserts.
   // Every message is decrypted locally before being added to `messages`.
   useEffect(() => {
-    if (!senderKeys || !session?.user?.id) return;
+    if (!senderKeys || !session?.user?.id) {
+      setMessagesHydrated(false);
+      return;
+    }
 
     let cancelled = false;
+    setMessagesHydrated(false);
     const viewerId = session.user.id;
     const channel = supabase
       .channel("messages-inserts")
@@ -1282,7 +1232,7 @@ export default function Home() {
       )
       .subscribe();
 
-    // Initial load: only conversations this user participates in (incl. pending requests).
+    // Initial load: latest N rows for this user only (no joins); realtime still delivers newer rows.
     (async () => {
       const { data, error } = await supabase
         .from("messages")
@@ -1290,7 +1240,8 @@ export default function Home() {
           "id, encrypted_content, content_for_sender, sender_id, receiver_id, is_session_mode, is_read, created_at"
         )
         .or(`sender_id.eq.${viewerId},receiver_id.eq.${viewerId}`)
-        .order("created_at", { ascending: true });
+        .order("created_at", { ascending: false })
+        .limit(CHAT_INITIAL_MESSAGE_LIMIT);
 
       if (cancelled) return;
 
@@ -1299,8 +1250,11 @@ export default function Home() {
         if (!cancelled && cached?.length) {
           setMessages(cached);
         }
+        if (!cancelled) setMessagesHydrated(true);
         return;
       }
+
+      const chronological = [...data].reverse();
 
       const decrypted: Array<{
         id: string | number;
@@ -1318,7 +1272,7 @@ export default function Home() {
         isRead?: boolean | null;
       }> = [];
 
-      for (const row of data as Array<{
+      for (const row of chronological as Array<{
         id?: string | number;
         encrypted_content?: string;
         content_for_sender?: string | null;
@@ -1375,6 +1329,7 @@ export default function Home() {
       if (!cancelled) {
         setMessages(decrypted);
         void saveMessagesSnapshot(viewerId, decrypted);
+        setMessagesHydrated(true);
       }
     })();
 
@@ -1469,7 +1424,6 @@ export default function Home() {
               .select("id")
               .single();
             if (error) {
-              console.log("Supabase insert error:", error);
               throw new Error(error.message ?? "Failed to send message");
             }
             insertedMessageId = typeof data?.id === "string" ? data.id : null;
@@ -1489,13 +1443,11 @@ export default function Home() {
           textAreaRef.current.style.height = "44px";
         }
       } catch (err) {
-        console.log(err);
         setSendError(
           err instanceof Error ? err.message : "Failed to send message"
         );
       }
     } catch (err) {
-      console.log(err);
       setSendError(err instanceof Error ? err.message : "Failed to send message");
     } finally {
       setSending(false);
