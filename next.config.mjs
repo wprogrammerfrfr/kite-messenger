@@ -16,6 +16,9 @@ const withSerwist = withSerwistInit({
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  async redirects() {
+    return [{ source: "/studio-test", destination: "/studio", permanent: true }];
+  },
   images: {
     remotePatterns: [
       {

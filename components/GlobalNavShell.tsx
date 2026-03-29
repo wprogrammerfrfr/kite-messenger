@@ -130,7 +130,7 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
         icon: <Route className="h-5 w-5" aria-hidden />,
       },
       {
-        href: "/studio-test",
+        href: "/studio",
         label: t(language, "navTabStudio"),
         icon: <Film className="h-5 w-5" aria-hidden />,
       },
