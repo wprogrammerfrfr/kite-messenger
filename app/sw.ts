@@ -82,13 +82,14 @@ self.addEventListener("push", (event: PushEvent) => {
   }
   const title = typeof data.title === "string" ? data.title : "Kite";
   const body = typeof data.body === "string" ? data.body : "New message";
-  event.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      icon: "/kite-mobile-icon.png",
-      badge: "/kite-mobile-icon.png",
-    })
-  );
+  const notificationOptions: NotificationOptions & { vibrate?: number[] } = {
+    body,
+    icon: "/kite-mobile-icon.png",
+    badge: "/icons/icon-192x192.png",
+    tag: "kite-message",
+    vibrate: [200, 100, 200],
+  };
+  event.waitUntil(self.registration.showNotification(title, notificationOptions));
 });
 
 self.addEventListener("notificationclick", (event: NotificationEvent) => {

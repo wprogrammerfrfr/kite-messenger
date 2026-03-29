@@ -261,6 +261,7 @@ export default function Home() {
   const languageRef = useRef<Language>(readStoredLanguage());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  const messagesListEndRef = useRef<HTMLDivElement | null>(null);
   const [activeRecipientId, setActiveRecipientId] = useState<string | null>(null);
   const [isOwnKeySyncing, setIsOwnKeySyncing] = useState(false);
   const [hasOwnKeyInDb, setHasOwnKeyInDb] = useState(false);
@@ -1426,6 +1427,24 @@ export default function Home() {
     ? baseFilteredMessages.filter((m) => !m.isImage && !m.imageUrl)
     : baseFilteredMessages;
 
+  const lastFilteredMessageId =
+    filteredMessages.length > 0
+      ? filteredMessages[filteredMessages.length - 1]?.id
+      : undefined;
+
+  useEffect(() => {
+    if (!activeRecipientId || filteredMessages.length === 0) return;
+    messagesListEndRef.current?.scrollIntoView({
+      behavior: isLowBandwidthMode ? "auto" : "smooth",
+      block: "end",
+    });
+  }, [
+    activeRecipientId,
+    filteredMessages.length,
+    lastFilteredMessageId,
+    isLowBandwidthMode,
+  ]);
+
   // Mark messages as read when they come from the currently active recipient (after you accepted).
   useEffect(() => {
     if (isLowBandwidthMode) return;
@@ -2138,7 +2157,7 @@ export default function Home() {
                       </span>
                     </div>
                     <span
-                      className="min-w-0 max-w-full truncate text-center text-xs"
+                      className="hidden min-w-0 max-w-full truncate text-center text-xs sm:block"
                       style={{ color: "#a8a29e" }}
                     >
                       {recipientStatusText}
@@ -2394,6 +2413,7 @@ export default function Home() {
                 </div>
               ))
             )}
+            <div ref={messagesListEndRef} className="h-px w-full shrink-0" aria-hidden />
           </div>
         </div>
 
