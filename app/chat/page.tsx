@@ -331,6 +331,23 @@ export default function Home() {
     };
   }, []);
 
+  /** Heads-up fallback when the app tab is open: SW posts after each push. */
+  useEffect(() => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+    const onSwMessage = (event: MessageEvent) => {
+      const payload = event.data;
+      if (
+        payload &&
+        typeof payload === "object" &&
+        (payload as { type?: string }).type === "kite-push-message"
+      ) {
+        window.alert("Kite: New Message Received!");
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onSwMessage);
+  }, []);
+
   useEffect(() => {
     if (!session?.user || notificationsMuted) return;
     if (typeof window === "undefined") return;

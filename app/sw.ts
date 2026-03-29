@@ -87,15 +87,30 @@ self.addEventListener("push", (event: PushEvent) => {
   }
   const title = typeof data.title === "string" ? data.title : "Kite";
   const body = typeof data.body === "string" ? data.body : "New message";
-  const notificationOptions: NotificationOptions & { vibrate?: number[] } = {
+  const notificationOptions: NotificationOptions & {
+    renotify?: boolean;
+    vibrate?: number[];
+    actions?: ReadonlyArray<{ action: string; title: string }>;
+  } = {
     body,
     icon: "/kite-mobile-icon.png",
     badge: "/icons/icon-192x192.png",
     tag: "kite-message",
-    vibrate: [200, 100, 200],
+    renotify: true,
+    requireInteraction: true,
+    vibrate: [200, 100, 200, 100, 200],
+    actions: [{ action: "open", title: "View Message" }],
   };
   console.log("SW: Showing notification", title, notificationOptions);
-  event.waitUntil(self.registration.showNotification(title, notificationOptions));
+  event.waitUntil(
+    (async () => {
+      await self.registration.showNotification(title, notificationOptions);
+      const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of clients) {
+        client.postMessage({ type: "kite-push-message", title, body });
+      }
+    })()
+  );
 });
 
 self.addEventListener("notificationclick", (event: NotificationEvent) => {
