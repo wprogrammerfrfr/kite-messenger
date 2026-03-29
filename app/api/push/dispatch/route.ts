@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import webpush from "web-push";
 import { NextResponse } from "next/server";
+import { cleanVapidPublicKey } from "@/lib/kite-push-client";
 
 /**
  * Sends a Web Push notification to all subscriptions for a user.
@@ -23,8 +24,10 @@ export async function POST(request: Request) {
 
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-  const privateKey = process.env.VAPID_PRIVATE_KEY;
+  const publicKey = cleanVapidPublicKey(
+    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? ""
+  );
+  const privateKey = cleanVapidPublicKey(process.env.VAPID_PRIVATE_KEY ?? "");
   const contact = process.env.VAPID_CONTACT_EMAIL ?? "mailto:admin@localhost";
 
   if (!serviceKey || !url || !publicKey || !privateKey) {

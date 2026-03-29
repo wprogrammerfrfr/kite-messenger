@@ -347,9 +347,12 @@ export default function Home() {
           if (Notification.permission !== "granted") return;
           const { data: { session: s } } = await supabase.auth.getSession();
           if (!s?.access_token) return;
-          await registerKitePushSubscription(s.access_token);
-        } catch {
-          // ignore
+          const pushResult = await registerKitePushSubscription(s.access_token);
+          if (!pushResult.ok) {
+            console.warn("[Kite Push] Registration failed:", pushResult.error);
+          }
+        } catch (e) {
+          console.warn("[Kite Push] Registration threw:", e);
         }
       })();
     }, 2800);

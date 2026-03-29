@@ -76,9 +76,14 @@ const serwist = new Serwist({
 self.addEventListener("push", (event: PushEvent) => {
   let data: { title?: string; body?: string } = {};
   try {
-    if (event.data) data = event.data.json() as { title?: string; body?: string };
-  } catch {
-    // ignore
+    if (event.data) {
+      data = event.data.json() as { title?: string; body?: string };
+      console.log("SW: Push received", data);
+    } else {
+      console.log("SW: Push received (no payload)");
+    }
+  } catch (e) {
+    console.log("SW: Push received (JSON parse error)", e);
   }
   const title = typeof data.title === "string" ? data.title : "Kite";
   const body = typeof data.body === "string" ? data.body : "New message";
@@ -89,6 +94,7 @@ self.addEventListener("push", (event: PushEvent) => {
     tag: "kite-message",
     vibrate: [200, 100, 200],
   };
+  console.log("SW: Showing notification", title, notificationOptions);
   event.waitUntil(self.registration.showNotification(title, notificationOptions));
 });
 
