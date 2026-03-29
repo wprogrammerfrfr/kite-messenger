@@ -56,11 +56,9 @@ import { MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import {
   ArrowLeft,
-  Bell,
   Loader2,
   MapPin,
   Paperclip,
-  RotateCcw,
   Send,
   Trash2,
 } from "lucide-react";
@@ -76,13 +74,8 @@ import {
   writeSupportModeToStorage,
 } from "@/lib/support-mode-storage";
 import { contactDisplayLabel } from "@/lib/contact-display";
-import { SkeletonChat } from "@/components/SkeletonChat";
 import { areNotificationsGloballyDisabled } from "@/lib/kite-notifications";
-import {
-  registerKitePushSubscription,
-  unsubscribeKitePushOnDevice,
-  unregisterAllKiteServiceWorkers,
-} from "@/lib/kite-push-client";
+import { registerKitePushSubscription } from "@/lib/kite-push-client";
 import { isStandaloneDisplayMode } from "@/lib/pwa-standalone";
 import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
 import {
@@ -169,6 +162,33 @@ const KEY_MISMATCH_TEXT = "[Secure Message - Key Mismatch]";
 const CHAT_FILE_MAX_BYTES = 5 * 1024 * 1024;
 /** Initial fetch: newest rows only, then reverse for chronological decrypt/display. */
 const CHAT_INITIAL_MESSAGE_LIMIT = 50;
+
+type MessagesFetchRow = {
+  id?: string | number;
+  encrypted_content?: string;
+  content_for_sender?: string | null;
+  sender_id?: string | null;
+  receiver_id?: string | null;
+  is_session_mode?: boolean;
+  is_read?: boolean | null;
+  created_at?: string;
+};
+
+type MessagesDecryptedItem = {
+  id: string | number;
+  text: string;
+  isSessionMode: boolean;
+  createdAt?: string;
+  isImage?: boolean;
+  imageUrl?: string;
+  isFile?: boolean;
+  fileUrl?: string;
+  fileName?: string;
+  fileMime?: string;
+  senderId?: string | null;
+  receiverId?: string | null;
+  isRead?: boolean | null;
+};
 
 function parseDecryptedPayload(decrypted: string): {
   text: string;
@@ -266,10 +286,19 @@ export default function Home() {
   const [recipientPublicKey, setRecipientPublicKey] = useState<CryptoKey | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [notificationsMuted, setNotificationsMuted] = useState(false);
-  const [pushResetBusy, setPushResetBusy] = useState(false);
-  /** True after the first messages sync (network or cache) finishes for this session+keys. */
-  const [messagesHydrated, setMessagesHydrated] = useState(false);
   const languageRef = useRef<Language>(readStoredLanguage());
+  const senderKeysRef = useRef<KeyPair | null>(null);
+  const decryptWithRetryRef = useRef<
+    ((ciphertext: string, privateKey: CryptoKey | null) => Promise<string>) | null
+  >(null);
+  const isLowBandwidthModeRef = useRef(false);
+  const decryptInitialRowsRef = useRef<
+    ((chronological: MessagesFetchRow[], viewerId: string) => Promise<MessagesDecryptedItem[]>) | null
+  >(null);
+  const pendingInitialMessagesRef = useRef<{
+    viewerId: string;
+    rows: MessagesFetchRow[];
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesListEndRef = useRef<HTMLDivElement | null>(null);
@@ -342,63 +371,17 @@ export default function Home() {
     };
   }, []);
 
-  const handleResetPushSession = useCallback(async () => {
-    if (typeof globalThis.window === "undefined") return;
-    if (!globalThis.confirm(t(language, "chatResetSessionConfirm"))) return;
-    setPushResetBusy(true);
-    try {
-      const {
-        data: { session: s },
-      } = await supabase.auth.getSession();
-      if (!s?.access_token) {
-        globalThis.alert(t(language, "chatPushPurgeFailed"));
-        return;
-      }
-      const res = await fetch("/api/push/purge", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${s.access_token}` },
-      });
-      if (!res.ok) {
-        globalThis.alert(t(language, "chatPushPurgeFailed"));
-        return;
-      }
-      await unsubscribeKitePushOnDevice();
-      await unregisterAllKiteServiceWorkers();
-      globalThis.location.reload();
-    } catch {
-      globalThis.alert(t(language, "chatPushPurgeFailed"));
-    } finally {
-      setPushResetBusy(false);
-    }
-  }, [language]);
-
-  const requestNotificationPermission = useCallback(async () => {
-    if (typeof window === "undefined") return;
-    if (!("Notification" in globalThis)) return;
-    try {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") return;
-      const {
-        data: { session: s },
-      } = await supabase.auth.getSession();
-      if (!s?.access_token) return;
-      void registerKitePushSubscription(s.access_token);
-    } catch {
-      // silent
-    }
-  }, []);
-
-  /** Standalone PWA: background push registration only after chat messages have loaded; never blocks UI. */
+  /** Push / VAPID registration only after startup — does not compete with message fetch. */
   useEffect(() => {
-    if (!session?.user || notificationsMuted || !messagesHydrated) return;
+    if (!session?.user || notificationsMuted) return;
     if (typeof window === "undefined") return;
     if (!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY) return;
     if (!isStandaloneDisplayMode()) return;
 
     const timer = window.setTimeout(() => {
       void (async () => {
-        if (areNotificationsGloballyDisabled()) return;
         try {
+          if (areNotificationsGloballyDisabled()) return;
           if (Notification.permission !== "granted") return;
           const {
             data: { session: s },
@@ -409,10 +392,10 @@ export default function Home() {
           // silent
         }
       })();
-    }, 2000);
+    }, 5000);
 
     return () => clearTimeout(timer);
-  }, [session?.user?.id, notificationsMuted, messagesHydrated]);
+  }, [session?.user?.id, notificationsMuted]);
 
   const wait = useCallback((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), []);
 
@@ -444,6 +427,77 @@ export default function Home() {
     },
     [senderKeys, wait]
   );
+
+  useEffect(() => {
+    senderKeysRef.current = senderKeys;
+  }, [senderKeys]);
+
+  useEffect(() => {
+    decryptWithRetryRef.current = decryptWithRetry;
+  }, [decryptWithRetry]);
+
+  useEffect(() => {
+    isLowBandwidthModeRef.current = isLowBandwidthMode;
+  }, [isLowBandwidthMode]);
+
+  const decryptInitialRows = useCallback(
+    async (
+      chronological: MessagesFetchRow[],
+      viewerId: string
+    ): Promise<MessagesDecryptedItem[]> => {
+      const privateKey = senderKeys?.privateKey ?? null;
+      if (!privateKey) return [];
+
+      const decrypted: MessagesDecryptedItem[] = [];
+      for (const row of chronological) {
+        if (!row.encrypted_content) continue;
+        const id =
+          row.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+        const encryptedForViewer =
+          viewerId && row.sender_id === viewerId && row.content_for_sender
+            ? row.content_for_sender
+            : row.encrypted_content;
+
+        try {
+          const decryptedText = await decryptWithRetry(encryptedForViewer, privateKey);
+          const p = parseDecryptedPayload(decryptedText);
+
+          decrypted.push({
+            id,
+            text: p.text,
+            isSessionMode: Boolean(row.is_session_mode),
+            createdAt: row.created_at,
+            isImage: p.isImage,
+            imageUrl: p.imageUrl,
+            isFile: p.isFile,
+            fileUrl: p.fileUrl,
+            fileName: p.fileName,
+            fileMime: p.fileMime,
+            senderId: row.sender_id ?? null,
+            receiverId: row.receiver_id ?? null,
+            isRead: row.is_read ?? null,
+          });
+        } catch {
+          decrypted.push({
+            id,
+            text: KEY_MISMATCH_TEXT,
+            isSessionMode: Boolean(row.is_session_mode),
+            createdAt: row.created_at,
+            senderId: row.sender_id ?? null,
+            receiverId: row.receiver_id ?? null,
+            isRead: row.is_read ?? null,
+          });
+        }
+      }
+      return decrypted;
+    },
+    [decryptWithRetry, senderKeys]
+  );
+
+  useEffect(() => {
+    decryptInitialRowsRef.current = decryptInitialRows;
+  }, [decryptInitialRows]);
 
   // Hydrate professional mode (vibe) from localStorage so other pages can match it.
   useEffect(() => {
@@ -1021,16 +1075,14 @@ export default function Home() {
   };
 }, [activeRecipientId, session]); // Removed senderKeys dependency to force refresh on click
 
-  // Load messages where the current user is a participant; subscribe to new inserts.
-  // Every message is decrypted locally before being added to `messages`.
+  // Load messages: realtime + initial query start as soon as `session` exists (parallel to E2E key init).
   useEffect(() => {
-    if (!senderKeys || !session?.user?.id) {
-      setMessagesHydrated(false);
+    if (!session?.user?.id) {
+      pendingInitialMessagesRef.current = null;
       return;
     }
 
     let cancelled = false;
-    setMessagesHydrated(false);
     const viewerId = session.user.id;
     const channel = supabase
       .channel("messages-inserts")
@@ -1059,13 +1111,15 @@ export default function Home() {
             ) {
               return;
             }
+            const dw = decryptWithRetryRef.current;
+            const sk = senderKeysRef.current;
+            if (!dw || !sk?.privateKey) return;
+
             let encryptedForViewer =
               viewerId && row.sender_id === viewerId && row.content_for_sender
                 ? row.content_for_sender
                 : row.encrypted_content;
 
-            // Realtime payloads can occasionally arrive without `content_for_sender`.
-            // Refetch the row to get full ciphertext before decrypting.
             if (
               viewerId &&
               row.sender_id === viewerId &&
@@ -1101,10 +1155,7 @@ export default function Home() {
             let fileName: string | undefined;
             let fileMime: string | undefined;
             try {
-              const decrypted = await decryptWithRetry(
-                encryptedForViewer,
-                senderKeys.privateKey
-              );
+              const decrypted = await dw(encryptedForViewer, sk.privateKey);
               const p = parseDecryptedPayload(decrypted);
               text = p.text;
               isImage = p.isImage;
@@ -1114,7 +1165,6 @@ export default function Home() {
               fileName = p.fileName;
               fileMime = p.fileMime;
             } catch {
-              // Final fallback: re-fetch complete row and retry decryption once more.
               if (row.id !== undefined && row.id !== null) {
                 try {
                   const { data: fullRow } = await supabase
@@ -1131,7 +1181,7 @@ export default function Home() {
                       ? fullRow.content_for_sender
                       : fullRow?.encrypted_content ?? encryptedForViewer;
 
-                  const raw = await decryptWithRetry(fallbackCipher, senderKeys.privateKey);
+                  const raw = await dw(fallbackCipher, sk.privateKey);
                   const p = parseDecryptedPayload(raw);
                   text = p.text;
                   isImage = p.isImage;
@@ -1161,7 +1211,7 @@ export default function Home() {
               d.initiatedBy === senderIdForRead;
 
             if (
-              !isLowBandwidthMode &&
+              !isLowBandwidthModeRef.current &&
               !pendingRequestThread &&
               row.receiver_id === viewerId &&
               row.is_read === false &&
@@ -1232,8 +1282,7 @@ export default function Home() {
       )
       .subscribe();
 
-    // Initial load: latest N rows for this user only (no joins); realtime still delivers newer rows.
-    (async () => {
+    void (async () => {
       const { data, error } = await supabase
         .from("messages")
         .select(
@@ -1250,94 +1299,59 @@ export default function Home() {
         if (!cancelled && cached?.length) {
           setMessages(cached);
         }
-        if (!cancelled) setMessagesHydrated(true);
+        return;
+      }
+
+      const keys = senderKeysRef.current;
+      if (!keys?.privateKey) {
+        pendingInitialMessagesRef.current = { viewerId, rows: data };
         return;
       }
 
       const chronological = [...data].reverse();
-
-      const decrypted: Array<{
-        id: string | number;
-        text: string;
-        isSessionMode: boolean;
-        createdAt?: string;
-        isImage?: boolean;
-        imageUrl?: string;
-        isFile?: boolean;
-        fileUrl?: string;
-        fileName?: string;
-        fileMime?: string;
-        senderId?: string | null;
-        receiverId?: string | null;
-        isRead?: boolean | null;
-      }> = [];
-
-      for (const row of chronological as Array<{
-        id?: string | number;
-        encrypted_content?: string;
-        content_for_sender?: string | null;
-        sender_id?: string | null;
-        receiver_id?: string | null;
-        is_session_mode?: boolean;
-        is_read?: boolean | null;
-        created_at?: string;
-      }>) {
-        if (!row.encrypted_content) continue;
-        const id =
-          row.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-
-        const encryptedForViewer =
-          viewerId && row.sender_id === viewerId && row.content_for_sender
-            ? row.content_for_sender
-            : row.encrypted_content;
-
-        try {
-          const decryptedText = await decryptWithRetry(
-            encryptedForViewer,
-            senderKeys.privateKey
-          );
-          const p = parseDecryptedPayload(decryptedText);
-
-          decrypted.push({
-            id,
-            text: p.text,
-            isSessionMode: Boolean(row.is_session_mode),
-            createdAt: row.created_at,
-            isImage: p.isImage,
-            imageUrl: p.imageUrl,
-            isFile: p.isFile,
-            fileUrl: p.fileUrl,
-            fileName: p.fileName,
-            fileMime: p.fileMime,
-            senderId: row.sender_id ?? null,
-            receiverId: row.receiver_id ?? null,
-            isRead: row.is_read ?? null,
-          });
-        } catch {
-          decrypted.push({
-            id,
-            text: KEY_MISMATCH_TEXT,
-            isSessionMode: Boolean(row.is_session_mode),
-            createdAt: row.created_at,
-            senderId: row.sender_id ?? null,
-            receiverId: row.receiver_id ?? null,
-            isRead: row.is_read ?? null,
-          });
-        }
+      const fn = decryptInitialRowsRef.current;
+      if (!fn || cancelled) {
+        pendingInitialMessagesRef.current = { viewerId, rows: data };
+        return;
       }
-
+      const decrypted = await fn(chronological, viewerId);
       if (!cancelled) {
         setMessages(decrypted);
         void saveMessagesSnapshot(viewerId, decrypted);
-        setMessagesHydrated(true);
       }
     })();
 
     return () => {
       cancelled = true;
+      pendingInitialMessagesRef.current = null;
       supabase.removeChannel(channel);
     };
-  }, [senderKeys, session, decryptWithRetry, isLowBandwidthMode]);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!senderKeys?.privateKey || !session?.user?.id) return;
+    const pending = pendingInitialMessagesRef.current;
+    if (!pending || pending.viewerId !== session.user.id) return;
+    const fn = decryptInitialRowsRef.current;
+    if (!fn) return;
+    pendingInitialMessagesRef.current = null;
+
+    let cancelled = false;
+    const viewerId = session.user.id;
+    const chronological = [...pending.rows].reverse();
+
+    void (async () => {
+      const decrypted = await fn(chronological, viewerId);
+      if (!cancelled) {
+        setMessages(decrypted);
+        void saveMessagesSnapshot(viewerId, decrypted);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [senderKeys, session?.user?.id, decryptInitialRows]);
 
   const sendMessage = useCallback(async () => {
     const trimmed = inputValue.trim();
@@ -1986,6 +2000,7 @@ export default function Home() {
 
   const composerDisabled =
     !session ||
+    !senderKeys ||
     !activeRecipientId ||
     isRecipientMessageRequest ||
     isSenderAwaitingAccept ||
@@ -2106,9 +2121,6 @@ export default function Home() {
   if (!session) {
     return <AuthLazy />;
   }
-  if (!senderKeys) {
-    return <SkeletonChat />;
-  }
 
   const motionDuration = isLowBandwidthMode ? 0 : 0.2;
 
@@ -2144,52 +2156,6 @@ export default function Home() {
               >
                 {t(language, "chatAppTitle")}
               </h1>
-              <div
-                className="mt-3 border-t pt-3"
-                style={{
-                  borderColor:
-                    appearance === "light"
-                      ? "rgba(28, 25, 23, 0.12)"
-                      : "rgba(255, 255, 255, 0.1)",
-                }}
-              >
-                <p
-                  className="mb-2 text-center text-[10px] font-semibold uppercase tracking-wide"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  {t(language, "chatPushSettingsTitle")}
-                </p>
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void requestNotificationPermission()}
-                    className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-black/10"
-                    style={{ color: "var(--accent)" }}
-                    aria-label={t(language, "chatSyncNotifications")}
-                  >
-                    <Bell className="h-4 w-4 shrink-0" aria-hidden />
-                    <span className="hidden sm:inline">
-                      {t(language, "chatSyncNotifications")}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={pushResetBusy}
-                    onClick={() => void handleResetPushSession()}
-                    className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-black/10 disabled:opacity-50"
-                    style={{ color: "var(--text-secondary)" }}
-                    aria-label={t(language, "chatResetSessionAria")}
-                  >
-                    <RotateCcw
-                      className={`h-4 w-4 shrink-0 ${pushResetBusy ? "animate-spin" : ""}`}
-                      aria-hidden
-                    />
-                    <span className="hidden sm:inline">
-                      {t(language, "chatResetSession")}
-                    </span>
-                  </button>
-                </div>
-              </div>
             </header>
             <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 sm:px-4 sm:pb-4">
               <UserDiscoverySidebar
@@ -2265,30 +2231,6 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-                  <button
-                    type="button"
-                    onClick={() => void requestNotificationPermission()}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-white/10"
-                    style={{ color: "var(--accent)" }}
-                    aria-label={t(language, "chatSyncNotifications")}
-                    title={t(language, "chatSyncNotifications")}
-                  >
-                    <Bell className="h-4 w-4 shrink-0" aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={pushResetBusy}
-                    onClick={() => void handleResetPushSession()}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-white/10 disabled:opacity-50"
-                    style={{ color: "var(--text-secondary)" }}
-                    aria-label={t(language, "chatResetSessionAria")}
-                    title={t(language, "chatResetSession")}
-                  >
-                    <RotateCcw
-                      className={`h-4 w-4 shrink-0 ${pushResetBusy ? "animate-spin" : ""}`}
-                      aria-hidden
-                    />
-                  </button>
                   <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
                     <span
                       className="whitespace-nowrap text-end text-[10px] font-semibold leading-tight sm:text-xs"
@@ -2394,7 +2336,20 @@ export default function Home() {
         {/* Messages area */}
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-6">
           <div className="mx-auto w-full max-w-full space-y-4 lg:max-w-2xl">
-            {filteredMessages.length === 0 ? (
+            {!senderKeys && activeRecipientId ? (
+              <div
+                className="rounded-2xl px-4 py-3 w-fit"
+                style={{
+                  background: "var(--panel-bg)",
+                  border: "1px solid var(--border)",
+                  boxShadow: professionalMode ? "none" : "var(--glow)",
+                }}
+              >
+                <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                  {t(language, "syncingSecurity")}
+                </p>
+              </div>
+            ) : filteredMessages.length === 0 ? (
               activeRecipientId ? (
                 <div
                   className="rounded-2xl px-4 py-3 w-fit"
