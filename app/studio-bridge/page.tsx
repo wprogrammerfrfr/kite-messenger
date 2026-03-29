@@ -1,8 +1,10 @@
-'use client';
+"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Peer, { type SignalData } from "simple-peer";
+import { Check, ChevronLeft } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { acquireStudioMicStream, decodePeerDataChunk } from "@/lib/studio-bridge-webrtc";
 
@@ -21,6 +23,10 @@ type StudioSessionRow = {
   answer: SignalData | null;
   ice_candidates: IceCandidateRow[] | null;
 };
+
+const ORANGE = "#ff4500";
+const EMERALD = "#22c55e";
+const OBSIDIAN = "#0c0a09";
 
 const ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -47,36 +53,222 @@ const ICE_SERVERS = [
 ];
 
 function randomSessionId() {
-  // 6-char session_id. Keep exact casing to match URL + DB lookup.
   return Math.random().toString(36).slice(2, 8);
 }
 
-function statusStyle(status: BridgeStatus) {
-  if (status === "connected") {
-    return {
-      text: "Connected",
-      color: "text-emerald-400",
-      border: "border-emerald-500/40",
+function addLog(msg: string) {
+  console.log(msg);
+}
+
+/** ~1s clean sine tone for speaker check (Web Audio API). */
+function playTestTone(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    try {
+      const ctx = new AudioContext();
+      void ctx.resume().catch(() => {});
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 1);
+      window.setTimeout(() => {
+        void ctx.close().catch(() => {});
+        resolve();
+      }, 1050);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+type CheckRowState = "pending" | "done" | "error";
+type KiteSignalState = "checking" | "secure" | "offline" | "error";
+
+function MicLevelBars({ stream }: { stream: MediaStream | null }) {
+  const [heights, setHeights] = useState([0.12, 0.12, 0.12, 0.12, 0.12]);
+
+  useEffect(() => {
+    if (!stream) return;
+    let ctx: AudioContext | undefined;
+    let raf = 0;
+    let stopped = false;
+    let lastT = 0;
+
+    const run = async () => {
+      try {
+        ctx = new AudioContext();
+        await ctx.resume().catch(() => {});
+        const src = ctx.createMediaStreamSource(stream);
+        const an = ctx.createAnalyser();
+        an.fftSize = 128;
+        an.smoothingTimeConstant = 0.62;
+        src.connect(an);
+        const buf = new Uint8Array(an.frequencyBinCount);
+        const tick = (now: number) => {
+          if (stopped) return;
+          an.getByteFrequencyData(buf);
+          if (now - lastT > 72) {
+            lastT = now;
+            const step = Math.max(1, Math.floor(buf.length / 5));
+            const next = [0, 1, 2, 3, 4].map((i) => {
+              let sum = 0;
+              for (let j = 0; j < step; j++) sum += buf[i * step + j] ?? 0;
+              return Math.min(1, (sum / step / 255) * 1.85);
+            });
+            setHeights(next);
+          }
+          raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+      } catch {
+        // Visualizer is best-effort; bars stay at baseline.
+      }
     };
-  }
-  if (status === "failed") {
-    return { text: "Failed", color: "text-red-400", border: "border-red-500/40" };
-  }
-  return {
-    text: "Connecting...",
-    color: "text-yellow-400",
-    border: "border-yellow-500/40",
-  };
+    void run();
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+      void ctx?.close();
+    };
+  }, [stream]);
+
+  return (
+    <div
+      className="flex h-11 items-end justify-center gap-1.5 rounded-xl border border-stone-800/80 bg-black/25 px-4 py-2"
+      aria-hidden
+    >
+      {heights.map((h, i) => (
+        <div
+          key={i}
+          className="w-1.5 origin-bottom rounded-full bg-gradient-to-t from-orange-600/90 to-emerald-400/90"
+          style={{
+            height: `${Math.max(10, 6 + h * 34)}px`,
+            opacity: 0.4 + h * 0.6,
+            transition: "height 80ms ease-out, opacity 80ms ease-out",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function PreflightRow({
+  label,
+  pendingText,
+  doneText,
+  errorText,
+  state,
+  pendingShowsSpinner = true,
+  rowAction,
+}: {
+  label: string;
+  pendingText: string;
+  doneText: string;
+  errorText?: string;
+  state: CheckRowState;
+  /** When false, pending shows a static marker (e.g. manual action row). */
+  pendingShowsSpinner?: boolean;
+  /** Shown below the line while pending or error (e.g. Test Audio retry). */
+  rowAction?: ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-3 border-b border-stone-800/80 py-3.5 last:border-0 last:pb-0 first:pt-0">
+      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center">
+        <AnimatePresence mode="wait">
+          {state === "done" ? (
+            <motion.span
+              key="ok"
+              initial={{ scale: 0.5, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.5, opacity: 0 }}
+              transition={{ type: "spring", stiffness: 420, damping: 28 }}
+              className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400"
+            >
+              <Check className="h-3.5 w-3.5 stroke-[2.5]" aria-hidden />
+            </motion.span>
+          ) : state === "error" ? (
+            <motion.span
+              key="err"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="h-2 w-2 rounded-full bg-red-500/90"
+              aria-hidden
+            />
+          ) : pendingShowsSpinner ? (
+            <motion.span
+              key="pend"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="relative flex h-5 w-5 items-center justify-center"
+              aria-hidden
+            >
+              <span
+                className="absolute h-4 w-4 rounded-full border-2 border-orange-500/35 border-t-emerald-400/80 animate-spin"
+                style={{ animationDuration: "1.1s" }}
+              />
+            </motion.span>
+          ) : (
+            <motion.span
+              key="idle"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="h-2 w-2 rounded-full bg-stone-600"
+              aria-hidden
+            />
+          )}
+        </AnimatePresence>
+      </div>
+      <div className="min-w-0 flex-1 text-left">
+        <div className="text-[11px] font-semibold uppercase tracking-widest text-stone-500">
+          {label}
+        </div>
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={state + pendingText + doneText}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.2 }}
+            className={`mt-1 text-sm font-medium ${
+              state === "error" ? "text-red-300/95" : "text-stone-200"
+            }`}
+          >
+            {state === "done"
+              ? doneText
+              : state === "error"
+                ? (errorText ?? pendingText)
+                : pendingText}
+          </motion.p>
+        </AnimatePresence>
+        {state !== "done" && rowAction ? <div className="mt-3">{rowAction}</div> : null}
+      </div>
+    </div>
+  );
 }
 
 export default function StudioBridgePage() {
+  const router = useRouter();
   const [status, setStatus] = useState<BridgeStatus>("connecting");
   const [statusNote, setStatusNote] = useState("Initializing session...");
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [role, setRole] = useState<Role | null>(null);
-  const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [pingMs, setPingMs] = useState<number | null>(null);
+  const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
+  const [micPermissionDenied, setMicPermissionDenied] = useState(false);
+  const [audioTestDone, setAudioTestDone] = useState(false);
+  const [audioTestPlaying, setAudioTestPlaying] = useState(false);
+  const [audioTestFailed, setAudioTestFailed] = useState(false);
+  const [kiteSignal, setKiteSignal] = useState<KiteSignalState>("checking");
+  const [enteredStudio, setEnteredStudio] = useState(false);
+
+  const micDeniedThisInitRef = useRef(false);
 
   const peerRef = useRef<Peer.Instance | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -91,13 +283,53 @@ export default function StudioBridgePage() {
   const cleanupSessionRef = useRef<(() => Promise<void>) | null>(null);
   const iceAppendQueueRef = useRef<Promise<void>>(Promise.resolve());
   const existingRowRef = useRef<StudioSessionRow | null>(null);
+  /** Idempotent mic / peer / Realtime teardown (explicit leave + unmount). */
+  const bridgeTeardownRef = useRef<(() => void) | null>(null);
 
-  const badge = useMemo(() => statusStyle(status), [status]);
-  const addLog = (msg: string) => {
-    const line = `${new Date().toLocaleTimeString()} ${msg}`;
-    setDebugLogs((prev) => [...prev, line].slice(-5));
-    console.log(msg);
-  };
+  const micRowState: CheckRowState = micPermissionDenied
+    ? "error"
+    : localMicStream
+      ? "done"
+      : "pending";
+  const audioRowState: CheckRowState = micPermissionDenied
+    ? "pending"
+    : audioTestFailed
+      ? "error"
+      : audioTestDone
+        ? "done"
+        : "pending";
+
+  const connRowState: CheckRowState =
+    micPermissionDenied
+      ? "pending"
+      : kiteSignal === "secure"
+        ? "done"
+        : kiteSignal === "checking"
+          ? "pending"
+          : "error";
+
+  const kiteSignalSecure = kiteSignal === "secure";
+  const canEnterStudio =
+    Boolean(localMicStream) && audioTestDone && kiteSignalSecure;
+
+  const runAudioTest = useCallback(async () => {
+    if (audioTestDone || audioTestPlaying || micPermissionDenied) return;
+    setAudioTestPlaying(true);
+    setAudioTestFailed(false);
+    try {
+      await playTestTone();
+      if (mountedRef.current) setAudioTestDone(true);
+    } catch {
+      if (mountedRef.current) setAudioTestFailed(true);
+    } finally {
+      if (mountedRef.current) setAudioTestPlaying(false);
+    }
+  }, [audioTestDone, audioTestPlaying, micPermissionDenied]);
+
+  const returnToLobby = useCallback(() => {
+    bridgeTeardownRef.current?.();
+    router.push("/studio");
+  }, [router]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -110,12 +342,95 @@ export default function StudioBridgePage() {
     statusRef.current = status;
   }, [status]);
 
+  /** Online + Supabase reachable (does not wait for WebRTC peer). */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let cancelled = false;
+
+    const verifyKiteSignal = async () => {
+      if (!navigator.onLine) {
+        if (!cancelled) setKiteSignal("offline");
+        return;
+      }
+      if (!cancelled) setKiteSignal("checking");
+      try {
+        const { error } = await supabase.from("studio_sessions").select("session_id").limit(1);
+        if (cancelled) return;
+        if (error) setKiteSignal("error");
+        else setKiteSignal("secure");
+      } catch {
+        if (!cancelled) setKiteSignal("error");
+      }
+    };
+
+    void verifyKiteSignal();
+
+    const onOnline = () => {
+      void verifyKiteSignal();
+    };
+    const onOffline = () => setKiteSignal("offline");
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     let cancelled = false;
-    /** Effect-owned mic stream for Strict Mode teardown (always stop tracks here). */
     let micStream: MediaStream | null = null;
+    micDeniedThisInitRef.current = false;
+    let teardownRan = false;
+
+    const performTeardown = () => {
+      if (teardownRan) return;
+      teardownRan = true;
+      cancelled = true;
+      void (async () => {
+        try {
+          setPingMs(null);
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = null;
+          }
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = null;
+          }
+          if (localMonitorAudioRef.current) {
+            localMonitorAudioRef.current.srcObject = null;
+          }
+          channelRef.current?.unsubscribe();
+          channelRef.current = null;
+
+          peerRef.current?.destroy();
+          peerRef.current = null;
+
+          const toStop = micStream ?? localStreamRef.current;
+          toStop?.getTracks().forEach((track) => track.stop());
+          micStream = null;
+          localStreamRef.current = null;
+
+          if (mountedRef.current) {
+            setLocalMicStream(null);
+            setAudioTestDone(false);
+            setAudioTestFailed(false);
+          }
+
+          if (cleanupSessionRef.current) {
+            await cleanupSessionRef.current();
+            cleanupSessionRef.current = null;
+          }
+        } catch {
+          // Ignore cleanup errors in dev teardown.
+        }
+      })();
+    };
+
+    bridgeTeardownRef.current = performTeardown;
 
     const appendIceCandidate = async (
       sessionId: string,
@@ -157,6 +472,7 @@ export default function StudioBridgePage() {
       try {
         addLog("Signaling started");
         setStatusNote("Initializing session...");
+        setMicPermissionDenied(false);
         if (cancelled || !mountedRef.current) return;
 
         const url = new URL(window.location.href);
@@ -165,7 +481,6 @@ export default function StudioBridgePage() {
         const activeRole: Role = isHost ? "host" : "peer";
         setRole(activeRole);
 
-        // Keep exact casing for URL session_id -> DB lookup.
         const sessionId = roomParam || randomSessionId();
         setRoomId(sessionId);
         let existingRow: StudioSessionRow | null = null;
@@ -223,6 +538,11 @@ export default function StudioBridgePage() {
         } catch (micErr) {
           console.error(micErr);
           addLog("Microphone blocked or unavailable");
+          micDeniedThisInitRef.current = true;
+          if (mountedRef.current) {
+            setMicPermissionDenied(true);
+            setStatusNote("Microphone access is required to continue.");
+          }
           throw new Error("Microphone permission is required for the studio bridge.");
         }
 
@@ -239,20 +559,20 @@ export default function StudioBridgePage() {
 
         micStream = mediaStream;
         localStreamRef.current = mediaStream;
+        if (mountedRef.current) setLocalMicStream(mediaStream);
 
         const localEl = localMonitorAudioRef.current;
         if (localEl) {
           localEl.srcObject = mediaStream;
           localEl.muted = true;
-          await localEl.play().catch(() => {
-            // Autoplay policies: stream still flows to the peer.
-          });
+          await localEl.play().catch(() => {});
         }
 
         if (cancelled || !mountedRef.current) {
           micStream.getTracks().forEach((track) => track.stop());
           micStream = null;
           localStreamRef.current = null;
+          if (mountedRef.current) setLocalMicStream(null);
           return;
         }
 
@@ -300,7 +620,6 @@ export default function StudioBridgePage() {
         });
 
         const enqueueIceAppend = (nextCandidate: IceCandidateRow) => {
-          // Queue to avoid concurrent read-modify-write overwrites.
           iceAppendQueueRef.current = iceAppendQueueRef.current
             .then(async () => {
               await appendIceCandidate(sessionId, nextCandidate);
@@ -318,7 +637,6 @@ export default function StudioBridgePage() {
             const candidateLike = (signalData as { candidate?: unknown }).candidate;
             const typeLike = (signalData as { type?: unknown }).type;
 
-            // Trickle ICE: send each candidate immediately as soon as it is discovered.
             if (candidateLike) {
               const candidateRecord: IceCandidateRow = {
                 id: `${activeRole}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -468,7 +786,6 @@ export default function StudioBridgePage() {
           .subscribe();
         channelRef.current = channel;
 
-        // Apply initial signals after subscription is active.
         if (!isHost) {
           const initial = existingRowRef.current;
           if (initial?.offer && typeof initial.offer === "object") {
@@ -501,46 +818,17 @@ export default function StudioBridgePage() {
         if (cancelled || !mountedRef.current) return;
         console.error(err);
         setStatus("failed");
-        setStatusNote("Could not initialize studio signaling bridge.");
+        if (!micDeniedThisInitRef.current) {
+          setStatusNote("Could not initialize studio signaling bridge.");
+        }
       }
     };
 
     void init();
 
     return () => {
-      cancelled = true;
-      void (async () => {
-        try {
-          setPingMs(null);
-          if (pingIntervalRef.current) {
-            clearInterval(pingIntervalRef.current);
-            pingIntervalRef.current = null;
-          }
-          if (remoteAudioRef.current) {
-            remoteAudioRef.current.srcObject = null;
-          }
-          if (localMonitorAudioRef.current) {
-            localMonitorAudioRef.current.srcObject = null;
-          }
-          channelRef.current?.unsubscribe();
-          channelRef.current = null;
-
-          peerRef.current?.destroy();
-          peerRef.current = null;
-
-          const toStop = micStream ?? localStreamRef.current;
-          toStop?.getTracks().forEach((track) => track.stop());
-          micStream = null;
-          localStreamRef.current = null;
-
-          if (cleanupSessionRef.current) {
-            await cleanupSessionRef.current();
-            cleanupSessionRef.current = null;
-          }
-        } catch {
-          // Ignore cleanup errors in dev teardown.
-        }
-      })();
+      bridgeTeardownRef.current = null;
+      performTeardown();
     };
   }, []);
 
@@ -554,74 +842,196 @@ export default function StudioBridgePage() {
     }
   };
 
+  const kitePendingCopy = micPermissionDenied
+    ? "Waiting for microphone access..."
+    : "Connecting to Kite Signal...";
+  const kiteErrorCopy =
+    kiteSignal === "offline"
+      ? "You're offline. Check your network connection."
+      : "Could not reach Kite Signal. Try again shortly.";
+
+  const audioPendingCopy = micPermissionDenied
+    ? "Waiting for microphone access..."
+    : audioTestPlaying
+      ? "Playing test tone…"
+      : "Tap Test Audio to play a short tone.";
+
   return (
-    <div className="min-h-screen bg-stone-950 text-white p-8 flex flex-col items-center justify-center">
+    <div className="relative min-h-screen overflow-hidden text-white antialiased">
+      <div className="fixed inset-0" style={{ backgroundColor: OBSIDIAN }} aria-hidden />
+      <div
+        className="pointer-events-none fixed inset-0 z-0"
+        aria-hidden
+        style={{
+          background: `
+            radial-gradient(ellipse 90% 70% at 0% -10%, rgba(255, 69, 0, 0.2), transparent 55%),
+            radial-gradient(ellipse 80% 60% at 100% 0%, rgba(34, 197, 94, 0.14), transparent 50%),
+            radial-gradient(ellipse 70% 50% at 100% 100%, rgba(255, 69, 0, 0.1), transparent 45%),
+            radial-gradient(ellipse 75% 55% at 0% 100%, rgba(34, 197, 94, 0.12), transparent 48%)
+          `,
+        }}
+      />
+
       <audio ref={localMonitorAudioRef} className="sr-only" playsInline muted />
       <audio ref={remoteAudioRef} className="sr-only" playsInline />
 
-      <div className="bg-stone-900 p-8 rounded-2xl border border-stone-800 shadow-2xl max-w-md w-full text-center">
-        <h1 className="text-3xl font-bold mb-2 text-emerald-400">Kite Studio</h1>
-        <p className="text-stone-400 mb-6 italic">Phase 1: The Signaling Bridge</p>
+      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-16 pb-28 sm:px-6 lg:pb-16">
+        <motion.button
+          type="button"
+          onClick={returnToLobby}
+          className="mb-6 inline-flex w-fit items-center gap-1 rounded-lg border border-white/[0.12] bg-white/[0.03] px-2.5 py-2 text-left text-xs font-medium text-white/55 transition hover:border-orange-500/25 hover:border-emerald-500/20 hover:bg-white/[0.05] hover:text-white/80"
+          whileTap={{ scale: 0.97 }}
+          aria-label="Return to lobby"
+        >
+          <ChevronLeft className="h-4 w-4 shrink-0 opacity-70" strokeWidth={2} aria-hidden />
+          <span>Return to Lobby</span>
+        </motion.button>
+        <motion.div
+          initial={{ opacity: 0, y: 24 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+          className="w-full"
+        >
+          <h1 className="bg-gradient-to-r from-orange-400 via-stone-100 to-emerald-400 bg-clip-text text-center text-3xl font-bold tracking-tight text-transparent">
+            Kite Studio
+          </h1>
+          <p className="mt-2 text-center text-xs font-semibold uppercase tracking-widest text-stone-500">
+            Pre-flight check
+          </p>
 
-        {status === "connected" && role === "host" ? (
-          <div className="mb-4 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-2 font-mono text-sm text-stone-200">
-            Ping:{" "}
-            <span className="text-emerald-400 tabular-nums">
-              {pingMs === null ? "--" : `${pingMs}`}
-            </span>{" "}
-            ms
-          </div>
-        ) : null}
-
-        <div className={`py-4 px-6 bg-stone-950 rounded-xl border mb-4 ${badge.border}`}>
-          <span className="text-sm text-stone-500 uppercase tracking-widest font-semibold">
-            Status
-          </span>
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={status}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.2, ease: "easeOut" }}
-              className={`text-xl font-mono mt-1 ${badge.color}`}
+          {micPermissionDenied ? (
+            <div
+              className="mt-6 rounded-xl border border-stone-700/90 bg-stone-950/50 px-4 py-3 text-center text-sm font-medium leading-relaxed text-stone-300"
+              role="status"
             >
-              {badge.text}
-            </motion.div>
-          </AnimatePresence>
-          <p className="mt-2 text-xs text-stone-400">{statusNote}</p>
-          {roomId ? (
-            <p className="mt-2 text-[11px] text-stone-500">Room: {roomId}</p>
+              Microphone Access Required. Please enable it in your browser settings to continue.
+            </div>
           ) : null}
-        </div>
 
-        {role === "host" && inviteLink ? (
-          <button
-            type="button"
-            onClick={() => void copyInviteLink()}
-            className="w-full mb-4 rounded-xl px-4 py-3 text-sm font-semibold border border-emerald-500/45 bg-emerald-500/10 hover:bg-emerald-500/20 transition"
-          >
-            Copy Invite Link
-          </button>
-        ) : null}
+          {!enteredStudio ? (
+            <>
+              <div
+                className="mt-8 rounded-2xl border border-stone-800/90 bg-stone-950/40 p-5 shadow-2xl backdrop-blur-sm"
+                style={{
+                  boxShadow: `
+                    0 0 0 1px rgba(255,69,0,0.06),
+                    0 0 48px -20px rgba(34,197,94,0.12),
+                    0 24px 48px -24px rgba(0,0,0,0.65)
+                  `,
+                }}
+              >
+                <div className="text-[11px] font-semibold uppercase tracking-widest text-stone-500">
+                  Status
+                </div>
+                <div className="mt-1">
+                  <PreflightRow
+                    label="Microphone"
+                    pendingText="Scanning for input..."
+                    doneText="Microphone Active"
+                    errorText="Microphone unavailable."
+                    state={micRowState}
+                  />
+                  <PreflightRow
+                    label="Audio output"
+                    pendingText={audioPendingCopy}
+                    doneText="Output Ready"
+                    errorText="Test tone could not play."
+                    state={audioRowState}
+                    pendingShowsSpinner={audioTestPlaying}
+                    rowAction={
+                      !micPermissionDenied && !audioTestDone ? (
+                        <motion.button
+                          type="button"
+                          disabled={audioTestPlaying}
+                          onClick={() => void runAudioTest()}
+                          className={`w-full rounded-xl px-4 py-2.5 text-sm font-semibold transition ${
+                            audioTestPlaying
+                              ? "cursor-wait border border-stone-600 bg-stone-800/50 text-stone-400"
+                              : "border border-orange-500/35 bg-gradient-to-r from-orange-500/12 to-emerald-500/12 text-stone-100 hover:from-orange-500/20 hover:to-emerald-500/20"
+                          }`}
+                          whileTap={audioTestPlaying ? undefined : { scale: 0.97 }}
+                        >
+                          Test Audio
+                        </motion.button>
+                      ) : null
+                    }
+                  />
+                  <PreflightRow
+                    label="Kite Signal"
+                    pendingText={kitePendingCopy}
+                    doneText="Signal Secure"
+                    errorText={kiteErrorCopy}
+                    state={connRowState}
+                  />
+                </div>
+                {localMicStream && !micPermissionDenied ? (
+                  <div className="mt-4">
+                    <MicLevelBars stream={localMicStream} />
+                    <p className="mt-2 text-center text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                      Default Input Level
+                    </p>
+                  </div>
+                ) : null}
+              </div>
 
-        <p className="text-xs text-stone-500">
-          This page is private. Only you can see this during development.
-        </p>
+              <motion.button
+                type="button"
+                disabled={!canEnterStudio}
+                onClick={() => setEnteredStudio(true)}
+                className={`mt-8 w-full rounded-xl px-4 py-3.5 text-sm font-semibold transition ${
+                  canEnterStudio
+                    ? "border border-orange-500/40 text-stone-50 shadow-lg"
+                    : "cursor-not-allowed border border-stone-700 bg-stone-900/60 text-stone-500"
+                }`}
+                style={
+                  canEnterStudio
+                    ? {
+                        background: `linear-gradient(135deg, rgba(255,69,0,0.22), rgba(34,197,94,0.18))`,
+                        boxShadow: `0 0 28px -6px ${ORANGE}88, 0 0 32px -8px ${EMERALD}66`,
+                      }
+                    : undefined
+                }
+                whileTap={canEnterStudio ? { scale: 0.97 } : undefined}
+              >
+                Enter Studio
+              </motion.button>
+            </>
+          ) : (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-8 space-y-4"
+            >
+              {status === "connected" && role === "host" ? (
+                <div className="rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center font-mono text-sm text-stone-200">
+                  Ping:{" "}
+                  <span className="text-emerald-400 tabular-nums">
+                    {pingMs === null ? "--" : `${pingMs}`}
+                  </span>{" "}
+                  ms
+                </div>
+              ) : null}
 
-        <div className="mt-4 w-full text-left">
-          <div className="text-[11px] text-stone-500 uppercase tracking-widest font-semibold">
-            Debug Logs
-          </div>
-          <textarea
-            readOnly
-            value={debugLogs.join("\n")}
-            className="mt-2 w-full resize-none rounded-xl border border-stone-800 bg-black/20 p-3 font-mono text-[11px] text-stone-300 outline-none"
-            rows={5}
-          />
-        </div>
+              {role === "host" && inviteLink ? (
+                <motion.button
+                  type="button"
+                  onClick={() => void copyInviteLink()}
+                  className="w-full rounded-xl border border-orange-500/35 bg-gradient-to-r from-orange-500/15 to-emerald-500/15 px-4 py-3 text-sm font-semibold text-stone-100 transition hover:from-orange-500/25 hover:to-emerald-500/25"
+                  whileTap={{ scale: 0.97 }}
+                >
+                  Copy Invite Link
+                </motion.button>
+              ) : null}
+
+              {roomId ? (
+                <p className="text-center text-[11px] font-medium text-stone-500">Room: {roomId}</p>
+              ) : null}
+
+              <p className="text-center text-xs text-stone-500">{statusNote}</p>
+            </motion.div>
+          )}
+        </motion.div>
       </div>
     </div>
   );
 }
-
