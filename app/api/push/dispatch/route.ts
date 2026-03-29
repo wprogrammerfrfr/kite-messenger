@@ -59,7 +59,7 @@ export async function POST(request: Request) {
   const admin = createClient(url, serviceKey);
   const { data: rows, error: selErr } = await admin
     .from("push_subscriptions")
-    .select("id, endpoint, p256dh, auth")
+    .select("id, subscription")
     .eq("user_id", receiverUserId);
 
   if (selErr) {
@@ -70,12 +70,17 @@ export async function POST(request: Request) {
   let sent = 0;
 
   for (const row of rows ?? []) {
-    const endpoint = row.endpoint as string;
-    const p256dh = row.p256dh as string;
-    const auth = row.auth as string;
+    const sub = row.subscription as {
+      endpoint?: string;
+      keys?: { p256dh?: string; auth?: string };
+    } | null;
+    const endpoint = sub?.endpoint;
+    const p256dh = sub?.keys?.p256dh;
+    const authSecret = sub?.keys?.auth;
+    if (!endpoint || !p256dh || !authSecret) continue;
     try {
       await webpush.sendNotification(
-        { endpoint, keys: { p256dh, auth } },
+        { endpoint, keys: { p256dh, auth: authSecret } },
         pushPayload,
         { TTL: 60 * 60 }
       );

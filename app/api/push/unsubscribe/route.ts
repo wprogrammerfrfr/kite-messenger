@@ -49,7 +49,7 @@ export async function POST(request: Request) {
       .from("push_subscriptions")
       .delete()
       .eq("user_id", user.id)
-      .eq("endpoint", ep);
+      .eq("subscription->>endpoint", ep);
   } else {
     await userClient.from("push_subscriptions").delete().eq("user_id", user.id);
   }

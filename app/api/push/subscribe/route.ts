@@ -93,7 +93,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing subscription keys" }, { status: 400 });
     }
 
-    const { endpoint, p256dh, auth } = subKeys;
+    const { endpoint, p256dh, auth: subscriptionAuth } = subKeys;
+
+    const subscription = {
+      endpoint,
+      keys: {
+        p256dh,
+        auth: subscriptionAuth,
+      },
+    };
 
     const publicKey = cleanVapidPublicKey(
       process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? ""
@@ -118,20 +126,29 @@ export async function POST(request: Request) {
       global: { headers: { Authorization: `Bearer ${token}` } },
     });
 
-    const { error: upsertErr } = await userClient.from("push_subscriptions").upsert(
-      {
-        user_id: user.id,
-        endpoint,
-        p256dh,
-        auth,
-      },
-      { onConflict: "endpoint" }
-    );
+    const { error: deleteErr } = await userClient
+      .from("push_subscriptions")
+      .delete()
+      .eq("user_id", user.id)
+      .eq("subscription->>endpoint", endpoint);
 
-    if (upsertErr) {
-      console.error("[push/subscribe] Supabase upsert failed:", upsertErr.message, upsertErr);
+    if (deleteErr) {
+      console.error("[push/subscribe] Supabase delete (dedupe) failed:", deleteErr.message, deleteErr);
       return NextResponse.json(
-        { error: upsertErr.message ?? "Failed to save subscription" },
+        { error: deleteErr.message ?? "Failed to update subscription" },
+        { status: 500 }
+      );
+    }
+
+    const { error: insertErr } = await userClient.from("push_subscriptions").insert({
+      user_id: user.id,
+      subscription,
+    });
+
+    if (insertErr) {
+      console.error("[push/subscribe] Supabase insert failed:", insertErr.message, insertErr);
+      return NextResponse.json(
+        { error: insertErr.message ?? "Failed to save subscription" },
         { status: 500 }
       );
     }
