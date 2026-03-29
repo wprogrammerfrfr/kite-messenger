@@ -60,6 +60,7 @@ import {
   Loader2,
   MapPin,
   Paperclip,
+  RotateCcw,
   Send,
   Trash2,
 } from "lucide-react";
@@ -82,8 +83,8 @@ import {
 } from "@/lib/kite-notifications";
 import {
   registerKitePushSubscription,
-  removeKitePushFromServer,
   unsubscribeKitePushOnDevice,
+  unregisterAllKiteServiceWorkers,
 } from "@/lib/kite-push-client";
 import { isStandaloneDisplayMode } from "@/lib/pwa-standalone";
 import { formatRelativeLastSeen } from "@/lib/relative-last-seen";
@@ -266,6 +267,7 @@ export default function Home() {
   const [recipientPublicKey, setRecipientPublicKey] = useState<CryptoKey | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [notificationsMuted, setNotificationsMuted] = useState(false);
+  const [pushResetBusy, setPushResetBusy] = useState(false);
   const languageRef = useRef<Language>(readStoredLanguage());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -343,6 +345,36 @@ export default function Home() {
     if (typeof window === "undefined" || !("Notification" in window)) return;
     console.log("Current Permission Status:", Notification.permission);
   }, []);
+
+  const handleResetPushSession = useCallback(async () => {
+    if (typeof globalThis.window === "undefined") return;
+    if (!globalThis.confirm(t(language, "chatResetSessionConfirm"))) return;
+    setPushResetBusy(true);
+    try {
+      const {
+        data: { session: s },
+      } = await supabase.auth.getSession();
+      if (!s?.access_token) {
+        globalThis.alert(t(language, "chatPushPurgeFailed"));
+        return;
+      }
+      const res = await fetch("/api/push/purge", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${s.access_token}` },
+      });
+      if (!res.ok) {
+        globalThis.alert(t(language, "chatPushPurgeFailed"));
+        return;
+      }
+      await unsubscribeKitePushOnDevice();
+      await unregisterAllKiteServiceWorkers();
+      globalThis.location.reload();
+    } catch {
+      globalThis.alert(t(language, "chatPushPurgeFailed"));
+    } finally {
+      setPushResetBusy(false);
+    }
+  }, [language]);
 
   const requestNotificationPermission = useCallback(async () => {
     if (typeof window === "undefined") return;
@@ -2154,23 +2186,57 @@ export default function Home() {
                     : "rgba(0, 0, 0, 0.5)",
               }}
             >
-              <div className="relative flex items-center justify-center">
-                <button
-                  type="button"
-                  onClick={() => void requestNotificationPermission()}
-                  className="absolute end-0 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-black/10"
-                  style={{ color: "var(--accent)" }}
-                  aria-label="Sync notifications"
+              <h1
+                className="text-center text-2xl font-bold tracking-tight"
+                style={{ color: "var(--text-primary)" }}
+              >
+                {t(language, "chatAppTitle")}
+              </h1>
+              <div
+                className="mt-3 border-t pt-3"
+                style={{
+                  borderColor:
+                    appearance === "light"
+                      ? "rgba(28, 25, 23, 0.12)"
+                      : "rgba(255, 255, 255, 0.1)",
+                }}
+              >
+                <p
+                  className="mb-2 text-center text-[10px] font-semibold uppercase tracking-wide"
+                  style={{ color: "var(--text-secondary)" }}
                 >
-                  <Bell className="h-4 w-4 shrink-0" aria-hidden />
-                  <span className="hidden sm:inline">Sync Notifications</span>
-                </button>
-                <h1
-                  className="text-center text-2xl font-bold tracking-tight"
-                  style={{ color: "var(--text-primary)" }}
-                >
-                  {t(language, "chatAppTitle")}
-                </h1>
+                  {t(language, "chatPushSettingsTitle")}
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void requestNotificationPermission()}
+                    className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-black/10"
+                    style={{ color: "var(--accent)" }}
+                    aria-label={t(language, "chatSyncNotifications")}
+                  >
+                    <Bell className="h-4 w-4 shrink-0" aria-hidden />
+                    <span className="hidden sm:inline">
+                      {t(language, "chatSyncNotifications")}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pushResetBusy}
+                    onClick={() => void handleResetPushSession()}
+                    className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-black/10 disabled:opacity-50"
+                    style={{ color: "var(--text-secondary)" }}
+                    aria-label={t(language, "chatResetSessionAria")}
+                  >
+                    <RotateCcw
+                      className={`h-4 w-4 shrink-0 ${pushResetBusy ? "animate-spin" : ""}`}
+                      aria-hidden
+                    />
+                    <span className="hidden sm:inline">
+                      {t(language, "chatResetSession")}
+                    </span>
+                  </button>
+                </div>
               </div>
             </header>
             <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-3 pb-3 pt-1 sm:px-4 sm:pb-4">
@@ -2252,10 +2318,24 @@ export default function Home() {
                     onClick={() => void requestNotificationPermission()}
                     className="inline-flex shrink-0 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-white/10"
                     style={{ color: "var(--accent)" }}
-                    aria-label="Sync notifications"
-                    title="Sync Notifications"
+                    aria-label={t(language, "chatSyncNotifications")}
+                    title={t(language, "chatSyncNotifications")}
                   >
                     <Bell className="h-4 w-4 shrink-0" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pushResetBusy}
+                    onClick={() => void handleResetPushSession()}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-semibold hover:bg-white/10 disabled:opacity-50"
+                    style={{ color: "var(--text-secondary)" }}
+                    aria-label={t(language, "chatResetSessionAria")}
+                    title={t(language, "chatResetSession")}
+                  >
+                    <RotateCcw
+                      className={`h-4 w-4 shrink-0 ${pushResetBusy ? "animate-spin" : ""}`}
+                      aria-hidden
+                    />
                   </button>
                   <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
                     <span

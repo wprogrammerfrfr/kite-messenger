@@ -85,8 +85,17 @@ export async function POST(request: Request) {
         { TTL: 60 * 60 }
       );
       sent += 1;
-    } catch {
-      await admin.from("push_subscriptions").delete().eq("id", row.id as string);
+    } catch (err: unknown) {
+      const statusCode =
+        err &&
+        typeof err === "object" &&
+        "statusCode" in err &&
+        typeof (err as { statusCode: unknown }).statusCode === "number"
+          ? (err as { statusCode: number }).statusCode
+          : null;
+      if (statusCode === 410 || statusCode === 401) {
+        await admin.from("push_subscriptions").delete().eq("id", row.id as string);
+      }
     }
   }
 

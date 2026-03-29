@@ -193,6 +193,12 @@ type TranslationKey =
   | "discoverPageTitle"
   | "chatLoadingShort"
   | "chatAppTitle"
+  | "chatPushSettingsTitle"
+  | "chatSyncNotifications"
+  | "chatResetSession"
+  | "chatResetSessionAria"
+  | "chatResetSessionConfirm"
+  | "chatPushPurgeFailed"
   | "chatBackToChatsAria"
   | "chatWipeConversationConfirm"
   | "chatOpenProfilePictureAria"
@@ -497,6 +503,13 @@ const translationsEn: TranslationRecord = {
     discoverPageTitle: "Discover",
     chatLoadingShort: "Loading…",
     chatAppTitle: "Kite",
+    chatPushSettingsTitle: "Notifications",
+    chatSyncNotifications: "Sync notifications",
+    chatResetSession: "Reset Session",
+    chatResetSessionAria: "Reset session — clear all push devices and reload",
+    chatResetSessionConfirm:
+      "Remove all notification devices for your account, unregister this browser, and reload?",
+    chatPushPurgeFailed: "Could not clear subscriptions. Try again.",
     chatBackToChatsAria: "Back to chats",
     chatWipeConversationConfirm: "Wipe this chat? This cannot be undone.",
     chatOpenProfilePictureAria: "Open profile picture",
@@ -807,6 +820,13 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverPageTitle: "کشف",
     chatLoadingShort: "در حال بارگذاری…",
     chatAppTitle: "Kite",
+    chatPushSettingsTitle: "اعلان‌ها",
+    chatSyncNotifications: "همگام‌سازی اعلان‌ها",
+    chatResetSession: "بازنشانی جلسه",
+    chatResetSessionAria: "بازنشانی جلسه — حذف همه دستگاه‌های فش و بارگذاری مجدد",
+    chatResetSessionConfirm:
+      "همه دستگاه‌های اعلان برای حساب شما حذف و این مرورگر ثبت‌نام‌شده خارج شود و صفحه دوباره بارگذاری شود؟",
+    chatPushPurgeFailed: "اشتراک‌ها پاک نشدند. دوباره تلاش کنید.",
     chatBackToChatsAria: "بازگشت به گفتگوها",
     chatWipeConversationConfirm: "این گفتگو پاک شود؟ این کار برگشت‌پذیر نیست.",
     chatOpenProfilePictureAria: "باز کردن تصویر پروفایل",
@@ -1114,6 +1134,13 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverPageTitle: "اكتشف",
     chatLoadingShort: "جارٍ التحميل…",
     chatAppTitle: "Kite",
+    chatPushSettingsTitle: "الإشعارات",
+    chatSyncNotifications: "مزامنة الإشعارات",
+    chatResetSession: "إعادة ضبط الجلسة",
+    chatResetSessionAria: "إعادة ضبط الجلسة — مسح كل أجهزة الدفع وإعادة التحميل",
+    chatResetSessionConfirm:
+      "إزالة جميع أجهزة الإشعارات لهذا الحساب، وإلغاء تسجيل هذا المتصفح، وإعادة تحميل الصفحة؟",
+    chatPushPurgeFailed: "تعذر مسح الاشتراكات. حاول مرة أخرى.",
     chatBackToChatsAria: "العودة إلى المحادثات",
     chatWipeConversationConfirm: "مسح هذه المحادثة؟ لا يمكن التراجع.",
     chatOpenProfilePictureAria: "فتح صورة الملف الشخصي",
@@ -1255,6 +1282,13 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverPageTitle: "탐색",
     chatLoadingShort: "로딩 중…",
     chatAppTitle: "Kite",
+    chatPushSettingsTitle: "알림",
+    chatSyncNotifications: "알림 동기화",
+    chatResetSession: "세션 재설정",
+    chatResetSessionAria: "세션 재설정 — 푸시 기기 전부 삭제 후 새로고침",
+    chatResetSessionConfirm:
+      "이 계정의 알림 기기를 모두 제거하고 이 브라우저 등록을 해제한 뒤 페이지를 새로고침할까요?",
+    chatPushPurgeFailed: "구독을 지울 수 없습니다. 다시 시도하세요.",
     chatBackToChatsAria: "채팅 목록으로",
     chatWipeConversationConfirm: "이 대화를 삭제할까요? 되돌릴 수 없습니다.",
     chatOpenProfilePictureAria: "프로필 사진 열기",
@@ -1393,6 +1427,13 @@ export const translations: Record<Language, TranslationRecord> = {
     discoverPageTitle: "Keşfet",
     chatLoadingShort: "Yükleniyor…",
     chatAppTitle: "Kite",
+    chatPushSettingsTitle: "Bildirimler",
+    chatSyncNotifications: "Bildirimleri eşitle",
+    chatResetSession: "Oturumu sıfırla",
+    chatResetSessionAria: "Oturumu sıfırla — tüm push cihazlarını temizle ve yeniden yükle",
+    chatResetSessionConfirm:
+      "Hesabınızdaki tüm bildirim cihazlarını kaldırıp bu tarayıcının kaydını silip sayfayı yeniden yüklemek ister misiniz?",
+    chatPushPurgeFailed: "Abonelikler temizlenemedi. Tekrar deneyin.",
     chatBackToChatsAria: "Sohbetlere dön",
     chatWipeConversationConfirm: "Bu sohbet silinsin mi? Bu işlem geri alınamaz.",
     chatOpenProfilePictureAria: "Profil fotoğrafını aç",
