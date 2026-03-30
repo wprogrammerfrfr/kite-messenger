@@ -2,7 +2,7 @@
  * Studio bridge WebRTC helpers (browser-only callers must guard with typeof window).
  */
 
-/** Shared ICE server config (STUN first, TURN fallback for strict networks). */
+/** Shared ICE server config (TURN relay first for strict networks). */
 export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
   // Prioritize TCP/443 relay first for strict networks (campus/corporate firewalls).
   {
@@ -22,6 +22,14 @@ export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
   },
   { urls: "stun:stun.l.google.com:19302" },
 ];
+
+/** Force TURN relay behavior that survives highly restricted networks (meturoam-like). */
+export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
+  iceServers: STUDIO_ICE_SERVERS,
+  iceTransportPolicy: "relay",
+  bundlePolicy: "max-bundle",
+  rtcpMuxPolicy: "require",
+};
 
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
 export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {

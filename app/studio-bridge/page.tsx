@@ -10,6 +10,7 @@ import {
   acquireStudioMicStream,
   decodePeerDataChunk,
   STUDIO_ICE_SERVERS,
+  STUDIO_PEER_CONNECTION_CONFIG,
 } from "@/lib/studio-bridge-webrtc";
 
 type BridgeStatus = "connecting" | "connected" | "failed";
@@ -32,6 +33,12 @@ type StudioSessionRow = {
   offer: SignalData | null;
   answer: SignalData | null;
   ice_candidates: IceCandidateRow[] | null;
+};
+
+type SessionHistoryInsert = {
+  host_nickname: string;
+  guest_nickname: string;
+  duration_seconds: number;
 };
 
 const ORANGE = "#ff4500";
@@ -302,6 +309,8 @@ export default function StudioBridgePage() {
   const leaveSignalSentRef = useRef(false);
   const leaveSignalReceivedRef = useRef(false);
   const lostCountdownIntervalRef = useRef<number | null>(null);
+  const sessionStartedAtRef = useRef<number | null>(null);
+  const historySavedRef = useRef(false);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -403,6 +412,46 @@ export default function StudioBridgePage() {
     }
   }, [roomId, role]);
 
+  const saveSessionHistory = useCallback(async () => {
+    if (historySavedRef.current) return;
+    if (role !== "host") return;
+    if (!sessionStartedAtRef.current) return;
+    historySavedRef.current = true;
+
+    const durationSeconds = Math.max(
+      1,
+      Math.round((Date.now() - sessionStartedAtRef.current) / 1000)
+    );
+
+    let hostNickname = "Host";
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const userId = authData.user?.id;
+      if (userId) {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("nickname")
+          .eq("id", userId)
+          .maybeSingle<{ nickname: string | null }>();
+        const maybeNickname = profile?.nickname?.trim();
+        if (maybeNickname) hostNickname = maybeNickname;
+      }
+    } catch {
+      // Best-effort nickname resolution.
+    }
+
+    const payload: SessionHistoryInsert = {
+      host_nickname: hostNickname,
+      guest_nickname: "Guest",
+      duration_seconds: durationSeconds,
+    };
+    const { error } = await supabase.from("studio_history").insert(payload);
+    if (error) {
+      historySavedRef.current = false;
+      throw error;
+    }
+  }, [role]);
+
   const toggleMicMuted = useCallback(() => {
     setMicMuted((prev) => {
       const nextMuted = !prev;
@@ -430,12 +479,17 @@ export default function StudioBridgePage() {
   const confirmEndSession = useCallback(() => {
     void (async () => {
       await sendLeaveSignal();
+      try {
+        await saveSessionHistory();
+      } catch (err) {
+        console.error("Failed to save studio_history row", err);
+      }
       // Give the signaling channel a brief chance to flush.
       await new Promise((resolve) => window.setTimeout(resolve, 120));
       bridgeTeardownRef.current?.();
       router.push("/studio");
     })();
-  }, [router, sendLeaveSignal]);
+  }, [router, saveSessionHistory, sendLeaveSignal]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -496,6 +550,8 @@ export default function StudioBridgePage() {
     let timeoutExtendedForIce = false;
     leaveSignalSentRef.current = false;
     leaveSignalReceivedRef.current = false;
+    historySavedRef.current = false;
+    sessionStartedAtRef.current = Date.now();
     setCollaboratorLeft(false);
     clearLostCountdown();
 
@@ -712,12 +768,7 @@ export default function StudioBridgePage() {
           initiator: isHost,
           trickle: true,
           stream: mediaStream,
-          config: {
-            iceServers: STUDIO_ICE_SERVERS,
-            iceTransportPolicy: "relay",
-            bundlePolicy: "max-bundle",
-            rtcpMuxPolicy: "require",
-          },
+          config: STUDIO_PEER_CONNECTION_CONFIG,
           sdpTransform: setAudioBitrate,
         });
         peerRef.current = peer;
@@ -1195,6 +1246,11 @@ export default function StudioBridgePage() {
           <p className="mt-2 text-center text-xs font-semibold uppercase tracking-widest text-stone-500">
             Pre-flight check
           </p>
+          <div className="mt-4 flex justify-center">
+            <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-widest text-emerald-300">
+              Relay Active (Port 443)
+            </span>
+          </div>
 
           {roomId ? (
             <motion.button

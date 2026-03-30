@@ -13,11 +13,13 @@ const EMERALD = "#22c55e";
 
 const MotionLink = motion(Link);
 
-const MOCK_RECENT = [
-  { id: "1", title: "Midnight Mix", meta: "2 days ago · Host" },
-  { id: "2", title: "Acoustic Session", meta: "Last week · Guest" },
-  { id: "3", title: "Studio A", meta: "Mar 12 · Host" },
-] as const;
+type StudioHistoryRow = {
+  id: string;
+  host_nickname: string | null;
+  guest_nickname: string | null;
+  duration_seconds: number | null;
+  created_at: string;
+};
 
 function SystemStatusDot() {
   return (
@@ -55,6 +57,7 @@ export default function StudioLobbyPage() {
   const [joinShakeTick, setJoinShakeTick] = useState(0);
   const [welcomeMode, setWelcomeMode] = useState<"loading" | "loggedOut" | "welcomeBack">("loading");
   const [welcomeName, setWelcomeName] = useState<string>("");
+  const [recentSessions, setRecentSessions] = useState<StudioHistoryRow[]>([]);
 
   useEffect(() => {
     let mounted = true;
@@ -138,6 +141,37 @@ export default function StudioLobbyPage() {
       subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRecentSessions = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("studio_history")
+          .select("id, host_nickname, guest_nickname, duration_seconds, created_at")
+          .order("created_at", { ascending: false })
+          .limit(5);
+
+        if (cancelled || error || !data) return;
+        setRecentSessions(data as StudioHistoryRow[]);
+      } catch {
+        // Keep UI graceful if history table isn't reachable.
+      }
+    };
+
+    void loadRecentSessions();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const formatDuration = (seconds: number | null) => {
+    if (!seconds || seconds <= 0) return "0m";
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    if (mins <= 0) return `${secs}s`;
+    return `${mins}m ${secs}s`;
+  };
 
   const codeNormalized = roomCode
     .replace(/[^a-zA-Z0-9]/g, "")
@@ -405,15 +439,25 @@ export default function StudioLobbyPage() {
               Recent Studio Sessions
             </h3>
             <ul className="mt-3 divide-y divide-stone-800/80 rounded-xl border border-stone-800/80 bg-stone-950/30">
-              {MOCK_RECENT.map((row) => (
+              {recentSessions.length === 0 ? (
+                <li className="px-4 py-3 text-sm font-medium text-stone-500">
+                  No recent sessions yet.
+                </li>
+              ) : (
+                recentSessions.map((row) => (
                 <li
                   key={row.id}
                   className="flex items-center justify-between gap-3 px-4 py-3 first:rounded-t-xl last:rounded-b-xl"
                 >
-                  <span className="text-sm font-semibold text-stone-200">{row.title}</span>
-                  <span className="shrink-0 text-xs font-medium text-stone-500">{row.meta}</span>
+                  <span className="text-sm font-semibold text-stone-200">
+                    {(row.host_nickname || "Host").trim()} x {(row.guest_nickname || "Guest").trim()}
+                  </span>
+                  <span className="shrink-0 text-xs font-medium text-stone-500">
+                    {formatDuration(row.duration_seconds)}
+                  </span>
                 </li>
-              ))}
+                ))
+              )}
             </ul>
           </section>
         </motion.div>
