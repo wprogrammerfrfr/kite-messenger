@@ -2,6 +2,26 @@
  * Studio bridge WebRTC helpers (browser-only callers must guard with typeof window).
  */
 
+/** Shared ICE server config (STUN first, TURN fallback for strict networks). */
+export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  {
+    urls: "turn:open.metered.ca:80",
+    username: "7cbd6d02cf78e3bc5683bb2a",
+    credential: "CPfbkDJuKleKcmkv",
+  },
+  {
+    urls: "turn:open.metered.ca:443",
+    username: "7cbd6d02cf78e3bc5683bb2a",
+    credential: "CPfbkDJuKleKcmkv",
+  },
+  {
+    urls: "turn:open.metered.ca:443?transport=tcp",
+    username: "7cbd6d02cf78e3bc5683bb2a",
+    credential: "CPfbkDJuKleKcmkv",
+  },
+];
+
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
 export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
   return {

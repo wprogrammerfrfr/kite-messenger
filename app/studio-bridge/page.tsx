@@ -6,7 +6,11 @@ import Peer, { type SignalData } from "simple-peer";
 import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { acquireStudioMicStream, decodePeerDataChunk } from "@/lib/studio-bridge-webrtc";
+import {
+  acquireStudioMicStream,
+  decodePeerDataChunk,
+  STUDIO_ICE_SERVERS,
+} from "@/lib/studio-bridge-webrtc";
 
 type BridgeStatus = "connecting" | "connected" | "failed";
 type Role = "host" | "peer";
@@ -27,30 +31,6 @@ type StudioSessionRow = {
 const ORANGE = "#ff4500";
 const EMERALD = "#22c55e";
 const OBSIDIAN = "#0c0a09";
-
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  {
-    urls: "turn:global.relay.metered.ca:80",
-    username: "7cbd6d02cf78e3bc5683bb2a",
-    credential: "CPfbkDJuKleKcmkv",
-  },
-  {
-    urls: "turn:global.relay.metered.ca:80?transport=tcp",
-    username: "7cbd6d02cf78e3bc5683bb2a",
-    credential: "CPfbkDJuKleKcmkv",
-  },
-  {
-    urls: "turn:global.relay.metered.ca:443",
-    username: "7cbd6d02cf78e3bc5683bb2a",
-    credential: "CPfbkDJuKleKcmkv",
-  },
-  {
-    urls: "turns:global.relay.metered.ca:443?transport=tcp",
-    username: "7cbd6d02cf78e3bc5683bb2a",
-    credential: "CPfbkDJuKleKcmkv",
-  },
-];
 
 function randomSessionId() {
   // 6-char uppercase alphanumeric room code.
@@ -437,6 +417,9 @@ export default function StudioBridgePage() {
     let micStream: MediaStream | null = null;
     micDeniedThisInitRef.current = false;
     let teardownRan = false;
+    let connectTimeout: number | null = null;
+    let localIceCandidateSeen = false;
+    let timeoutExtendedForIce = false;
 
     const performTeardown = () => {
       if (teardownRan) return;
@@ -445,6 +428,10 @@ export default function StudioBridgePage() {
       void (async () => {
         try {
           setPingMs(null);
+          if (connectTimeout !== null) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+          }
           if (pingIntervalRef.current) {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
@@ -645,9 +632,39 @@ export default function StudioBridgePage() {
           initiator: isHost,
           trickle: true,
           stream: mediaStream,
-          config: { iceServers: ICE_SERVERS },
+          config: { iceServers: STUDIO_ICE_SERVERS },
         });
         peerRef.current = peer;
+
+        const scheduleConnectTimeout = (delayMs: number) => {
+          if (connectTimeout !== null) {
+            clearTimeout(connectTimeout);
+          }
+          connectTimeout = window.setTimeout(() => {
+            if (!mountedRef.current || cancelled || statusRef.current !== "connecting") return;
+
+            // On strict networks, ICE gathering can be slower; allow one grace extension.
+            if (!localIceCandidateSeen && !timeoutExtendedForIce) {
+              timeoutExtendedForIce = true;
+              addLog("No local ICE yet after 15s; extending timeout window.");
+              setStatusNote("Gathering network routes...");
+              scheduleConnectTimeout(10000);
+              return;
+            }
+
+            console.error("WebRTC timeout before connect", {
+              iceServers: STUDIO_ICE_SERVERS.map((s) => s.urls),
+              localIceCandidateSeen,
+            });
+            setStatus("failed");
+            setStatusNote(
+              "Network Restricted. This can happen on some restricted Wi-Fi networks. Try switching to Mobile Data."
+            );
+          }, delayMs);
+        };
+
+        // Start timeout window (with one automatic extension if ICE is still gathering).
+        scheduleConnectTimeout(15000);
 
         peer.on("stream", (remoteStream: MediaStream) => {
           if (!mountedRef.current) return;
@@ -703,6 +720,7 @@ export default function StudioBridgePage() {
             const typeLike = (signalData as { type?: unknown }).type;
 
             if (candidateLike) {
+              localIceCandidateSeen = true;
               const candidateRecord: IceCandidateRow = {
                 id: `${activeRole}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 from: activeRole,
@@ -754,6 +772,10 @@ export default function StudioBridgePage() {
 
         peer.on("connect", () => {
           if (!mountedRef.current) return;
+          if (connectTimeout !== null) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+          }
           addLog("Peer connected (media + data channel)");
           setStatus("connected");
           setStatusNote("P2P channel established.");
@@ -775,6 +797,10 @@ export default function StudioBridgePage() {
 
         peer.on("error", (err: unknown) => {
           if (!mountedRef.current) return;
+          if (connectTimeout !== null) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+          }
           const msg =
             err instanceof Error
               ? err.message
@@ -786,17 +812,28 @@ export default function StudioBridgePage() {
               ? String((err as { code: unknown }).code)
               : "";
           addLog(`Peer error: ${msg}${code ? ` code=${code}` : ""}`);
+          console.error("WebRTC peer error detail", {
+            message: msg,
+            code,
+            iceServers: STUDIO_ICE_SERVERS.map((s) => s.urls),
+          });
           setPingMs(null);
           if (pingIntervalRef.current) {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
           }
           setStatus("failed");
-          setStatusNote(`WebRTC peer error: ${msg}`);
+          setStatusNote(
+            "Connection failed. This can happen on some restricted Wi-Fi networks (like Universities). Try switching to Mobile Data."
+          );
         });
 
         peer.on("close", () => {
           if (!mountedRef.current) return;
+          if (connectTimeout !== null) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+          }
           setPingMs(null);
           if (pingIntervalRef.current) {
             clearInterval(pingIntervalRef.current);
@@ -805,7 +842,9 @@ export default function StudioBridgePage() {
           if (statusRef.current !== "connected") {
             addLog("Peer closed");
             setStatus("failed");
-            setStatusNote("Peer closed before connection completed.");
+            setStatusNote(
+              "Connection failed. This can happen on some restricted Wi-Fi networks (like Universities). Try switching to Mobile Data."
+            );
           }
         });
 
