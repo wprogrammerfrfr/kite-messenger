@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Peer, { type SignalData } from "simple-peer";
-import { Check, ChevronLeft } from "lucide-react";
+import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { acquireStudioMicStream, decodePeerDataChunk } from "@/lib/studio-bridge-webrtc";
@@ -91,7 +91,13 @@ function playTestTone(): Promise<void> {
 type CheckRowState = "pending" | "done" | "error";
 type KiteSignalState = "checking" | "secure" | "offline" | "error";
 
-function MicLevelBars({ stream }: { stream: MediaStream | null }) {
+function MicLevelBars({
+  stream,
+  onLevel,
+}: {
+  stream: MediaStream | null;
+  onLevel?: (level: number) => void;
+}) {
   const [heights, setHeights] = useState([0.12, 0.12, 0.12, 0.12, 0.12]);
 
   useEffect(() => {
@@ -123,6 +129,8 @@ function MicLevelBars({ stream }: { stream: MediaStream | null }) {
               return Math.min(1, (sum / step / 255) * 1.85);
             });
             setHeights(next);
+            const avg = next.reduce((a, b) => a + b, 0) / next.length;
+            onLevel?.(avg);
           }
           raf = requestAnimationFrame(tick);
         };
@@ -137,7 +145,7 @@ function MicLevelBars({ stream }: { stream: MediaStream | null }) {
       cancelAnimationFrame(raf);
       void ctx?.close();
     };
-  }, [stream]);
+  }, [stream, onLevel]);
 
   return (
     <div
@@ -269,11 +277,18 @@ export default function StudioBridgePage() {
   const [kiteSignal, setKiteSignal] = useState<KiteSignalState>("checking");
   const [enteredStudio, setEnteredStudio] = useState(false);
   const [roomCopyNote, setRoomCopyNote] = useState<string | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [remoteLevel, setRemoteLevel] = useState(0);
+  const [micMuted, setMicMuted] = useState(false);
+  const [speakerMuted, setSpeakerMuted] = useState(false);
+  const [confirmExitOpen, setConfirmExitOpen] = useState(false);
 
   const micDeniedThisInitRef = useRef(false);
 
   const peerRef = useRef<Peer.Instance | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const speakerMutedRef = useRef(false);
   const localMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const pingIntervalRef = useRef<number | null>(null);
@@ -314,6 +329,17 @@ export default function StudioBridgePage() {
   const canEnterStudio =
     Boolean(localMicStream) && audioTestDone && kiteSignalSecure;
 
+  const remoteIsLive = remoteLevel > 0.07;
+
+  useEffect(() => {
+    speakerMutedRef.current = speakerMuted;
+    if (remoteAudioRef.current) remoteAudioRef.current.muted = speakerMuted;
+  }, [speakerMuted]);
+
+  useEffect(() => {
+    if (!remoteStream) setRemoteLevel(0);
+  }, [remoteStream]);
+
   const runAudioTest = useCallback(async () => {
     if (audioTestDone || audioTestPlaying || micPermissionDenied) return;
     setAudioTestPlaying(true);
@@ -328,7 +354,31 @@ export default function StudioBridgePage() {
     }
   }, [audioTestDone, audioTestPlaying, micPermissionDenied]);
 
+  const toggleMicMuted = useCallback(() => {
+    setMicMuted((prev) => {
+      const nextMuted = !prev;
+      const enabled = !nextMuted;
+      localStreamRef.current?.getAudioTracks().forEach((track) => {
+        track.enabled = enabled;
+      });
+      return nextMuted;
+    });
+  }, []);
+
+  const toggleSpeakerMuted = useCallback(() => {
+    setSpeakerMuted((prev) => {
+      const nextMuted = !prev;
+      speakerMutedRef.current = nextMuted;
+      if (remoteAudioRef.current) remoteAudioRef.current.muted = nextMuted;
+      return nextMuted;
+    });
+  }, []);
+
   const returnToLobby = useCallback(() => {
+    setConfirmExitOpen(true);
+  }, []);
+
+  const confirmEndSession = useCallback(() => {
     bridgeTeardownRef.current?.();
     router.push("/studio");
   }, [router]);
@@ -402,6 +452,10 @@ export default function StudioBridgePage() {
           if (remoteAudioRef.current) {
             remoteAudioRef.current.srcObject = null;
           }
+          if (remoteStreamRef.current) {
+            remoteStreamRef.current.getTracks().forEach((track) => track.stop());
+            remoteStreamRef.current = null;
+          }
           if (localMonitorAudioRef.current) {
             localMonitorAudioRef.current.srcObject = null;
           }
@@ -418,8 +472,13 @@ export default function StudioBridgePage() {
 
           if (mountedRef.current) {
             setLocalMicStream(null);
+            setRemoteStream(null);
             setAudioTestDone(false);
             setAudioTestFailed(false);
+            setRemoteLevel(0);
+            setMicMuted(false);
+            setSpeakerMuted(false);
+            speakerMutedRef.current = false;
           }
 
           if (cleanupSessionRef.current) {
@@ -593,10 +652,13 @@ export default function StudioBridgePage() {
         peer.on("stream", (remoteStream: MediaStream) => {
           if (!mountedRef.current) return;
           addLog("Remote audio stream received");
+          remoteStreamRef.current = remoteStream;
+          setRemoteStream(remoteStream);
+          setRemoteLevel(0);
           const remoteEl = remoteAudioRef.current;
           if (remoteEl) {
             remoteEl.srcObject = remoteStream;
-            remoteEl.muted = false;
+            remoteEl.muted = speakerMutedRef.current;
             void remoteEl.play().catch(() => {
               addLog("Remote audio play() blocked (tap page if silent)");
             });
@@ -887,6 +949,65 @@ export default function StudioBridgePage() {
         }}
       />
 
+      <AnimatePresence>
+        {confirmExitOpen ? (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center p-5 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            style={{ background: "rgba(0,0,0,0.55)" }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.97, y: 6 }}
+              transition={{ duration: 0.22, ease: "easeOut" }}
+              className="w-full max-w-md rounded-2xl border border-orange-500/35 bg-stone-950/95 p-6 shadow-2xl"
+              style={{
+                boxShadow: `
+                  0 0 0 1px rgba(255,69,0,0.2),
+                  0 0 44px -18px rgba(255,69,0,0.45),
+                  0 22px 44px -20px rgba(0,0,0,0.7)
+                `,
+                backgroundColor: "#0c0a09",
+              }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="end-session-title"
+            >
+              <h2
+                id="end-session-title"
+                className="text-xl font-bold tracking-tight text-stone-100"
+              >
+                End Session?
+              </h2>
+              <p className="mt-2 text-sm font-medium text-stone-400">
+                Are you sure you want to exit? This will disconnect all participants.
+              </p>
+              <div className="mt-6 flex items-center justify-end gap-3">
+                <motion.button
+                  type="button"
+                  onClick={() => setConfirmExitOpen(false)}
+                  whileTap={{ scale: 0.97 }}
+                  className="rounded-xl border border-emerald-500/35 bg-transparent px-4 py-2.5 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/10"
+                >
+                  Keep Jamming
+                </motion.button>
+                <motion.button
+                  type="button"
+                  onClick={confirmEndSession}
+                  whileTap={{ scale: 0.97 }}
+                  className="rounded-xl border border-orange-500/45 bg-gradient-to-r from-orange-600/90 to-red-600/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:from-orange-500 hover:to-red-500"
+                >
+                  End Session
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
       <audio ref={localMonitorAudioRef} className="sr-only" playsInline muted />
       <audio ref={remoteAudioRef} className="sr-only" playsInline />
 
@@ -1019,6 +1140,87 @@ export default function StudioBridgePage() {
                     </p>
                   </div>
                 ) : null}
+
+                {remoteStream ? (
+                  <div className="mt-4">
+                    <MicLevelBars stream={remoteStream} onLevel={setRemoteLevel} />
+                    <p className="mt-2 text-center text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                      Incoming Remote Level
+                    </p>
+                  </div>
+                ) : null}
+
+                <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-stone-800/70 bg-stone-950/25 px-2 py-2">
+                  <motion.button
+                    type="button"
+                    disabled={!localMicStream || micPermissionDenied}
+                    onClick={toggleMicMuted}
+                    whileTap={{ scale: 0.97 }}
+                    className={`flex flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
+                      micMuted
+                        ? "border-orange-500/35 text-orange-200/90"
+                        : "border-stone-800/70 text-stone-200/90"
+                    }`}
+                    style={
+                      micMuted
+                        ? {
+                            boxShadow: `0 0 26px -10px ${ORANGE}cc`,
+                          }
+                        : undefined
+                    }
+                  >
+                    {micMuted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
+                    <span className="text-[11px]">{micMuted ? "Muted" : "Mic"}</span>
+                  </motion.button>
+
+                  <motion.button
+                    type="button"
+                    disabled={!remoteStream}
+                    onClick={toggleSpeakerMuted}
+                    whileTap={{ scale: 0.97 }}
+                    className={`flex flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
+                      speakerMuted
+                        ? "border-stone-800/70 text-stone-200/90"
+                        : "border-emerald-500/35 text-emerald-200/90"
+                    }`}
+                    style={
+                      speakerMuted
+                        ? undefined
+                        : {
+                            boxShadow: `0 0 26px -10px ${EMERALD}cc`,
+                          }
+                    }
+                  >
+                    {speakerMuted ? (
+                      <VolumeX className="h-4 w-4" aria-hidden />
+                    ) : (
+                      <Volume2 className="h-4 w-4" aria-hidden />
+                    )}
+                    <span className="text-[11px]">{speakerMuted ? "Muted" : "Speaker"}</span>
+                  </motion.button>
+
+                  <motion.button
+                    type="button"
+                    disabled
+                    className="flex flex-1 cursor-default items-center justify-center gap-2 rounded-lg border border-stone-800/70 bg-stone-950/20 px-2 py-2"
+                    style={
+                      remoteIsLive
+                        ? {
+                            boxShadow: `0 0 28px -10px ${EMERALD}dd`,
+                            borderColor: "rgba(34,197,94,0.35)",
+                          }
+                        : undefined
+                    }
+                    aria-label="Live audio indicator"
+                  >
+                    <span
+                      className="text-[11px] font-semibold uppercase tracking-widest"
+                      style={{ color: remoteIsLive ? "rgba(167,243,208,0.95)" : "rgba(148,163,184,0.7)" }}
+                    >
+                      Live
+                    </span>
+                  </motion.button>
+                </div>
               </div>
 
               <motion.button

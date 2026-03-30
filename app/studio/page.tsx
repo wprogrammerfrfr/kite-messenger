@@ -52,6 +52,7 @@ export default function StudioLobbyPage() {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
   const [joinSuccess, setJoinSuccess] = useState(false);
+  const [joinShakeTick, setJoinShakeTick] = useState(0);
   const [welcomeMode, setWelcomeMode] = useState<"loading" | "loggedOut" | "welcomeBack">("loading");
   const [welcomeName, setWelcomeName] = useState<string>("");
 
@@ -143,6 +144,15 @@ export default function StudioLobbyPage() {
     .slice(0, 6)
     .toUpperCase();
 
+  const triggerJoinFailure = useCallback((message: string) => {
+    setJoinError(message);
+    setJoinSuccess(false);
+    setJoinShakeTick((n) => n + 1);
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+      navigator.vibrate(50);
+    }
+  }, []);
+
   const joinSession = useCallback(() => {
     setJoinError(null);
     setJoinSuccess(false);
@@ -165,8 +175,7 @@ export default function StudioLobbyPage() {
           .maybeSingle();
 
         if (error || !data?.session_id) {
-          setJoinError("Signal Not Found");
-          setJoinSuccess(false);
+          triggerJoinFailure("Signal not found. Check the code and try again.");
           return;
         }
 
@@ -176,16 +185,15 @@ export default function StudioLobbyPage() {
           router.push(`/studio-bridge?room=${encodeURIComponent(code)}`);
         }, 450);
       } catch {
-        setJoinError("Signal Not Found");
-        setJoinSuccess(false);
+        triggerJoinFailure("Signal not found. Check the code and try again.");
       } finally {
         setJoining(false);
       }
     })();
-  }, [codeNormalized, joining, router]);
+  }, [codeNormalized, joining, router, triggerJoinFailure]);
 
   return (
-    <div className="relative min-h-screen overflow-hidden text-white antialiased">
+    <div className="relative min-h-screen select-none overflow-hidden text-white antialiased [&_input]:select-text [&_textarea]:select-text">
       <div className="fixed inset-0 bg-[#0c0a09]" aria-hidden />
 
       {/* Dual-tone aurora — orange + emerald */}
@@ -294,7 +302,7 @@ export default function StudioLobbyPage() {
                   Host Session
                 </p>
                 <p className="mt-3 text-sm font-medium leading-relaxed text-stone-400">
-                  Start a new jam and invite others to join your signal.
+                  Start a new session and invite others.
                 </p>
               <MotionLink
                 href="/studio-bridge"
@@ -308,7 +316,7 @@ export default function StudioLobbyPage() {
 
           {/* Card B — Join */}
           <section
-            className="w-full max-w-lg rounded-2xl border border-stone-700/90 bg-stone-950/35 p-6 backdrop-blur-sm"
+            className="relative isolate w-full max-w-lg rounded-2xl border border-stone-700/90 bg-stone-950/35 p-6 backdrop-blur-sm"
             style={{
               boxShadow: `
                 0 0 0 1px rgba(255,69,0,0.08),
@@ -321,7 +329,14 @@ export default function StudioLobbyPage() {
             </p>
             <h2 className="mt-2 text-lg font-bold text-stone-200">Room code</h2>
             <p className="mt-1 text-sm font-medium text-stone-500">6-character signal code from your host.</p>
-            <div className="mt-5 flex justify-center">
+            <motion.div
+              key={joinShakeTick}
+              className="mt-5 flex justify-center"
+              layout
+              animate={{ x: [0, -10, 10, -8, 8, -4, 4, 0] }}
+              transition={{ duration: 0.36, ease: "easeOut" }}
+              style={{ willChange: "transform" }}
+            >
               <input
                 type="text"
                 inputMode="text"
@@ -330,15 +345,20 @@ export default function StudioLobbyPage() {
                 spellCheck={false}
                 maxLength={6}
                 value={codeNormalized}
-                onChange={(e) => setRoomCode(e.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6))}
+                onChange={(e) => {
+                  setRoomCode(e.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6));
+                  setJoinError(null);
+                  setJoinSuccess(false);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") joinSession();
                 }}
                 placeholder="······"
-                className="w-full max-w-[220px] rounded-xl border border-stone-600 bg-black/35 px-4 py-3 text-center font-mono text-lg font-semibold tracking-[0.4em] text-stone-100 placeholder:text-stone-600 outline-none transition focus:border-orange-500/40 focus:ring-1 focus:ring-emerald-500/35"
+                className="w-full max-w-[220px] select-text rounded-xl border border-stone-600 bg-black/35 px-4 py-3 text-center font-mono text-lg font-semibold tracking-[0.4em] text-stone-100 caret-transparent placeholder:text-stone-600 outline-none transition focus:caret-orange-500 focus:border-orange-500/45 focus:ring-2 focus:ring-orange-500/30"
+                style={{ userSelect: "text" }}
                 aria-label="6-character signal code"
               />
-            </div>
+            </motion.div>
             <motion.button
               type="button"
               onClick={joinSession}
@@ -348,32 +368,35 @@ export default function StudioLobbyPage() {
             >
               Join Session
             </motion.button>
-            <AnimatePresence>
-              {joinError ? (
-                <motion.div
-                  key="join_error"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 6 }}
-                  className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-center text-sm font-medium text-red-200"
-                  role="status"
-                >
-                  {joinError}
-                </motion.div>
-              ) : null}
-              {joinSuccess ? (
-                <motion.div
-                  key="join_success"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 6 }}
-                  className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-center text-sm font-medium text-emerald-200"
-                  role="status"
-                >
-                  Signal Found
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
+            <div className="relative mt-4 min-h-[52px]">
+              <AnimatePresence mode="wait">
+                {joinError ? (
+                  <motion.div
+                    key="join_error"
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 6 }}
+                    className="absolute inset-0 rounded-xl border border-orange-500/35 bg-orange-500/10 px-4 py-3 text-center text-sm font-medium text-orange-200"
+                    style={{ textShadow: "0 0 12px rgba(255, 69, 0, 0.45)" }}
+                    role="status"
+                  >
+                    {joinError}
+                  </motion.div>
+                ) : null}
+                {joinSuccess ? (
+                  <motion.div
+                    key="join_success"
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 6 }}
+                    className="absolute inset-0 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-center text-sm font-medium text-emerald-200"
+                    role="status"
+                  >
+                    Signal Found
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </div>
           </section>
 
           <section className="mt-auto pt-4">
