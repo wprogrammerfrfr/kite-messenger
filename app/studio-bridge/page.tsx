@@ -53,7 +53,8 @@ const ICE_SERVERS = [
 ];
 
 function randomSessionId() {
-  return Math.random().toString(36).slice(2, 8);
+  // 6-char uppercase alphanumeric room code.
+  return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
 function addLog(msg: string) {
@@ -267,6 +268,7 @@ export default function StudioBridgePage() {
   const [audioTestFailed, setAudioTestFailed] = useState(false);
   const [kiteSignal, setKiteSignal] = useState<KiteSignalState>("checking");
   const [enteredStudio, setEnteredStudio] = useState(false);
+  const [roomCopyNote, setRoomCopyNote] = useState<string | null>(null);
 
   const micDeniedThisInitRef = useRef(false);
 
@@ -476,7 +478,8 @@ export default function StudioBridgePage() {
         if (cancelled || !mountedRef.current) return;
 
         const url = new URL(window.location.href);
-        const roomParam = url.searchParams.get("room");
+        const roomParamRaw = url.searchParams.get("room");
+        const roomParam = roomParamRaw ? roomParamRaw.toUpperCase() : null;
         const isHost = !roomParam;
         const activeRole: Role = isHost ? "host" : "peer";
         setRole(activeRole);
@@ -842,6 +845,18 @@ export default function StudioBridgePage() {
     }
   };
 
+  const copyRoomCode = async () => {
+    if (!roomId || typeof window === "undefined") return;
+    try {
+      await navigator.clipboard.writeText(roomId);
+      setRoomCopyNote("Room code copied.");
+      window.setTimeout(() => setRoomCopyNote(null), 1400);
+    } catch {
+      setRoomCopyNote("Copy not available.");
+      window.setTimeout(() => setRoomCopyNote(null), 1400);
+    }
+  };
+
   const kitePendingCopy = micPermissionDenied
     ? "Waiting for microphone access..."
     : "Connecting to Kite Signal...";
@@ -898,6 +913,38 @@ export default function StudioBridgePage() {
           <p className="mt-2 text-center text-xs font-semibold uppercase tracking-widest text-stone-500">
             Pre-flight check
           </p>
+
+          {roomId ? (
+            <motion.button
+              type="button"
+              onClick={() => void copyRoomCode()}
+              whileTap={{ scale: 0.97 }}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28 }}
+              className="mt-6 w-full rounded-xl border border-white/[0.10] bg-white/[0.03] px-4 py-3 text-left transition hover:border-orange-500/20 hover:bg-white/[0.05]"
+              aria-label="Copy room code"
+            >
+              <div className="text-[11px] font-semibold uppercase tracking-widest text-stone-500">
+                {role === "host" ? "Your Room Code" : "Room Code"}
+              </div>
+              <div className="mt-2 font-mono text-lg font-bold tracking-[0.28em] text-stone-50">
+                {roomId}
+              </div>
+              <div className="mt-1 text-[11px] text-stone-500">Tap to copy</div>
+            </motion.button>
+          ) : null}
+
+          {roomCopyNote ? (
+            <motion.div
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-3 text-center text-xs font-medium text-emerald-300/90"
+              role="status"
+            >
+              {roomCopyNote}
+            </motion.div>
+          ) : null}
 
           {micPermissionDenied ? (
             <div

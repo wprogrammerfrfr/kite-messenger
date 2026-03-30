@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
@@ -49,6 +49,9 @@ function SystemStatusDot() {
 export default function StudioLobbyPage() {
   const router = useRouter();
   const [roomCode, setRoomCode] = useState("");
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const [joining, setJoining] = useState(false);
+  const [joinSuccess, setJoinSuccess] = useState(false);
   const [welcomeMode, setWelcomeMode] = useState<"loading" | "loggedOut" | "welcomeBack">("loading");
   const [welcomeName, setWelcomeName] = useState<string>("");
 
@@ -135,15 +138,51 @@ export default function StudioLobbyPage() {
     };
   }, []);
 
-  const digitsOnly = roomCode.replace(/\D/g, "").slice(0, 6);
+  const codeNormalized = roomCode
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(0, 6)
+    .toUpperCase();
 
   const joinSession = useCallback(() => {
-    const code = digitsOnly;
+    setJoinError(null);
+    setJoinSuccess(false);
+
+    if (joining) return;
+    const code = codeNormalized;
     console.log("[Studio Lobby] Join Session — room code:", code || "(empty)");
-    if (code.length === 6) {
-      router.push(`/studio-bridge?room=${encodeURIComponent(code)}`);
+    if (code.length !== 6) {
+      setJoinError("Enter the 6-character signal code.");
+      return;
     }
-  }, [digitsOnly, router]);
+
+    setJoining(true);
+    void (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("studio_sessions")
+          .select("session_id")
+          .eq("session_id", code)
+          .maybeSingle();
+
+        if (error || !data?.session_id) {
+          setJoinError("Signal Not Found");
+          setJoinSuccess(false);
+          return;
+        }
+
+        setJoinSuccess(true);
+        // Small beat so the user sees success before the bridge transition.
+        window.setTimeout(() => {
+          router.push(`/studio-bridge?room=${encodeURIComponent(code)}`);
+        }, 450);
+      } catch {
+        setJoinError("Signal Not Found");
+        setJoinSuccess(false);
+      } finally {
+        setJoining(false);
+      }
+    })();
+  }, [codeNormalized, joining, router]);
 
   return (
     <div className="relative min-h-screen overflow-hidden text-white antialiased">
@@ -281,23 +320,23 @@ export default function StudioLobbyPage() {
               Join Session
             </p>
             <h2 className="mt-2 text-lg font-bold text-stone-200">Room code</h2>
-            <p className="mt-1 text-sm font-medium text-stone-500">6-digit code from your host.</p>
+            <p className="mt-1 text-sm font-medium text-stone-500">6-character signal code from your host.</p>
             <div className="mt-5 flex justify-center">
               <input
                 type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
+                inputMode="text"
+                pattern="[A-Za-z0-9]*"
                 autoComplete="off"
                 spellCheck={false}
                 maxLength={6}
-                value={digitsOnly}
-                onChange={(e) => setRoomCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                value={codeNormalized}
+                onChange={(e) => setRoomCode(e.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6))}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") joinSession();
                 }}
                 placeholder="······"
                 className="w-full max-w-[220px] rounded-xl border border-stone-600 bg-black/35 px-4 py-3 text-center font-mono text-lg font-semibold tracking-[0.4em] text-stone-100 placeholder:text-stone-600 outline-none transition focus:border-orange-500/40 focus:ring-1 focus:ring-emerald-500/35"
-                aria-label="6-digit room code"
+                aria-label="6-character signal code"
               />
             </div>
             <motion.button
@@ -305,9 +344,36 @@ export default function StudioLobbyPage() {
               onClick={joinSession}
               className="mt-5 w-full rounded-xl border border-orange-500/25 bg-transparent px-4 py-3 text-sm font-semibold text-stone-200 transition hover:border-emerald-500/35 hover:bg-white/[0.04]"
               whileTap={{ scale: 0.97 }}
+              disabled={joining}
             >
               Join Session
             </motion.button>
+            <AnimatePresence>
+              {joinError ? (
+                <motion.div
+                  key="join_error"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 6 }}
+                  className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-center text-sm font-medium text-red-200"
+                  role="status"
+                >
+                  {joinError}
+                </motion.div>
+              ) : null}
+              {joinSuccess ? (
+                <motion.div
+                  key="join_success"
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 6 }}
+                  className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-center text-sm font-medium text-emerald-200"
+                  role="status"
+                >
+                  Signal Found
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
           </section>
 
           <section className="mt-auto pt-4">
