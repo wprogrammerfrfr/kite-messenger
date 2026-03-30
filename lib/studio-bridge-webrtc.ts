@@ -23,12 +23,13 @@ export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
 ];
 
-/** Force TURN relay behavior that survives highly restricted networks (meturoam-like). */
+/** Adaptive behavior for strict networks + VPN tunnel fallback paths. */
 export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
   iceServers: STUDIO_ICE_SERVERS,
-  iceTransportPolicy: "relay",
+  iceTransportPolicy: "all",
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",
+  iceCandidatePoolSize: 10,
 };
 
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */

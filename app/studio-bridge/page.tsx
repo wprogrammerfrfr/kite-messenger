@@ -33,6 +33,8 @@ type StudioSessionRow = {
   offer: SignalData | null;
   answer: SignalData | null;
   ice_candidates: IceCandidateRow[] | null;
+  host_user_id: string | null;
+  guest_user_id: string | null;
 };
 
 type SessionHistoryInsert = {
@@ -311,6 +313,8 @@ export default function StudioBridgePage() {
   const lostCountdownIntervalRef = useRef<number | null>(null);
   const sessionStartedAtRef = useRef<number | null>(null);
   const historySavedRef = useRef(false);
+  const forceResyncTimerRef = useRef<number | null>(null);
+  const forceResyncAttemptedRef = useRef(false);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -369,6 +373,13 @@ export default function StudioBridgePage() {
       lostCountdownIntervalRef.current = null;
     }
     setConnectionLostCountdown(null);
+  }, []);
+
+  const clearForceResyncTimer = useCallback(() => {
+    if (forceResyncTimerRef.current !== null) {
+      clearTimeout(forceResyncTimerRef.current);
+      forceResyncTimerRef.current = null;
+    }
   }, []);
 
   const beginLostCountdown = useCallback(() => {
@@ -548,10 +559,13 @@ export default function StudioBridgePage() {
     let connectTimeout: number | null = null;
     let localIceCandidateSeen = false;
     let timeoutExtendedForIce = false;
+    let sessionUserId: string | null = null;
     leaveSignalSentRef.current = false;
     leaveSignalReceivedRef.current = false;
     historySavedRef.current = false;
     sessionStartedAtRef.current = Date.now();
+    clearForceResyncTimer();
+    forceResyncAttemptedRef.current = new URL(window.location.href).searchParams.get("resync") === "1";
     setCollaboratorLeft(false);
     clearLostCountdown();
 
@@ -567,6 +581,7 @@ export default function StudioBridgePage() {
             clearTimeout(connectTimeout);
             connectTimeout = null;
           }
+          clearForceResyncTimer();
           if (pingIntervalRef.current) {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
@@ -665,6 +680,8 @@ export default function StudioBridgePage() {
         const isHost = !roomParam;
         const activeRole: Role = isHost ? "host" : "peer";
         setRole(activeRole);
+        const { data: authData } = await supabase.auth.getUser();
+        sessionUserId = authData.user?.id ?? null;
 
         const sessionId = roomParam || randomSessionId();
         setRoomId(sessionId);
@@ -685,6 +702,8 @@ export default function StudioBridgePage() {
               offer: null,
               answer: null,
               ice_candidates: [],
+              host_user_id: sessionUserId,
+              guest_user_id: null,
             })
             .select()
             .single<StudioSessionRow>();
@@ -704,13 +723,20 @@ export default function StudioBridgePage() {
 
           const { data: fetched, error: fetchErr } = await supabase
             .from("studio_sessions")
-            .select("session_id, offer, answer, ice_candidates")
+            .select("session_id, offer, answer, ice_candidates, host_user_id, guest_user_id")
             .eq("session_id", sessionId)
             .single<StudioSessionRow>();
 
           if (fetchErr || !fetched) throw new Error("Room not found.");
           existingRow = fetched;
           existingRowRef.current = fetched;
+
+          if (sessionUserId) {
+            await supabase
+              .from("studio_sessions")
+              .update({ guest_user_id: sessionUserId })
+              .eq("session_id", sessionId);
+          }
         }
 
         if (cancelled || !mountedRef.current) return;
@@ -764,6 +790,13 @@ export default function StudioBridgePage() {
         addLog("Creating simple-peer with resolved mic stream (default browser SDP)...");
         setStatusNote("Bypassing Firewall... (Relay Active)");
 
+        const hostUserId = isHost ? sessionUserId : existingRow?.host_user_id ?? null;
+        const isPolitePeer =
+          !!sessionUserId &&
+          !!hostUserId &&
+          sessionUserId.localeCompare(hostUserId) > 0;
+        addLog(`Perfect negotiation role: ${isPolitePeer ? "polite" : "impolite"}`);
+
         const peer = new Peer({
           initiator: isHost,
           trickle: true,
@@ -803,6 +836,28 @@ export default function StudioBridgePage() {
         // Start timeout window (with one automatic extension if ICE is still gathering).
         scheduleConnectTimeout(15000);
 
+        forceResyncTimerRef.current = window.setTimeout(() => {
+          if (!mountedRef.current || cancelled || statusRef.current !== "connecting") return;
+          if (forceResyncAttemptedRef.current) return;
+          forceResyncAttemptedRef.current = true;
+          void (async () => {
+            try {
+              setStatusNote("Force re-syncing signaling...");
+              addLog("Force re-sync triggered after 10s connecting");
+              await supabase
+                .from("studio_sessions")
+                .update({ offer: null, answer: null, ice_candidates: [] })
+                .eq("session_id", sessionId);
+            } catch (err) {
+              console.error("Force re-sync update failed", err);
+            } finally {
+              const nextUrl = new URL(window.location.href);
+              nextUrl.searchParams.set("resync", "1");
+              window.location.replace(nextUrl.toString());
+            }
+          })();
+        }, 10000);
+
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {
           rawPc.addEventListener("iceconnectionstatechange", () => {
@@ -812,6 +867,7 @@ export default function StudioBridgePage() {
             if (leaveSignalReceivedRef.current) return;
             if (iceState === "connected" || iceState === "completed") {
               clearLostCountdown();
+              clearForceResyncTimer();
               if (statusRef.current !== "connected") {
                 setStatus("connected");
                 setStatusNote("P2P channel established.");
@@ -932,6 +988,7 @@ export default function StudioBridgePage() {
         peer.on("connect", () => {
           if (!mountedRef.current) return;
           clearLostCountdown();
+          clearForceResyncTimer();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -961,6 +1018,7 @@ export default function StudioBridgePage() {
             clearTimeout(connectTimeout);
             connectTimeout = null;
           }
+          clearForceResyncTimer();
           const msg =
             err instanceof Error
               ? err.message
@@ -991,6 +1049,7 @@ export default function StudioBridgePage() {
         peer.on("close", () => {
           if (!mountedRef.current) return;
           clearLostCountdown();
+          clearForceResyncTimer();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -1107,7 +1166,7 @@ export default function StudioBridgePage() {
       bridgeTeardownRef.current = null;
       performTeardown();
     };
-  }, [beginLostCountdown, clearLostCountdown]);
+  }, [beginLostCountdown, clearForceResyncTimer, clearLostCountdown]);
 
   const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
