@@ -2,25 +2,11 @@
  * Studio bridge WebRTC helpers (browser-only callers must guard with typeof window).
  */
 
-/** Shared ICE server config (TURN relay first for strict networks). */
+/** Shared ICE server config (simple STUN only for localhost/basic networks). */
 export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
-  // Prioritize TCP/443 relay first for strict networks (campus/corporate firewalls).
-  {
-    urls: "turn:open.metered.ca:443?transport=tcp",
-    username: "7cbd6d02cf78e3bc5683bb2a",
-    credential: "CPfbkDJuKleKcmkv",
-  },
-  {
-    urls: "turn:open.metered.ca:443",
-    username: "7cbd6d02cf78e3bc5683bb2a",
-    credential: "CPfbkDJuKleKcmkv",
-  },
-  {
-    urls: "turn:open.metered.ca:80",
-    username: "7cbd6d02cf78e3bc5683bb2a",
-    credential: "CPfbkDJuKleKcmkv",
-  },
   { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
 ];
 
 /** Adaptive behavior for strict networks + VPN tunnel fallback paths. */

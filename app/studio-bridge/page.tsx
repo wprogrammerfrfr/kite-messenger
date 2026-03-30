@@ -57,15 +57,6 @@ function addLog(msg: string) {
   console.log(msg);
 }
 
-function setAudioBitrate(sdp: string): string {
-  const fmtp111Line = /a=fmtp:111[^\r\n]*/;
-  if (!fmtp111Line.test(sdp)) return sdp;
-  return sdp.replace(fmtp111Line, (line) => {
-    if (line.includes("maxaveragebitrate")) return line;
-    return `${line};maxaveragebitrate=64000`;
-  });
-}
-
 /** ~1s clean sine tone for speaker check (Web Audio API). */
 function playTestTone(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -317,8 +308,6 @@ export default function StudioBridgePage() {
   const lostCountdownIntervalRef = useRef<number | null>(null);
   const sessionStartedAtRef = useRef<number | null>(null);
   const historySavedRef = useRef(false);
-  const forceResyncTimerRef = useRef<number | null>(null);
-  const forceResyncAttemptedRef = useRef(false);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -377,13 +366,6 @@ export default function StudioBridgePage() {
       lostCountdownIntervalRef.current = null;
     }
     setConnectionLostCountdown(null);
-  }, []);
-
-  const clearForceResyncTimer = useCallback(() => {
-    if (forceResyncTimerRef.current !== null) {
-      clearTimeout(forceResyncTimerRef.current);
-      forceResyncTimerRef.current = null;
-    }
   }, []);
 
   const beginLostCountdown = useCallback(() => {
@@ -569,8 +551,6 @@ export default function StudioBridgePage() {
     leaveSignalReceivedRef.current = false;
     historySavedRef.current = false;
     sessionStartedAtRef.current = Date.now();
-    clearForceResyncTimer();
-    forceResyncAttemptedRef.current = new URL(window.location.href).searchParams.get("resync") === "1";
     setCollaboratorLeft(false);
     clearLostCountdown();
     setMicSyncTimedOut(false);
@@ -597,7 +577,6 @@ export default function StudioBridgePage() {
             clearTimeout(micSyncTimeout);
             micSyncTimeout = null;
           }
-          clearForceResyncTimer();
           if (pingIntervalRef.current) {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
@@ -703,6 +682,111 @@ export default function StudioBridgePage() {
         setRoomId(sessionId);
         let existingRow: StudioSessionRow | null = null;
 
+        if (isHost) {
+          addLog("Host mode: inserting studio_sessions row...");
+          setStatusNote("Creating session...");
+
+          const hostUrl = new URL(window.location.href);
+          hostUrl.searchParams.set("room", sessionId);
+          setInviteLink(hostUrl.toString());
+
+          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
+            {
+              session_id: sessionId,
+              room_code: sessionId,
+              offer: null,
+              answer: null,
+              ice_candidates: [],
+              host_user_id: sessionUserId,
+              guest_user_id: null,
+            },
+            { onConflict: "session_id" }
+          );
+          if (insertErr) throw insertErr;
+
+          cleanupSessionRef.current = async () => {
+            addLog("Cleaning up studio_sessions row...");
+            await supabase.from("studio_sessions").delete().eq("session_id", sessionId);
+          };
+        } else {
+          addLog("Peer mode: fetching studio_sessions row...");
+          setStatusNote("Fetching room...");
+
+          const { data: fetched, error: fetchErr } = await supabase
+            .from("studio_sessions")
+            .select("session_id, offer, answer, ice_candidates, host_user_id, guest_user_id")
+            .eq("session_id", sessionId)
+            .single<StudioSessionRow>();
+
+          if (fetchErr || !fetched) throw new Error("Room not found.");
+          existingRow = fetched;
+          existingRowRef.current = fetched;
+
+          if (sessionUserId) {
+            await supabase
+              .from("studio_sessions")
+              .update({ guest_user_id: sessionUserId })
+              .eq("session_id", sessionId);
+          }
+        }
+
+        const channel = supabase
+          .channel(`room_code:${sessionId}`)
+          .on("broadcast", { event: "session-control" }, (payload) => {
+            const msg = payload.payload as SessionControlMessage | undefined;
+            if (!msg || msg.type !== "LEAVE") return;
+            if (msg.room !== sessionId) return;
+            if (msg.from === activeRole) return;
+            leaveSignalReceivedRef.current = true;
+            addLog("Collaborator LEAVE received");
+            clearLostCountdown();
+            setCollaboratorLeft(true);
+            setStatus("failed");
+            setStatusNote("Collaborator has left the session.");
+          })
+          .on(
+            "postgres_changes",
+            {
+              event: "UPDATE",
+              schema: "public",
+              table: "studio_sessions",
+              filter: `session_id=eq.${sessionId}`,
+            },
+            (payload) => {
+              const nextRow = payload.new as StudioSessionRow;
+              if (!nextRow || typeof nextRow !== "object") return;
+              const peer = peerRef.current;
+
+              if (activeRole === "host") {
+                if (
+                  peer &&
+                  !appliedRemoteSignalRef.current &&
+                  nextRow.answer &&
+                  typeof nextRow.answer === "object"
+                ) {
+                  appliedRemoteSignalRef.current = true;
+                  addLog("Answer received");
+                  peer.signal(nextRow.answer);
+                  setStatusNote("Answer received. Negotiating...");
+                }
+              } else if (
+                peer &&
+                !appliedRemoteSignalRef.current &&
+                nextRow.offer &&
+                typeof nextRow.offer === "object"
+              ) {
+                appliedRemoteSignalRef.current = true;
+                addLog("Offer received");
+                peer.signal(nextRow.offer);
+                setStatusNote("Offer received. Creating answer...");
+              }
+
+              applyRemoteIce(nextRow.ice_candidates, activeRole);
+            }
+          )
+          .subscribe();
+        channelRef.current = channel;
+
         // 1) Prioritize microphone access before signaling / peer setup.
         setStatusNote("Syncing microphone...");
         let permissionExplicitlyDenied = false;
@@ -793,58 +877,8 @@ export default function StudioBridgePage() {
           return;
         }
 
-        if (isHost) {
-          addLog("Host mode: inserting studio_sessions row...");
-          setStatusNote("Creating session row...");
-
-          const hostUrl = new URL(window.location.href);
-          hostUrl.searchParams.set("room", sessionId);
-          setInviteLink(hostUrl.toString());
-
-          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
-            {
-              session_id: sessionId,
-              room_code: sessionId,
-              offer: null,
-              answer: null,
-              ice_candidates: [],
-              host_user_id: sessionUserId,
-              guest_user_id: null,
-            },
-            { onConflict: "session_id" }
-          );
-          if (insertErr) throw insertErr;
-
-          cleanupSessionRef.current = async () => {
-            addLog("Cleaning up studio_sessions row...");
-            await supabase.from("studio_sessions").delete().eq("session_id", sessionId);
-          };
-        } else {
-          addLog("Peer mode: fetching studio_sessions row...");
-          setStatusNote("Fetching room...");
-
-          const { data: fetched, error: fetchErr } = await supabase
-            .from("studio_sessions")
-            .select("session_id, offer, answer, ice_candidates, host_user_id, guest_user_id")
-            .eq("session_id", sessionId)
-            .single<StudioSessionRow>();
-
-          if (fetchErr || !fetched) throw new Error("Room not found.");
-          existingRow = fetched;
-          existingRowRef.current = fetched;
-
-          if (sessionUserId) {
-            await supabase
-              .from("studio_sessions")
-              .update({ guest_user_id: sessionUserId })
-              .eq("session_id", sessionId);
-          }
-        }
-
-        if (cancelled || !mountedRef.current) return;
-
         addLog("Creating simple-peer with resolved mic stream (default browser SDP)...");
-        setStatusNote("Bypassing Firewall... (Relay Active)");
+        setStatusNote("Starting peer connection...");
 
         addLog(`Perfect negotiation role: ${isHost ? "polite host (waits)" : "impolite guest (initiates)"}`);
 
@@ -853,7 +887,6 @@ export default function StudioBridgePage() {
           trickle: true,
           stream: mediaStream,
           config: STUDIO_PEER_CONNECTION_CONFIG,
-          sdpTransform: setAudioBitrate,
         });
         peerRef.current = peer;
 
@@ -887,28 +920,6 @@ export default function StudioBridgePage() {
         // Start timeout window (with one automatic extension if ICE is still gathering).
         scheduleConnectTimeout(15000);
 
-        forceResyncTimerRef.current = window.setTimeout(() => {
-          if (!mountedRef.current || cancelled || statusRef.current !== "connecting") return;
-          if (forceResyncAttemptedRef.current) return;
-          forceResyncAttemptedRef.current = true;
-          void (async () => {
-            try {
-              setStatusNote("Force re-syncing signaling...");
-              addLog("Force re-sync triggered after 10s connecting");
-              await supabase
-                .from("studio_sessions")
-                .update({ offer: null, answer: null, ice_candidates: [] })
-                .eq("session_id", sessionId);
-            } catch (err) {
-              console.error("Force re-sync update failed", err);
-            } finally {
-              const nextUrl = new URL(window.location.href);
-              nextUrl.searchParams.set("resync", "1");
-              window.location.replace(nextUrl.toString());
-            }
-          })();
-        }, 10000);
-
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {
           rawPc.addEventListener("iceconnectionstatechange", () => {
@@ -918,7 +929,6 @@ export default function StudioBridgePage() {
             if (leaveSignalReceivedRef.current) return;
             if (iceState === "connected" || iceState === "completed") {
               clearLostCountdown();
-              clearForceResyncTimer();
               if (statusRef.current !== "connected") {
                 setStatus("connected");
                 setStatusNote("P2P channel established.");
@@ -1039,7 +1049,6 @@ export default function StudioBridgePage() {
         peer.on("connect", () => {
           if (!mountedRef.current) return;
           clearLostCountdown();
-          clearForceResyncTimer();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -1069,7 +1078,6 @@ export default function StudioBridgePage() {
             clearTimeout(connectTimeout);
             connectTimeout = null;
           }
-          clearForceResyncTimer();
           const msg =
             err instanceof Error
               ? err.message
@@ -1100,7 +1108,6 @@ export default function StudioBridgePage() {
         peer.on("close", () => {
           if (!mountedRef.current) return;
           clearLostCountdown();
-          clearForceResyncTimer();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -1118,60 +1125,6 @@ export default function StudioBridgePage() {
             );
           }
         });
-
-        const channel = supabase
-          .channel(`room_code:${sessionId}`)
-          .on("broadcast", { event: "session-control" }, (payload) => {
-            const msg = payload.payload as SessionControlMessage | undefined;
-            if (!msg || msg.type !== "LEAVE") return;
-            if (msg.room !== sessionId) return;
-            if (msg.from === activeRole) return;
-            leaveSignalReceivedRef.current = true;
-            addLog("Collaborator LEAVE received");
-            clearLostCountdown();
-            setCollaboratorLeft(true);
-            setStatus("failed");
-            setStatusNote("Collaborator has left the session.");
-          })
-          .on(
-            "postgres_changes",
-            {
-              event: "UPDATE",
-              schema: "public",
-              table: "studio_sessions",
-              filter: `session_id=eq.${sessionId}`,
-            },
-            (payload) => {
-              const nextRow = payload.new as StudioSessionRow;
-              if (!nextRow || typeof nextRow !== "object") return;
-
-              if (activeRole === "host") {
-                if (
-                  !appliedRemoteSignalRef.current &&
-                  nextRow.answer &&
-                  typeof nextRow.answer === "object"
-                ) {
-                  appliedRemoteSignalRef.current = true;
-                  addLog("Answer received");
-                  peer.signal(nextRow.answer);
-                  setStatusNote("Answer received. Negotiating...");
-                }
-              } else if (
-                !appliedRemoteSignalRef.current &&
-                nextRow.offer &&
-                typeof nextRow.offer === "object"
-              ) {
-                appliedRemoteSignalRef.current = true;
-                addLog("Offer received");
-                peer.signal(nextRow.offer);
-                setStatusNote("Offer received. Creating answer...");
-              }
-
-              applyRemoteIce(nextRow.ice_candidates, activeRole);
-            }
-          )
-          .subscribe();
-        channelRef.current = channel;
 
         if (!isHost) {
           const initial = existingRowRef.current;
@@ -1218,7 +1171,7 @@ export default function StudioBridgePage() {
       micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
     };
-  }, [beginLostCountdown, clearForceResyncTimer, clearLostCountdown, retryInitTick]);
+  }, [beginLostCountdown, clearLostCountdown, retryInitTick]);
 
   const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
@@ -1359,7 +1312,7 @@ export default function StudioBridgePage() {
           </p>
           <div className="mt-4 flex justify-center">
             <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-widest text-emerald-300">
-              Relay Active (Port 443)
+              Standard P2P Signaling
             </span>
           </div>
 

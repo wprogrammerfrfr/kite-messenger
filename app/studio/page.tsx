@@ -187,7 +187,7 @@ export default function StudioLobbyPage() {
     }
   }, []);
 
-  const joinSession = useCallback(() => {
+  const handleJoin = useCallback(() => {
     setJoinError(null);
     setJoinSuccess(false);
 
@@ -206,34 +206,8 @@ export default function StudioLobbyPage() {
         const { data, error } = await supabase
           .from("studio_sessions")
           .select("session_id, room_code")
-          .ilike("room_code", lookupCode)
+          .eq("room_code", lookupCode)
           .maybeSingle();
-
-        if (error) {
-          console.error("[Studio Lobby] Join query failed (room_code lookup)", error);
-          const { data: fallbackData, error: fallbackError } = await supabase
-            .from("studio_sessions")
-            .select("session_id")
-            .eq("session_id", lookupCode)
-            .maybeSingle();
-
-          if (fallbackError) {
-            console.error("[Studio Lobby] Join query failed (session_id fallback)", fallbackError);
-            triggerJoinFailure("Signal not found. Check the code and try again.");
-            return;
-          }
-
-          if (!fallbackData?.session_id) {
-            triggerJoinFailure("Signal not found. Check the code and try again.");
-            return;
-          }
-
-          setJoinSuccess(true);
-          window.setTimeout(() => {
-            router.push(`/studio-bridge?room=${encodeURIComponent(fallbackData.session_id)}`);
-          }, 450);
-          return;
-        }
 
         if (error || !data?.session_id) {
           triggerJoinFailure("Signal not found. Check the code and try again.");
@@ -414,7 +388,7 @@ export default function StudioLobbyPage() {
                   setJoinSuccess(false);
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") joinSession();
+                  if (e.key === "Enter") handleJoin();
                 }}
                 placeholder="······"
                 className="w-full max-w-[220px] select-text rounded-xl border border-stone-600 bg-black/35 px-4 py-3 text-center font-mono text-lg font-semibold tracking-[0.4em] text-stone-100 caret-transparent placeholder:text-stone-600 outline-none transition focus:caret-orange-500 focus:border-orange-500/45 focus:ring-2 focus:ring-orange-500/30"
@@ -424,7 +398,7 @@ export default function StudioLobbyPage() {
             </motion.div>
             <motion.button
               type="button"
-              onClick={joinSession}
+              onClick={handleJoin}
               className="mt-5 w-full rounded-xl border border-orange-500/25 bg-transparent px-4 py-3 text-sm font-semibold text-stone-200 transition hover:border-emerald-500/35 hover:bg-white/[0.04]"
               whileTap={{ scale: 0.97 }}
               disabled={joining}
