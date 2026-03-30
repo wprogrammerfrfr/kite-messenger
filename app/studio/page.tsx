@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
 
 /** Kite accent — matches GlobalNavShell active tab / support theme. */
 const ORANGE = "#ff4500";
@@ -48,6 +49,91 @@ function SystemStatusDot() {
 export default function StudioLobbyPage() {
   const router = useRouter();
   const [roomCode, setRoomCode] = useState("");
+  const [welcomeMode, setWelcomeMode] = useState<"loading" | "loggedOut" | "welcomeBack">("loading");
+  const [welcomeName, setWelcomeName] = useState<string>("");
+
+  useEffect(() => {
+    let mounted = true;
+    let callId = 0;
+
+    const resolveFallbackName = (user: {
+      id?: string;
+      email?: string | null;
+      user_metadata?: unknown;
+    }) => {
+      const meta = (user?.user_metadata ?? {}) as unknown as Record<string, unknown>;
+      const nameFromMeta =
+        (meta.display_name as string | undefined) ||
+        (meta.full_name as string | undefined) ||
+        (meta.name as string | undefined) ||
+        (meta.username as string | undefined);
+
+      const emailPrefix =
+        typeof user.email === "string" && user.email.includes("@")
+          ? user.email.split("@")[0]
+          : undefined;
+
+      const idPrefix =
+        typeof user.id === "string" ? user.id.slice(0, 8) : undefined;
+
+      return nameFromMeta || emailPrefix || idPrefix || "Kite Member";
+    };
+
+    const loadWelcome = async (session: unknown) => {
+      const myCall = ++callId;
+      if (!mounted) return;
+
+      const s = session as
+        | { user?: { id: string; email?: string | null; user_metadata?: unknown } }
+        | null;
+
+      if (!s?.user?.id) {
+        if (!mounted || myCall !== callId) return;
+        setWelcomeMode("loggedOut");
+        setWelcomeName("");
+        return;
+      }
+
+      const user = s.user;
+      setWelcomeMode("loading");
+
+      let nickname: string | null = null;
+      try {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("nickname")
+          .eq("id", user.id)
+          .maybeSingle();
+
+        if (!mounted || myCall !== callId) return;
+
+        if (!error && data?.nickname) {
+          const n = String(data.nickname).trim();
+          nickname = n.length > 0 ? n : null;
+        }
+      } catch {
+        // Best-effort: if the profile row fails, we fall back to auth metadata/email.
+      }
+
+      if (!mounted || myCall !== callId) return;
+      const fallback = resolveFallbackName(user);
+      setWelcomeName(nickname ?? fallback);
+      setWelcomeMode("welcomeBack");
+    };
+
+    void supabase.auth.getSession().then(({ data: { session } }) => {
+      void loadWelcome(session);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      void loadWelcome(session);
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
   const digitsOnly = roomCode.replace(/\D/g, "").slice(0, 6);
 
@@ -80,48 +166,74 @@ export default function StudioLobbyPage() {
       />
       <div className="pointer-events-none fixed inset-0 z-0 blur-3xl" aria-hidden>
         <div
-          className="absolute -left-20 top-1/4 h-72 w-72 rounded-full opacity-50"
+          className="absolute -left-28 top-1/4 h-96 w-96 rounded-full opacity-50"
           style={{ background: `radial-gradient(circle, ${ORANGE}44 0%, transparent 70%)` }}
         />
         <div
-          className="absolute -right-16 top-1/3 h-80 w-80 rounded-full opacity-45"
+          className="absolute -right-20 top-1/3 h-[26rem] w-[26rem] rounded-full opacity-45"
           style={{ background: `radial-gradient(circle, ${EMERALD}40 0%, transparent 70%)` }}
         />
         <div
-          className="absolute bottom-32 left-1/3 h-64 w-64 -translate-x-1/2 rounded-full opacity-35"
+          className="absolute bottom-28 left-1/3 h-72 w-72 -translate-x-1/2 rounded-full opacity-35"
           style={{
             background: `radial-gradient(circle, rgba(255,69,0,0.35) 0%, rgba(34,197,94,0.25) 45%, transparent 70%)`,
           }}
         />
       </div>
 
-      <div className="relative z-10 mx-auto flex min-h-screen max-w-lg flex-col px-5 pb-28 pt-8 sm:px-6 sm:pt-10 lg:pb-12">
-        <motion.header
-          className="mb-8"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-        >
-          <div className="flex items-center gap-2">
-            <SystemStatusDot />
-            <span className="text-xs font-semibold uppercase tracking-widest text-stone-400">
-              System: Ready
-            </span>
-          </div>
-          <h1 className="mt-4 bg-gradient-to-r from-orange-400 via-stone-100 to-emerald-400 bg-clip-text text-3xl font-bold tracking-tight text-transparent">
-            Kite Studio
-          </h1>
-        </motion.header>
+      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-[1200px] flex-col px-5 pb-10 pt-8 sm:px-8 sm:pt-10">
+        <div className="relative">
+          <motion.button
+            type="button"
+            onClick={() => router.push("/chat")}
+            whileTap={{ scale: 0.97 }}
+            className="absolute right-0 top-0 rounded-lg border border-white/[0.12] bg-white/[0.03] px-3 py-1.5 text-xs font-medium text-white/55 transition hover:border-orange-500/25 hover:border-emerald-500/20 hover:bg-white/[0.05] hover:text-white/80"
+            aria-label="Exit to chat"
+          >
+            Exit to Chat
+          </motion.button>
+
+          <motion.header
+            className="mb-8"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <div className="flex items-center gap-2">
+              <SystemStatusDot />
+              <span className="text-xs font-semibold uppercase tracking-widest text-stone-400">
+                System: Ready
+              </span>
+            </div>
+
+            <p className="mt-4 text-sm font-medium text-stone-300/90">
+              {welcomeMode === "loggedOut" ? (
+                "Welcome to Kite Studio"
+              ) : (
+                <>
+                  Welcome back,{" "}
+                  <span className="bg-gradient-to-r from-orange-400 via-stone-100 to-emerald-400 bg-clip-text text-transparent">
+                    {welcomeMode === "loading" ? "Loading..." : welcomeName}
+                  </span>
+                </>
+              )}
+            </p>
+
+            <h1 className="mt-3 bg-gradient-to-r from-orange-400 via-stone-100 to-emerald-400 bg-clip-text text-3xl font-bold tracking-tight text-transparent">
+              Kite Studio
+            </h1>
+          </motion.header>
+        </div>
 
         <motion.div
-          className="flex flex-1 flex-col gap-5"
+          className="flex flex-1 flex-col items-center gap-5"
           initial={{ opacity: 0, y: 28 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.45, delay: 0.06, ease: [0.22, 1, 0.36, 1] }}
         >
           {/* Card A — Host (orange → green border) */}
           <section
-            className="rounded-2xl p-px shadow-2xl"
+            className="w-full max-w-lg rounded-2xl p-px shadow-2xl"
             style={{
               background: `linear-gradient(135deg, rgba(255,69,0,0.55) 0%, rgba(68,64,60,0.4) 42%, rgba(34,197,94,0.5) 100%)`,
               boxShadow: `
@@ -139,12 +251,12 @@ export default function StudioLobbyPage() {
                   "linear-gradient(165deg, rgba(12, 10, 9, 0.97) 0%, rgba(18, 16, 14, 0.96) 100%)",
               }}
             >
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-stone-500">
-                Host
-              </p>
-              <p className="mt-3 text-sm font-medium leading-relaxed text-stone-400">
-                Start a new jam.
-              </p>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-stone-500">
+                  Host Session
+                </p>
+                <p className="mt-3 text-sm font-medium leading-relaxed text-stone-400">
+                  Start a new jam and invite others to join your signal.
+                </p>
               <MotionLink
                 href="/studio-bridge"
                 className="mt-6 flex w-full items-center justify-center rounded-xl border border-orange-500/35 bg-gradient-to-r from-orange-500/15 to-emerald-500/15 px-4 py-3 text-sm font-semibold text-stone-100 transition hover:from-orange-500/25 hover:to-emerald-500/25 hover:border-orange-500/45"
@@ -157,7 +269,7 @@ export default function StudioLobbyPage() {
 
           {/* Card B — Join */}
           <section
-            className="rounded-2xl border border-stone-700/90 bg-stone-950/35 p-6 backdrop-blur-sm"
+            className="w-full max-w-lg rounded-2xl border border-stone-700/90 bg-stone-950/35 p-6 backdrop-blur-sm"
             style={{
               boxShadow: `
                 0 0 0 1px rgba(255,69,0,0.08),
@@ -166,7 +278,7 @@ export default function StudioLobbyPage() {
             }}
           >
             <p className="text-[11px] font-semibold uppercase tracking-widest text-stone-500">
-              Join
+              Join Session
             </p>
             <h2 className="mt-2 text-lg font-bold text-stone-200">Room code</h2>
             <p className="mt-1 text-sm font-medium text-stone-500">6-digit code from your host.</p>

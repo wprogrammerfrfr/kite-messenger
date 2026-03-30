@@ -37,6 +37,7 @@ function getStoredLangForPrefetch(): Language {
 
 export default function GlobalNavShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const isStudioMode = typeof pathname === "string" && pathname.startsWith("/studio");
   const [navMounted, setNavMounted] = useState(false);
   const [hasSession, setHasSession] = useState<boolean | null>(null);
   const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
@@ -153,7 +154,7 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
       }
       className="min-h-screen"
     >
-      {navMounted && hasSession ? (
+      {navMounted && hasSession && !isStudioMode ? (
         <>
           {/* Desktop nav sidebar */}
           <aside
@@ -244,9 +245,13 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
 
       {/* Main content with fade-in (client-only motion to avoid SSR / hydration drift) */}
       <main
-        className={`min-h-screen ${
-          hasSession ? "lg:pl-[var(--desktop-sidebar-width)] pb-[var(--bottom-nav-height)]" : ""
-        }`}
+        className={
+          isStudioMode
+            ? "min-h-screen w-full"
+            : `min-h-screen ${
+                hasSession ? "lg:pl-[var(--desktop-sidebar-width)] pb-[var(--bottom-nav-height)]" : ""
+              }`
+        }
       >
         {children}
       </main>
