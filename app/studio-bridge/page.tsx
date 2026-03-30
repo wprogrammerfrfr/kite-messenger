@@ -275,6 +275,8 @@ export default function StudioBridgePage() {
   const [pingMs, setPingMs] = useState<number | null>(null);
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [micPermissionDenied, setMicPermissionDenied] = useState(false);
+  const [micPermissionHint, setMicPermissionHint] = useState<string | null>(null);
+  const [micSyncTimedOut, setMicSyncTimedOut] = useState(false);
   const [audioTestDone, setAudioTestDone] = useState(false);
   const [audioTestPlaying, setAudioTestPlaying] = useState(false);
   const [audioTestFailed, setAudioTestFailed] = useState(false);
@@ -288,6 +290,7 @@ export default function StudioBridgePage() {
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [collaboratorLeft, setCollaboratorLeft] = useState(false);
   const [connectionLostCountdown, setConnectionLostCountdown] = useState<number | null>(null);
+  const [retryInitTick, setRetryInitTick] = useState(0);
 
   const micDeniedThisInitRef = useRef(false);
 
@@ -554,6 +557,7 @@ export default function StudioBridgePage() {
 
     let cancelled = false;
     let micStream: MediaStream | null = null;
+    let micSyncTimeout: number | null = null;
     micDeniedThisInitRef.current = false;
     let teardownRan = false;
     let connectTimeout: number | null = null;
@@ -568,6 +572,13 @@ export default function StudioBridgePage() {
     forceResyncAttemptedRef.current = new URL(window.location.href).searchParams.get("resync") === "1";
     setCollaboratorLeft(false);
     clearLostCountdown();
+    setMicSyncTimedOut(false);
+    setMicPermissionHint(null);
+
+    // Defensive cleanup: stop any lingering local tracks from previous failed sync attempts.
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current = null;
+    setLocalMicStream(null);
 
     const performTeardown = () => {
       if (teardownRan) return;
@@ -580,6 +591,10 @@ export default function StudioBridgePage() {
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
+          }
+          if (micSyncTimeout !== null) {
+            clearTimeout(micSyncTimeout);
+            micSyncTimeout = null;
           }
           clearForceResyncTimer();
           if (pingIntervalRef.current) {
@@ -687,6 +702,96 @@ export default function StudioBridgePage() {
         setRoomId(sessionId);
         let existingRow: StudioSessionRow | null = null;
 
+        // 1) Prioritize microphone access before signaling / peer setup.
+        setStatusNote("Syncing microphone...");
+        let permissionExplicitlyDenied = false;
+        try {
+          const permissionsApi = navigator.permissions as
+            | {
+                query: (arg: { name: PermissionName }) => Promise<{ state: PermissionState }>;
+              }
+            | undefined;
+          if (permissionsApi?.query) {
+            const perm = await permissionsApi.query({ name: "microphone" as PermissionName });
+            if (perm.state === "denied") {
+              micDeniedThisInitRef.current = true;
+              setMicPermissionDenied(true);
+              setMicPermissionHint(
+                "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
+              );
+              setStatusNote("Microphone access blocked by browser settings.");
+              permissionExplicitlyDenied = true;
+            }
+          }
+        } catch {
+          // Permission query is best-effort; continue to getUserMedia prompt flow when available.
+        }
+        if (permissionExplicitlyDenied) {
+          throw new Error("Microphone permission denied.");
+        }
+
+        micSyncTimeout = window.setTimeout(() => {
+          if (!mountedRef.current || cancelled || localStreamRef.current) return;
+          setMicSyncTimedOut(true);
+          setStatusNote("Microphone sync timed out.");
+        }, 5000);
+
+        addLog("getUserMedia (audio only)");
+        let mediaStream: MediaStream;
+        try {
+          mediaStream = await acquireStudioMicStream();
+        } catch (micErr) {
+          console.error(micErr);
+          addLog("Microphone blocked or unavailable");
+          micDeniedThisInitRef.current = true;
+          if (mountedRef.current) {
+            setMicPermissionDenied(true);
+            setMicPermissionHint(
+              "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
+            );
+            setStatusNote("Microphone access is required to continue.");
+          }
+          throw new Error("Microphone permission is required for the studio bridge.");
+        } finally {
+          if (micSyncTimeout !== null) {
+            clearTimeout(micSyncTimeout);
+            micSyncTimeout = null;
+          }
+        }
+
+        if (cancelled || !mountedRef.current) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        const audioTracks = mediaStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          throw new Error("Microphone stream has no audio tracks.");
+        }
+
+        micStream = mediaStream;
+        localStreamRef.current = mediaStream;
+        if (mountedRef.current) {
+          setMicSyncTimedOut(false);
+          setLocalMicStream(mediaStream);
+        }
+
+        const localEl = localMonitorAudioRef.current;
+        if (localEl) {
+          localEl.srcObject = mediaStream;
+          localEl.muted = true;
+          await localEl.play().catch(() => {});
+        }
+
+        if (cancelled || !mountedRef.current) {
+          micStream.getTracks().forEach((track) => track.stop());
+          micStream = null;
+          localStreamRef.current = null;
+          if (mountedRef.current) setLocalMicStream(null);
+          return;
+        }
+
         if (isHost) {
           addLog("Host mode: inserting studio_sessions row...");
           setStatusNote("Creating session row...");
@@ -740,52 +845,6 @@ export default function StudioBridgePage() {
         }
 
         if (cancelled || !mountedRef.current) return;
-
-        setStatusNote("Requesting microphone access...");
-        addLog("getUserMedia (audio only)");
-        let mediaStream: MediaStream;
-        try {
-          mediaStream = await acquireStudioMicStream();
-        } catch (micErr) {
-          console.error(micErr);
-          addLog("Microphone blocked or unavailable");
-          micDeniedThisInitRef.current = true;
-          if (mountedRef.current) {
-            setMicPermissionDenied(true);
-            setStatusNote("Microphone access is required to continue.");
-          }
-          throw new Error("Microphone permission is required for the studio bridge.");
-        }
-
-        if (cancelled || !mountedRef.current) {
-          mediaStream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-
-        const audioTracks = mediaStream.getAudioTracks();
-        if (audioTracks.length === 0) {
-          mediaStream.getTracks().forEach((track) => track.stop());
-          throw new Error("Microphone stream has no audio tracks.");
-        }
-
-        micStream = mediaStream;
-        localStreamRef.current = mediaStream;
-        if (mountedRef.current) setLocalMicStream(mediaStream);
-
-        const localEl = localMonitorAudioRef.current;
-        if (localEl) {
-          localEl.srcObject = mediaStream;
-          localEl.muted = true;
-          await localEl.play().catch(() => {});
-        }
-
-        if (cancelled || !mountedRef.current) {
-          micStream.getTracks().forEach((track) => track.stop());
-          micStream = null;
-          localStreamRef.current = null;
-          if (mountedRef.current) setLocalMicStream(null);
-          return;
-        }
 
         addLog("Creating simple-peer with resolved mic stream (default browser SDP)...");
         setStatusNote("Bypassing Firewall... (Relay Active)");
@@ -1166,7 +1225,7 @@ export default function StudioBridgePage() {
       bridgeTeardownRef.current = null;
       performTeardown();
     };
-  }, [beginLostCountdown, clearForceResyncTimer, clearLostCountdown]);
+  }, [beginLostCountdown, clearForceResyncTimer, clearLostCountdown, retryInitTick]);
 
   const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
@@ -1348,7 +1407,21 @@ export default function StudioBridgePage() {
               className="mt-6 rounded-xl border border-stone-700/90 bg-stone-950/50 px-4 py-3 text-center text-sm font-medium leading-relaxed text-stone-300"
               role="status"
             >
-              Microphone Access Required. Please enable it in your browser settings to continue.
+              {micPermissionHint ||
+                "Microphone Access Required. Please enable it in your browser settings to continue."}
+            </div>
+          ) : null}
+
+          {micSyncTimedOut && !localMicStream ? (
+            <div className="mt-4">
+              <motion.button
+                type="button"
+                onClick={() => setRetryInitTick((n) => n + 1)}
+                whileTap={{ scale: 0.97 }}
+                className="w-full rounded-xl border border-orange-500/35 bg-gradient-to-r from-orange-500/15 to-emerald-500/15 px-4 py-3 text-sm font-semibold text-stone-100 transition hover:from-orange-500/25 hover:to-emerald-500/25"
+              >
+                Retry Microphone Sync
+              </motion.button>
             </div>
           ) : null}
 
