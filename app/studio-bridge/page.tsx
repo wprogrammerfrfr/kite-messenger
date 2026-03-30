@@ -30,6 +30,7 @@ type IceCandidateRow = {
 
 type StudioSessionRow = {
   session_id: string;
+  room_code?: string | null;
   offer: SignalData | null;
   answer: SignalData | null;
   ice_candidates: IceCandidateRow[] | null;
@@ -560,6 +561,7 @@ export default function StudioBridgePage() {
     let micSyncTimeout: number | null = null;
     micDeniedThisInitRef.current = false;
     let teardownRan = false;
+    let preflightChannel: ReturnType<typeof supabase.channel> | null = null;
     let connectTimeout: number | null = null;
     let localIceCandidateSeen = false;
     let timeoutExtendedForIce = false;
@@ -702,6 +704,64 @@ export default function StudioBridgePage() {
         setRoomId(sessionId);
         let existingRow: StudioSessionRow | null = null;
 
+        if (isHost) {
+          addLog("Host mode: creating session row immediately...");
+          setStatusNote("Creating session row...");
+
+          const hostUrl = new URL(window.location.href);
+          hostUrl.searchParams.set("room", sessionId);
+          setInviteLink(hostUrl.toString());
+
+          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
+            {
+              session_id: sessionId,
+              room_code: sessionId,
+              offer: null,
+              answer: null,
+              ice_candidates: [],
+              host_user_id: sessionUserId,
+              guest_user_id: null,
+            },
+            { onConflict: "session_id" }
+          );
+          if (insertErr) throw insertErr;
+
+          cleanupSessionRef.current = async () => {
+            addLog("Cleaning up studio_sessions row...");
+            await supabase.from("studio_sessions").delete().eq("session_id", sessionId);
+          };
+        }
+
+        preflightChannel = supabase
+          .channel(`room_code:${sessionId}`)
+          .on("broadcast", { event: "JOIN" }, (payload) => {
+            const msg = payload.payload as { room?: string; from?: Role; at?: string } | undefined;
+            if (!msg || msg.room !== sessionId || msg.from === activeRole) return;
+            addLog(`JOIN received from ${msg.from ?? "peer"}`);
+          })
+          .on("broadcast", { event: "session-control" }, (payload) => {
+            const msg = payload.payload as SessionControlMessage | undefined;
+            if (!msg || msg.type !== "LEAVE") return;
+            if (msg.room !== sessionId) return;
+            if (msg.from === activeRole) return;
+            leaveSignalReceivedRef.current = true;
+            addLog("Collaborator LEAVE received");
+            clearLostCountdown();
+            setCollaboratorLeft(true);
+            setStatus("failed");
+            setStatusNote("Collaborator has left the session.");
+          })
+          .subscribe((subStatus) => {
+            if (subStatus === "SUBSCRIBED" && activeRole === "peer") {
+              void preflightChannel?.send({
+                type: "broadcast",
+                event: "JOIN",
+                payload: { room: sessionId, from: "peer", at: new Date().toISOString() },
+              });
+            }
+          });
+        channelRef.current = preflightChannel;
+
         // 1) Prioritize microphone access before signaling / peer setup.
         setStatusNote("Syncing microphone...");
         let permissionExplicitlyDenied = false;
@@ -792,37 +852,7 @@ export default function StudioBridgePage() {
           return;
         }
 
-        if (isHost) {
-          addLog("Host mode: inserting studio_sessions row...");
-          setStatusNote("Creating session row...");
-
-          const hostUrl = new URL(window.location.href);
-          hostUrl.searchParams.set("room", sessionId);
-          setInviteLink(hostUrl.toString());
-
-          const { data, error: insertErr } = await supabase
-            .from("studio_sessions")
-            .insert({
-              session_id: sessionId,
-              offer: null,
-              answer: null,
-              ice_candidates: [],
-              host_user_id: sessionUserId,
-              guest_user_id: null,
-            })
-            .select()
-            .single<StudioSessionRow>();
-
-          console.log("Row Created:", data);
-          addLog("Row Created");
-
-          if (insertErr) throw insertErr;
-
-          cleanupSessionRef.current = async () => {
-            addLog("Cleaning up studio_sessions row...");
-            await supabase.from("studio_sessions").delete().eq("session_id", sessionId);
-          };
-        } else {
+        if (!isHost) {
           addLog("Peer mode: fetching studio_sessions row...");
           setStatusNote("Fetching room...");
 
@@ -1127,8 +1157,9 @@ export default function StudioBridgePage() {
           }
         });
 
+        preflightChannel?.unsubscribe();
         const channel = supabase
-          .channel(`studio-session-${sessionId}`)
+          .channel(`room_code:${sessionId}`)
           .on("broadcast", { event: "session-control" }, (payload) => {
             const msg = payload.payload as SessionControlMessage | undefined;
             if (!msg || msg.type !== "LEAVE") return;

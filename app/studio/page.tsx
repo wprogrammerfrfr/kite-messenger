@@ -193,7 +193,8 @@ export default function StudioLobbyPage() {
 
     if (joining) return;
     const code = codeNormalized;
-    console.log("[Studio Lobby] Join Session — room code:", code || "(empty)");
+    const lookupCode = code.toUpperCase();
+    console.log("[Studio Lobby] Join Session lookup code:", lookupCode || "(empty)");
     if (code.length !== 6) {
       setJoinError("Enter the 6-character signal code.");
       return;
@@ -204,9 +205,35 @@ export default function StudioLobbyPage() {
       try {
         const { data, error } = await supabase
           .from("studio_sessions")
-          .select("session_id")
-          .eq("session_id", code)
+          .select("session_id, room_code")
+          .ilike("room_code", lookupCode)
           .maybeSingle();
+
+        if (error) {
+          console.error("[Studio Lobby] Join query failed (room_code lookup)", error);
+          const { data: fallbackData, error: fallbackError } = await supabase
+            .from("studio_sessions")
+            .select("session_id")
+            .eq("session_id", lookupCode)
+            .maybeSingle();
+
+          if (fallbackError) {
+            console.error("[Studio Lobby] Join query failed (session_id fallback)", fallbackError);
+            triggerJoinFailure("Signal not found. Check the code and try again.");
+            return;
+          }
+
+          if (!fallbackData?.session_id) {
+            triggerJoinFailure("Signal not found. Check the code and try again.");
+            return;
+          }
+
+          setJoinSuccess(true);
+          window.setTimeout(() => {
+            router.push(`/studio-bridge?room=${encodeURIComponent(fallbackData.session_id)}`);
+          }, 450);
+          return;
+        }
 
         if (error || !data?.session_id) {
           triggerJoinFailure("Signal not found. Check the code and try again.");
@@ -216,9 +243,10 @@ export default function StudioLobbyPage() {
         setJoinSuccess(true);
         // Small beat so the user sees success before the bridge transition.
         window.setTimeout(() => {
-          router.push(`/studio-bridge?room=${encodeURIComponent(code)}`);
+          router.push(`/studio-bridge?room=${encodeURIComponent(data.session_id)}`);
         }, 450);
-      } catch {
+      } catch (err) {
+        console.error("[Studio Lobby] Join request exception", err);
         triggerJoinFailure("Signal not found. Check the code and try again.");
       } finally {
         setJoining(false);
