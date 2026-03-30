@@ -30,7 +30,6 @@ type IceCandidateRow = {
 
 type StudioSessionRow = {
   session_id: string;
-  room_code?: string | null;
   offer: SignalData | null;
   answer: SignalData | null;
   ice_candidates: IceCandidateRow[] | null;
@@ -48,9 +47,17 @@ const ORANGE = "#ff4500";
 const EMERALD = "#22c55e";
 const OBSIDIAN = "#0c0a09";
 
-function randomSessionId() {
-  // 6-char uppercase alphanumeric room code.
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
+/** Shown when `init()` throws; cleared as soon as P2P is actually connected. */
+const BRIDGE_INIT_FAIL_NOTE = "Could not initialize studio signaling bridge.";
+const P2P_CONNECTED_NOTE = "P2P Connected.";
+
+/** Single source of truth for session_id casing and shape (6-char A–Z / 0–9). */
+function normalizeStudioSessionId(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6).toUpperCase();
+}
+
+function randomSessionId(): string {
+  return normalizeStudioSessionId(Math.random().toString(36).slice(2, 8));
 }
 
 function addLog(msg: string) {
@@ -261,8 +268,11 @@ export default function StudioBridgePage() {
   const router = useRouter();
   const [status, setStatus] = useState<BridgeStatus>("connecting");
   const [statusNote, setStatusNote] = useState("Initializing session...");
+  /** Initialization failure copy; cleared on successful P2P `connect` so it never competes with success UI. */
+  const [bridgeInitError, setError] = useState<string | null>(null);
   const [inviteLink, setInviteLink] = useState<string | null>(null);
-  const [roomId, setRoomId] = useState<string | null>(null);
+  /** Single UI/DB identifier: always the 6-char `session_id` in Supabase (uppercase). */
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [role, setRole] = useState<Role | null>(null);
   const [pingMs, setPingMs] = useState<number | null>(null);
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
@@ -296,6 +306,8 @@ export default function StudioBridgePage() {
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const mountedRef = useRef(true);
   const statusRef = useRef<BridgeStatus>("connecting");
+  /** Set synchronously in `peer.on('connect')` so init's `catch` cannot run after P2P success but before `statusRef` updates. */
+  const p2pConnectSucceededRef = useRef(false);
   const appliedRemoteSignalRef = useRef(false);
   const seenIceRef = useRef<Set<string>>(new Set());
   const cleanupSessionRef = useRef<(() => Promise<void>) | null>(null);
@@ -308,6 +320,8 @@ export default function StudioBridgePage() {
   const lostCountdownIntervalRef = useRef<number | null>(null);
   const sessionStartedAtRef = useRef<number | null>(null);
   const historySavedRef = useRef(false);
+  /** Prevents overlapping inits; cleared on effect cleanup so remount can proceed. */
+  const bridgeInitInFlightRef = useRef(false);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -389,12 +403,12 @@ export default function StudioBridgePage() {
   }, [clearLostCountdown]);
 
   const sendLeaveSignal = useCallback(async () => {
-    if (leaveSignalSentRef.current || !roomId || !role) return;
+    if (leaveSignalSentRef.current || !sessionId || !role) return;
     leaveSignalSentRef.current = true;
     const payload: SessionControlMessage = {
       type: "LEAVE",
       from: role,
-      room: roomId,
+      room: sessionId.toUpperCase(),
       at: new Date().toISOString(),
     };
     try {
@@ -407,7 +421,7 @@ export default function StudioBridgePage() {
     } catch (err) {
       console.error("LEAVE signal send failed", err);
     }
-  }, [roomId, role]);
+  }, [sessionId, role]);
 
   const saveSessionHistory = useCallback(async () => {
     if (historySavedRef.current) return;
@@ -499,6 +513,15 @@ export default function StudioBridgePage() {
     statusRef.current = status;
   }, [status]);
 
+  /** Stale init failures can leave the failure copy up if `status` flips to connected elsewhere — clear it here. */
+  useEffect(() => {
+    if (status !== "connected") return;
+    setError(null);
+    setStatusNote((prev) =>
+      prev === BRIDGE_INIT_FAIL_NOTE ? P2P_CONNECTED_NOTE : prev
+    );
+  }, [status]);
+
   /** Online + Supabase reachable (does not wait for WebRTC peer). */
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -555,6 +578,10 @@ export default function StudioBridgePage() {
     clearLostCountdown();
     setMicSyncTimedOut(false);
     setMicPermissionHint(null);
+
+    appliedRemoteSignalRef.current = false;
+    seenIceRef.current.clear();
+    existingRowRef.current = null;
 
     // Defensive cleanup: stop any lingering local tracks from previous failed sync attempts.
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -633,7 +660,7 @@ export default function StudioBridgePage() {
       const { data: current, error: currentErr } = await supabase
         .from("studio_sessions")
         .select("ice_candidates")
-        .eq("session_id", sessionId)
+        .eq("session_id", sessionId.toUpperCase())
         .single<{ ice_candidates: IceCandidateRow[] | null }>();
 
       if (currentErr) throw currentErr;
@@ -643,7 +670,7 @@ export default function StudioBridgePage() {
       const { error: updateErr } = await supabase
         .from("studio_sessions")
         .update({ ice_candidates: updated })
-        .eq("session_id", sessionId);
+        .eq("session_id", sessionId.toUpperCase());
       if (updateErr) throw updateErr;
     };
 
@@ -663,166 +690,79 @@ export default function StudioBridgePage() {
     };
 
     const init = async () => {
+      if (bridgeInitInFlightRef.current) {
+        addLog("Bridge init skipped (already in flight).");
+        return;
+      }
+      bridgeInitInFlightRef.current = true;
+      let mediaStream: MediaStream | null = null;
+
       try {
-        addLog("Signaling started");
+        addLog("Bridge init started (linear)");
+        p2pConnectSucceededRef.current = false;
+        setError(null);
         setStatusNote("Initializing session...");
         setMicPermissionDenied(false);
         if (cancelled || !mountedRef.current) return;
 
         const url = new URL(window.location.href);
+        // Host only when `room` query is absent. `?room=` (empty) is a guest URL with invalid code.
         const roomParamRaw = url.searchParams.get("room");
-        const roomParam = roomParamRaw ? roomParamRaw.toUpperCase() : null;
-        const isHost = !roomParam;
-        const activeRole: Role = isHost ? "host" : "peer";
-        setRole(activeRole);
-        const { data: authData } = await supabase.auth.getUser();
-        sessionUserId = authData.user?.id ?? null;
+        const isHost = roomParamRaw === null;
 
-        const sessionId = roomParam || randomSessionId();
-        setRoomId(sessionId);
-        let existingRow: StudioSessionRow | null = null;
+        const sessionIdCandidate = isHost
+          ? randomSessionId()
+          : normalizeStudioSessionId(roomParamRaw ?? "").toUpperCase();
+        if (!isHost && sessionIdCandidate.length !== 6) {
+          throw new Error("Invalid room code. Expected 6 characters.");
+        }
+        const sessionId = sessionIdCandidate.toUpperCase();
 
+        if (!isHost) {
+          setSessionId(sessionId);
+        }
+
+        // —— Host: reserve row first; URL + on-screen code only after Supabase confirms session_id ——
         if (isHost) {
-          addLog("Host mode: inserting studio_sessions row...");
-          setStatusNote("Creating session...");
-
-          const hostUrl = new URL(window.location.href);
-          hostUrl.searchParams.set("room", sessionId);
-          setInviteLink(hostUrl.toString());
-
-          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
-            {
-              session_id: sessionId,
-              room_code: sessionId,
-              offer: null,
-              answer: null,
-              ice_candidates: [],
-              host_user_id: sessionUserId,
-              guest_user_id: null,
-            },
-            { onConflict: "session_id" }
-          );
-          if (insertErr) throw insertErr;
-
           cleanupSessionRef.current = async () => {
             addLog("Cleaning up studio_sessions row...");
-            await supabase.from("studio_sessions").delete().eq("session_id", sessionId);
-          };
-        } else {
-          addLog("Peer mode: fetching studio_sessions row...");
-          setStatusNote("Fetching room...");
-
-          const { data: fetched, error: fetchErr } = await supabase
-            .from("studio_sessions")
-            .select("session_id, offer, answer, ice_candidates, host_user_id, guest_user_id")
-            .eq("session_id", sessionId)
-            .single<StudioSessionRow>();
-
-          if (fetchErr || !fetched) throw new Error("Room not found.");
-          existingRow = fetched;
-          existingRowRef.current = fetched;
-
-          if (sessionUserId) {
             await supabase
               .from("studio_sessions")
-              .update({ guest_user_id: sessionUserId })
-              .eq("session_id", sessionId);
+              .delete()
+              .eq("session_id", sessionId.toUpperCase());
+          };
+
+          console.log(
+            "DEBUG: Attempting Supabase Upsert for session (reservation):",
+            sessionId.toUpperCase()
+          );
+          const { error: reserveErr } = await supabase.from("studio_sessions").upsert(
+            { session_id: sessionId.toUpperCase() },
+            { onConflict: "session_id" }
+          );
+          if (reserveErr) {
+            console.error("DEBUG: Upsert Failed (reservation):", reserveErr);
+            throw reserveErr;
+          }
+
+          if (!cancelled && mountedRef.current) {
+            const hostUrlSynced = new URL(window.location.href);
+            hostUrlSynced.searchParams.set("room", sessionId.toUpperCase());
+            setInviteLink(hostUrlSynced.toString());
+            window.history.replaceState(null, "", hostUrlSynced.toString());
+            setSessionId(sessionId);
           }
         }
 
-        const channel = supabase
-          .channel(`room_code:${sessionId}`)
-          .on("broadcast", { event: "session-control" }, (payload) => {
-            const msg = payload.payload as SessionControlMessage | undefined;
-            if (!msg || msg.type !== "LEAVE") return;
-            if (msg.room !== sessionId) return;
-            if (msg.from === activeRole) return;
-            leaveSignalReceivedRef.current = true;
-            addLog("Collaborator LEAVE received");
-            clearLostCountdown();
-            setCollaboratorLeft(true);
-            setStatus("failed");
-            setStatusNote("Collaborator has left the session.");
-          })
-          .on(
-            "postgres_changes",
-            {
-              event: "UPDATE",
-              schema: "public",
-              table: "studio_sessions",
-              filter: `session_id=eq.${sessionId}`,
-            },
-            (payload) => {
-              const nextRow = payload.new as StudioSessionRow;
-              if (!nextRow || typeof nextRow !== "object") return;
-              const peer = peerRef.current;
-
-              if (activeRole === "host") {
-                if (
-                  peer &&
-                  !appliedRemoteSignalRef.current &&
-                  nextRow.answer &&
-                  typeof nextRow.answer === "object"
-                ) {
-                  appliedRemoteSignalRef.current = true;
-                  addLog("Answer received");
-                  peer.signal(nextRow.answer);
-                  setStatusNote("Answer received. Negotiating...");
-                }
-              } else if (
-                peer &&
-                !appliedRemoteSignalRef.current &&
-                nextRow.offer &&
-                typeof nextRow.offer === "object"
-              ) {
-                appliedRemoteSignalRef.current = true;
-                addLog("Offer received");
-                peer.signal(nextRow.offer);
-                setStatusNote("Offer received. Creating answer...");
-              }
-
-              applyRemoteIce(nextRow.ice_candidates, activeRole);
-            }
-          )
-          .subscribe();
-        channelRef.current = channel;
-
-        // 1) Prioritize microphone access before signaling / peer setup.
+        // —— Phase 1: hardware only (mic; host row already reserved in Supabase) ——
         setStatusNote("Syncing microphone...");
-        let permissionExplicitlyDenied = false;
-        try {
-          const permissionsApi = navigator.permissions as
-            | {
-                query: (arg: { name: PermissionName }) => Promise<{ state: PermissionState }>;
-              }
-            | undefined;
-          if (permissionsApi?.query) {
-            const perm = await permissionsApi.query({ name: "microphone" as PermissionName });
-            if (perm.state === "denied") {
-              micDeniedThisInitRef.current = true;
-              setMicPermissionDenied(true);
-              setMicPermissionHint(
-                "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
-              );
-              setStatusNote("Microphone Required.");
-              permissionExplicitlyDenied = true;
-            }
-          }
-        } catch {
-          // Permission query is best-effort; continue to getUserMedia prompt flow when available.
-        }
-        if (permissionExplicitlyDenied) {
-          throw new Error("Microphone permission denied.");
-        }
-
         micSyncTimeout = window.setTimeout(() => {
           if (!mountedRef.current || cancelled || localStreamRef.current) return;
           setMicSyncTimedOut(true);
           setStatusNote("Microphone sync timed out.");
         }, 5000);
 
-        addLog("getUserMedia (audio only)");
-        let mediaStream: MediaStream;
+        addLog("Phase 1: getUserMedia (audio only)");
         try {
           mediaStream = await acquireStudioMicStream();
         } catch (micErr) {
@@ -877,13 +817,132 @@ export default function StudioBridgePage() {
           return;
         }
 
-        addLog("Creating simple-peer with resolved mic stream (default browser SDP)...");
+        // —— Phase 2: database (after mic is live) ——
+        const activeRole: Role = isHost ? "host" : "peer";
+        setRole(activeRole);
+        const { data: authData } = await supabase.auth.getUser();
+        sessionUserId = authData.user?.id ?? null;
+
+        if (isHost) {
+          addLog("Phase 2: host full upsert studio_sessions");
+          setStatusNote("Creating session...");
+
+          console.log(
+            "DEBUG: Attempting Supabase Upsert for session (full row):",
+            sessionId.toUpperCase()
+          );
+          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
+            {
+              session_id: sessionId.toUpperCase(),
+              offer: null,
+              answer: null,
+              ice_candidates: [],
+              host_user_id: sessionUserId,
+              guest_user_id: null,
+            },
+            { onConflict: "session_id" }
+          );
+          if (insertErr) {
+            console.error("DEBUG: Upsert Failed (full row):", insertErr);
+            throw insertErr;
+          }
+        } else {
+          addLog("Phase 2: guest fetch studio_sessions");
+          setStatusNote("Fetching room...");
+
+          const { data: fetched, error: fetchErr } = await supabase
+            .from("studio_sessions")
+            .select("session_id, offer, answer, ice_candidates, host_user_id, guest_user_id")
+            .eq("session_id", sessionId.toUpperCase())
+            .single<StudioSessionRow>();
+
+          if (fetchErr || !fetched) throw new Error("Room not found.");
+          existingRowRef.current = fetched;
+
+          if (sessionUserId) {
+            await supabase
+              .from("studio_sessions")
+              .update({ guest_user_id: sessionUserId })
+              .eq("session_id", sessionId.toUpperCase());
+          }
+        }
+
+        if (cancelled || !mountedRef.current) {
+          micStream.getTracks().forEach((track) => track.stop());
+          micStream = null;
+          localStreamRef.current = null;
+          if (mountedRef.current) setLocalMicStream(null);
+          return;
+        }
+
+        // —— Phase 3: Realtime + WebRTC ——
+        if (!mediaStream) return;
+        addLog("Phase 3: Realtime subscribe + peer");
         setStatusNote("Starting peer connection...");
 
-        addLog(`Perfect negotiation role: ${isHost ? "polite host (waits)" : "impolite guest (initiates)"}`);
+        const channel = supabase
+          .channel(`session_id:${sessionId.toUpperCase()}`)
+          .on("broadcast", { event: "session-control" }, (payload) => {
+            const msg = payload.payload as SessionControlMessage | undefined;
+            if (!msg || msg.type !== "LEAVE") return;
+            if (msg.room !== sessionId.toUpperCase()) return;
+            if (msg.from === activeRole) return;
+            leaveSignalReceivedRef.current = true;
+            addLog("Collaborator LEAVE received");
+            clearLostCountdown();
+            setCollaboratorLeft(true);
+            setStatus("failed");
+            setStatusNote("Collaborator has left the session.");
+          })
+          .on(
+            "postgres_changes",
+            {
+              event: "UPDATE",
+              schema: "public",
+              table: "studio_sessions",
+              filter: `session_id=eq.${sessionId.toUpperCase()}`,
+            },
+            (payload) => {
+              const nextRow = payload.new as StudioSessionRow;
+              if (!nextRow || typeof nextRow !== "object") return;
+              const peer = peerRef.current;
+
+              if (activeRole === "host") {
+                if (
+                  peer &&
+                  !appliedRemoteSignalRef.current &&
+                  nextRow.answer &&
+                  typeof nextRow.answer === "object"
+                ) {
+                  appliedRemoteSignalRef.current = true;
+                  addLog("Answer received");
+                  peer.signal(nextRow.answer);
+                  setStatusNote("Answer received. Negotiating...");
+                }
+              } else if (
+                peer &&
+                !appliedRemoteSignalRef.current &&
+                nextRow.offer &&
+                typeof nextRow.offer === "object"
+              ) {
+                appliedRemoteSignalRef.current = true;
+                addLog("Offer received");
+                peer.signal(nextRow.offer);
+                setStatusNote("Offer received. Creating answer...");
+              }
+
+              applyRemoteIce(nextRow.ice_candidates, activeRole);
+            }
+          )
+          .subscribe();
+        channelRef.current = channel;
+
+        addLog(
+          `Negotiation: ${isHost ? "host initiates (offer first)" : "guest answers"}`
+        );
 
         const peer = new Peer({
-          initiator: !isHost,
+          initiator: isHost,
           trickle: true,
           stream: mediaStream,
           config: STUDIO_PEER_CONNECTION_CONFIG,
@@ -929,10 +988,10 @@ export default function StudioBridgePage() {
             if (leaveSignalReceivedRef.current) return;
             if (iceState === "connected" || iceState === "completed") {
               clearLostCountdown();
-              if (statusRef.current !== "connected") {
-                setStatus("connected");
-                setStatusNote("P2P channel established.");
-              }
+              p2pConnectSucceededRef.current = true;
+              setError(null);
+              setStatus("connected");
+              setStatusNote(P2P_CONNECTED_NOTE);
               return;
             }
             if (iceState === "disconnected" || iceState === "failed") {
@@ -1013,7 +1072,7 @@ export default function StudioBridgePage() {
                 const { error } = await supabase
                   .from("studio_sessions")
                   .update({ offer: signalData })
-                  .eq("session_id", sessionId);
+                  .eq("session_id", sessionId.toUpperCase());
                 if (error) throw error;
                 setStatusNote("Offer published. Waiting for peer answer...");
               })().catch((err) => {
@@ -1030,7 +1089,7 @@ export default function StudioBridgePage() {
                 const { error } = await supabase
                   .from("studio_sessions")
                   .update({ answer: signalData })
-                  .eq("session_id", sessionId);
+                  .eq("session_id", sessionId.toUpperCase());
                 if (error) throw error;
                 setStatusNote("Answer sent. Finalizing connection...");
               })().catch((err) => {
@@ -1054,8 +1113,11 @@ export default function StudioBridgePage() {
             connectTimeout = null;
           }
           addLog("Peer connected (media + data channel)");
+          p2pConnectSucceededRef.current = true;
+          console.log("UI: Connection confirmed, clearing all error messages.");
+          setError(null);
           setStatus("connected");
-          setStatusNote("P2P channel established.");
+          setStatusNote(P2P_CONNECTED_NOTE);
           setPingMs(null);
 
           if (activeRole === "host") {
@@ -1142,7 +1204,7 @@ export default function StudioBridgePage() {
           const { data: current } = await supabase
             .from("studio_sessions")
             .select("answer, ice_candidates")
-            .eq("session_id", sessionId)
+            .eq("session_id", sessionId.toUpperCase())
             .single<Pick<StudioSessionRow, "answer" | "ice_candidates">>();
           if (current?.answer && typeof current.answer === "object") {
             appliedRemoteSignalRef.current = true;
@@ -1154,19 +1216,25 @@ export default function StudioBridgePage() {
             applyRemoteIce(current.ice_candidates, activeRole);
           }
         }
-      } catch (err) {
+      } catch (error) {
         if (cancelled || !mountedRef.current) return;
-        console.error(err);
+        // Avoid ghost "init failed" after P2P success: `status` in this closure is stale; `statusRef` may lag one frame; `p2pConnectSucceededRef` is synchronous.
+        if (statusRef.current === "connected" || p2pConnectSucceededRef.current) return;
+        console.error("CRITICAL BRIDGE ERROR:", error);
         setStatus("failed");
         if (!micDeniedThisInitRef.current) {
-          setStatusNote("Could not initialize studio signaling bridge.");
+          setError(BRIDGE_INIT_FAIL_NOTE);
+          setStatusNote(BRIDGE_INIT_FAIL_NOTE);
         }
+      } finally {
+        bridgeInitInFlightRef.current = false;
       }
     };
 
     void init();
 
     return () => {
+      bridgeInitInFlightRef.current = false;
       bridgeTeardownRef.current = null;
       micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
@@ -1184,9 +1252,9 @@ export default function StudioBridgePage() {
   };
 
   const copyRoomCode = async () => {
-    if (!roomId || typeof window === "undefined") return;
+    if (!sessionId || typeof window === "undefined") return;
     try {
-      await navigator.clipboard.writeText(roomId);
+      await navigator.clipboard.writeText(sessionId.toUpperCase());
       setRoomCopyNote("Room code copied.");
       window.setTimeout(() => setRoomCopyNote(null), 1400);
     } catch {
@@ -1316,7 +1384,7 @@ export default function StudioBridgePage() {
             </span>
           </div>
 
-          {roomId ? (
+          {sessionId ? (
             <motion.button
               type="button"
               onClick={() => void copyRoomCode()}
@@ -1331,7 +1399,7 @@ export default function StudioBridgePage() {
                 {role === "host" ? "Your Room Code" : "Room Code"}
               </div>
               <div className="mt-2 font-mono text-lg font-bold tracking-[0.28em] text-stone-50">
-                {roomId}
+                {sessionId.toUpperCase()}
               </div>
               <div className="mt-1 text-[11px] text-stone-500">Tap to copy</div>
             </motion.button>
@@ -1567,11 +1635,15 @@ export default function StudioBridgePage() {
                 </motion.button>
               ) : null}
 
-              {roomId ? (
-                <p className="text-center text-[11px] font-medium text-stone-500">Room: {roomId}</p>
+              {sessionId ? (
+                <p className="text-center text-[11px] font-medium text-stone-500">
+                  Room: {sessionId.toUpperCase()}
+                </p>
               ) : null}
 
-              <p className="text-center text-xs text-stone-500">{statusNote}</p>
+              <p className="text-center text-xs text-stone-500">
+                {status === "connected" ? statusNote : (bridgeInitError ?? statusNote)}
+              </p>
             </motion.div>
           )}
 

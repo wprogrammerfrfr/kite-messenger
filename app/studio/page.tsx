@@ -13,14 +13,6 @@ const EMERALD = "#22c55e";
 
 const MotionLink = motion(Link);
 
-type StudioHistoryRow = {
-  id: string;
-  host_nickname: string | null;
-  guest_nickname: string | null;
-  duration_seconds: number | null;
-  created_at: string;
-};
-
 function SystemStatusDot() {
   return (
     <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden>
@@ -57,7 +49,6 @@ export default function StudioLobbyPage() {
   const [joinShakeTick, setJoinShakeTick] = useState(0);
   const [welcomeMode, setWelcomeMode] = useState<"loading" | "loggedOut" | "welcomeBack">("loading");
   const [welcomeName, setWelcomeName] = useState<string>("");
-  const [recentSessions, setRecentSessions] = useState<StudioHistoryRow[]>([]);
 
   useEffect(() => {
     let mounted = true;
@@ -142,37 +133,6 @@ export default function StudioLobbyPage() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadRecentSessions = async () => {
-      try {
-        const { data, error } = await supabase
-          .from("studio_history")
-          .select("id, host_nickname, guest_nickname, duration_seconds, created_at")
-          .order("created_at", { ascending: false })
-          .limit(5);
-
-        if (cancelled || error || !data) return;
-        setRecentSessions(data as StudioHistoryRow[]);
-      } catch {
-        // Keep UI graceful if history table isn't reachable.
-      }
-    };
-
-    void loadRecentSessions();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const formatDuration = (seconds: number | null) => {
-    if (!seconds || seconds <= 0) return "0m";
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    if (mins <= 0) return `${secs}s`;
-    return `${mins}m ${secs}s`;
-  };
-
   const codeNormalized = roomCode
     .replace(/[^a-zA-Z0-9]/g, "")
     .slice(0, 6)
@@ -205,8 +165,8 @@ export default function StudioLobbyPage() {
       try {
         const { data, error } = await supabase
           .from("studio_sessions")
-          .select("session_id, room_code")
-          .eq("room_code", lookupCode)
+          .select("session_id")
+          .eq("session_id", lookupCode.toUpperCase())
           .maybeSingle();
 
         if (error || !data?.session_id) {
@@ -215,9 +175,10 @@ export default function StudioLobbyPage() {
         }
 
         setJoinSuccess(true);
-        // Small beat so the user sees success before the bridge transition.
+        // Navigate with DB session_id (uppercase) — must match on-screen code and Supabase row.
+        const sessionIdUpper = String(data.session_id).toUpperCase();
         window.setTimeout(() => {
-          router.push(`/studio-bridge?room=${encodeURIComponent(data.session_id)}`);
+          router.push(`/studio-bridge?room=${encodeURIComponent(sessionIdUpper)}`);
         }, 450);
       } catch (err) {
         console.error("[Studio Lobby] Join request exception", err);
@@ -383,7 +344,9 @@ export default function StudioLobbyPage() {
                 maxLength={6}
                 value={codeNormalized}
                 onChange={(e) => {
-                  setRoomCode(e.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6));
+                  setRoomCode(
+                    e.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6).toUpperCase()
+                  );
                   setJoinError(null);
                   setJoinSuccess(false);
                 }}
@@ -434,33 +397,6 @@ export default function StudioLobbyPage() {
                 ) : null}
               </AnimatePresence>
             </div>
-          </section>
-
-          <section className="mt-auto pt-4">
-            <h3 className="text-[11px] font-semibold uppercase tracking-widest text-stone-500">
-              Recent Studio Sessions
-            </h3>
-            <ul className="mt-3 divide-y divide-stone-800/80 rounded-xl border border-stone-800/80 bg-stone-950/30">
-              {recentSessions.length === 0 ? (
-                <li className="px-4 py-3 text-sm font-medium text-stone-500">
-                  No recent sessions yet.
-                </li>
-              ) : (
-                recentSessions.map((row) => (
-                <li
-                  key={row.id}
-                  className="flex items-center justify-between gap-3 px-4 py-3 first:rounded-t-xl last:rounded-b-xl"
-                >
-                  <span className="text-sm font-semibold text-stone-200">
-                    {(row.host_nickname || "Host").trim()} x {(row.guest_nickname || "Guest").trim()}
-                  </span>
-                  <span className="shrink-0 text-xs font-medium text-stone-500">
-                    {formatDuration(row.duration_seconds)}
-                  </span>
-                </li>
-                ))
-              )}
-            </ul>
           </section>
         </motion.div>
       </div>
