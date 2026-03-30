@@ -340,7 +340,8 @@ export default function StudioLobbyPage() {
               <input
                 type="text"
                 inputMode="text"
-                pattern="[A-Za-z0-9]*"
+                pattern="[A-Z0-9]*"
+                autoCapitalize="characters"
                 autoComplete="off"
                 spellCheck={false}
                 maxLength={6}

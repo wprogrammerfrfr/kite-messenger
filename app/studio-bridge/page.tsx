@@ -706,7 +706,7 @@ export default function StudioBridgePage() {
         }
 
         addLog("Creating simple-peer with resolved mic stream (default browser SDP)...");
-        setStatusNote("Starting WebRTC peer...");
+        setStatusNote("Bypassing Firewall... (Relay Active)");
 
         const peer = new Peer({
           initiator: isHost,
@@ -714,7 +714,9 @@ export default function StudioBridgePage() {
           stream: mediaStream,
           config: {
             iceServers: STUDIO_ICE_SERVERS,
+            iceTransportPolicy: "relay",
             bundlePolicy: "max-bundle",
+            rtcpMuxPolicy: "require",
           },
           sdpTransform: setAudioBitrate,
         });
