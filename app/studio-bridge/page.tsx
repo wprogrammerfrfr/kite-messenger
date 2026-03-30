@@ -561,7 +561,6 @@ export default function StudioBridgePage() {
     let micSyncTimeout: number | null = null;
     micDeniedThisInitRef.current = false;
     let teardownRan = false;
-    let preflightChannel: ReturnType<typeof supabase.channel> | null = null;
     let connectTimeout: number | null = null;
     let localIceCandidateSeen = false;
     let timeoutExtendedForIce = false;
@@ -704,64 +703,6 @@ export default function StudioBridgePage() {
         setRoomId(sessionId);
         let existingRow: StudioSessionRow | null = null;
 
-        if (isHost) {
-          addLog("Host mode: creating session row immediately...");
-          setStatusNote("Creating session row...");
-
-          const hostUrl = new URL(window.location.href);
-          hostUrl.searchParams.set("room", sessionId);
-          setInviteLink(hostUrl.toString());
-
-          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
-            {
-              session_id: sessionId,
-              room_code: sessionId,
-              offer: null,
-              answer: null,
-              ice_candidates: [],
-              host_user_id: sessionUserId,
-              guest_user_id: null,
-            },
-            { onConflict: "session_id" }
-          );
-          if (insertErr) throw insertErr;
-
-          cleanupSessionRef.current = async () => {
-            addLog("Cleaning up studio_sessions row...");
-            await supabase.from("studio_sessions").delete().eq("session_id", sessionId);
-          };
-        }
-
-        preflightChannel = supabase
-          .channel(`room_code:${sessionId}`)
-          .on("broadcast", { event: "JOIN" }, (payload) => {
-            const msg = payload.payload as { room?: string; from?: Role; at?: string } | undefined;
-            if (!msg || msg.room !== sessionId || msg.from === activeRole) return;
-            addLog(`JOIN received from ${msg.from ?? "peer"}`);
-          })
-          .on("broadcast", { event: "session-control" }, (payload) => {
-            const msg = payload.payload as SessionControlMessage | undefined;
-            if (!msg || msg.type !== "LEAVE") return;
-            if (msg.room !== sessionId) return;
-            if (msg.from === activeRole) return;
-            leaveSignalReceivedRef.current = true;
-            addLog("Collaborator LEAVE received");
-            clearLostCountdown();
-            setCollaboratorLeft(true);
-            setStatus("failed");
-            setStatusNote("Collaborator has left the session.");
-          })
-          .subscribe((subStatus) => {
-            if (subStatus === "SUBSCRIBED" && activeRole === "peer") {
-              void preflightChannel?.send({
-                type: "broadcast",
-                event: "JOIN",
-                payload: { room: sessionId, from: "peer", at: new Date().toISOString() },
-              });
-            }
-          });
-        channelRef.current = preflightChannel;
-
         // 1) Prioritize microphone access before signaling / peer setup.
         setStatusNote("Syncing microphone...");
         let permissionExplicitlyDenied = false;
@@ -779,7 +720,7 @@ export default function StudioBridgePage() {
               setMicPermissionHint(
                 "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
               );
-              setStatusNote("Microphone access blocked by browser settings.");
+              setStatusNote("Microphone Required.");
               permissionExplicitlyDenied = true;
             }
           }
@@ -809,7 +750,7 @@ export default function StudioBridgePage() {
             setMicPermissionHint(
               "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
             );
-            setStatusNote("Microphone access is required to continue.");
+            setStatusNote("Microphone Required.");
           }
           throw new Error("Microphone permission is required for the studio bridge.");
         } finally {
@@ -852,7 +793,33 @@ export default function StudioBridgePage() {
           return;
         }
 
-        if (!isHost) {
+        if (isHost) {
+          addLog("Host mode: inserting studio_sessions row...");
+          setStatusNote("Creating session row...");
+
+          const hostUrl = new URL(window.location.href);
+          hostUrl.searchParams.set("room", sessionId);
+          setInviteLink(hostUrl.toString());
+
+          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
+            {
+              session_id: sessionId,
+              room_code: sessionId,
+              offer: null,
+              answer: null,
+              ice_candidates: [],
+              host_user_id: sessionUserId,
+              guest_user_id: null,
+            },
+            { onConflict: "session_id" }
+          );
+          if (insertErr) throw insertErr;
+
+          cleanupSessionRef.current = async () => {
+            addLog("Cleaning up studio_sessions row...");
+            await supabase.from("studio_sessions").delete().eq("session_id", sessionId);
+          };
+        } else {
           addLog("Peer mode: fetching studio_sessions row...");
           setStatusNote("Fetching room...");
 
@@ -879,15 +846,10 @@ export default function StudioBridgePage() {
         addLog("Creating simple-peer with resolved mic stream (default browser SDP)...");
         setStatusNote("Bypassing Firewall... (Relay Active)");
 
-        const hostUserId = isHost ? sessionUserId : existingRow?.host_user_id ?? null;
-        const isPolitePeer =
-          !!sessionUserId &&
-          !!hostUserId &&
-          sessionUserId.localeCompare(hostUserId) > 0;
-        addLog(`Perfect negotiation role: ${isPolitePeer ? "polite" : "impolite"}`);
+        addLog(`Perfect negotiation role: ${isHost ? "polite host (waits)" : "impolite guest (initiates)"}`);
 
         const peer = new Peer({
-          initiator: isHost,
+          initiator: !isHost,
           trickle: true,
           stream: mediaStream,
           config: STUDIO_PEER_CONNECTION_CONFIG,
@@ -1157,7 +1119,6 @@ export default function StudioBridgePage() {
           }
         });
 
-        preflightChannel?.unsubscribe();
         const channel = supabase
           .channel(`room_code:${sessionId}`)
           .on("broadcast", { event: "session-control" }, (payload) => {
@@ -1254,6 +1215,7 @@ export default function StudioBridgePage() {
 
     return () => {
       bridgeTeardownRef.current = null;
+      micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
     };
   }, [beginLostCountdown, clearForceResyncTimer, clearLostCountdown, retryInitTick]);
