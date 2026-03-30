@@ -4,9 +4,9 @@
 
 /** Shared ICE server config (STUN first, TURN fallback for strict networks). */
 export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
+  // Prioritize TCP/443 relay first for strict networks (campus/corporate firewalls).
   {
-    urls: "turn:open.metered.ca:80",
+    urls: "turn:open.metered.ca:443?transport=tcp",
     username: "7cbd6d02cf78e3bc5683bb2a",
     credential: "CPfbkDJuKleKcmkv",
   },
@@ -16,10 +16,11 @@ export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
     credential: "CPfbkDJuKleKcmkv",
   },
   {
-    urls: "turn:open.metered.ca:443?transport=tcp",
+    urls: "turn:open.metered.ca:80",
     username: "7cbd6d02cf78e3bc5683bb2a",
     credential: "CPfbkDJuKleKcmkv",
   },
+  { urls: "stun:stun.l.google.com:19302" },
 ];
 
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
@@ -28,6 +29,8 @@ export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
+    // Best-effort low-latency hint; some browser typings omit `latency` on track constraints.
+    ...({ latency: { ideal: 0.02 } } as unknown as MediaTrackConstraints),
     channelCount: 1,
     sampleRate: { ideal: 48000 },
   };

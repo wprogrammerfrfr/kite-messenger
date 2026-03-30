@@ -14,6 +14,12 @@ import {
 
 type BridgeStatus = "connecting" | "connected" | "failed";
 type Role = "host" | "peer";
+type SessionControlMessage = {
+  type: "LEAVE";
+  from: Role;
+  room: string;
+  at: string;
+};
 
 type IceCandidateRow = {
   id: string;
@@ -39,6 +45,15 @@ function randomSessionId() {
 
 function addLog(msg: string) {
   console.log(msg);
+}
+
+function setAudioBitrate(sdp: string): string {
+  const fmtp111Line = /a=fmtp:111[^\r\n]*/;
+  if (!fmtp111Line.test(sdp)) return sdp;
+  return sdp.replace(fmtp111Line, (line) => {
+    if (line.includes("maxaveragebitrate")) return line;
+    return `${line};maxaveragebitrate=64000`;
+  });
 }
 
 /** ~1s clean sine tone for speaker check (Web Audio API). */
@@ -262,6 +277,8 @@ export default function StudioBridgePage() {
   const [micMuted, setMicMuted] = useState(false);
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
+  const [collaboratorLeft, setCollaboratorLeft] = useState(false);
+  const [connectionLostCountdown, setConnectionLostCountdown] = useState<number | null>(null);
 
   const micDeniedThisInitRef = useRef(false);
 
@@ -282,6 +299,9 @@ export default function StudioBridgePage() {
   const existingRowRef = useRef<StudioSessionRow | null>(null);
   /** Idempotent mic / peer / Realtime teardown (explicit leave + unmount). */
   const bridgeTeardownRef = useRef<(() => void) | null>(null);
+  const leaveSignalSentRef = useRef(false);
+  const leaveSignalReceivedRef = useRef(false);
+  const lostCountdownIntervalRef = useRef<number | null>(null);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -334,6 +354,55 @@ export default function StudioBridgePage() {
     }
   }, [audioTestDone, audioTestPlaying, micPermissionDenied]);
 
+  const clearLostCountdown = useCallback(() => {
+    if (lostCountdownIntervalRef.current !== null) {
+      clearInterval(lostCountdownIntervalRef.current);
+      lostCountdownIntervalRef.current = null;
+    }
+    setConnectionLostCountdown(null);
+  }, []);
+
+  const beginLostCountdown = useCallback(() => {
+    clearLostCountdown();
+    setConnectionLostCountdown(30);
+    lostCountdownIntervalRef.current = window.setInterval(() => {
+      setConnectionLostCountdown((prev) => {
+        if (prev === null) return null;
+        if (prev <= 1) {
+          if (lostCountdownIntervalRef.current !== null) {
+            clearInterval(lostCountdownIntervalRef.current);
+            lostCountdownIntervalRef.current = null;
+          }
+          setStatus("failed");
+          setStatusNote("Signal timed out.");
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }, [clearLostCountdown]);
+
+  const sendLeaveSignal = useCallback(async () => {
+    if (leaveSignalSentRef.current || !roomId || !role) return;
+    leaveSignalSentRef.current = true;
+    const payload: SessionControlMessage = {
+      type: "LEAVE",
+      from: role,
+      room: roomId,
+      at: new Date().toISOString(),
+    };
+    try {
+      await channelRef.current?.send({
+        type: "broadcast",
+        event: "session-control",
+        payload,
+      });
+      addLog("LEAVE signal sent");
+    } catch (err) {
+      console.error("LEAVE signal send failed", err);
+    }
+  }, [roomId, role]);
+
   const toggleMicMuted = useCallback(() => {
     setMicMuted((prev) => {
       const nextMuted = !prev;
@@ -359,9 +428,14 @@ export default function StudioBridgePage() {
   }, []);
 
   const confirmEndSession = useCallback(() => {
-    bridgeTeardownRef.current?.();
-    router.push("/studio");
-  }, [router]);
+    void (async () => {
+      await sendLeaveSignal();
+      // Give the signaling channel a brief chance to flush.
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+      bridgeTeardownRef.current?.();
+      router.push("/studio");
+    })();
+  }, [router, sendLeaveSignal]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -420,6 +494,10 @@ export default function StudioBridgePage() {
     let connectTimeout: number | null = null;
     let localIceCandidateSeen = false;
     let timeoutExtendedForIce = false;
+    leaveSignalSentRef.current = false;
+    leaveSignalReceivedRef.current = false;
+    setCollaboratorLeft(false);
+    clearLostCountdown();
 
     const performTeardown = () => {
       if (teardownRan) return;
@@ -428,6 +506,7 @@ export default function StudioBridgePage() {
       void (async () => {
         try {
           setPingMs(null);
+          clearLostCountdown();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -466,6 +545,7 @@ export default function StudioBridgePage() {
             setMicMuted(false);
             setSpeakerMuted(false);
             speakerMutedRef.current = false;
+            setConnectionLostCountdown(null);
           }
 
           if (cleanupSessionRef.current) {
@@ -632,7 +712,11 @@ export default function StudioBridgePage() {
           initiator: isHost,
           trickle: true,
           stream: mediaStream,
-          config: { iceServers: STUDIO_ICE_SERVERS },
+          config: {
+            iceServers: STUDIO_ICE_SERVERS,
+            bundlePolicy: "max-bundle",
+          },
+          sdpTransform: setAudioBitrate,
         });
         peerRef.current = peer;
 
@@ -665,6 +749,28 @@ export default function StudioBridgePage() {
 
         // Start timeout window (with one automatic extension if ICE is still gathering).
         scheduleConnectTimeout(15000);
+
+        const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
+        if (rawPc) {
+          rawPc.addEventListener("iceconnectionstatechange", () => {
+            const iceState = rawPc.iceConnectionState;
+            addLog(`iceConnectionState=${iceState}`);
+
+            if (leaveSignalReceivedRef.current) return;
+            if (iceState === "connected" || iceState === "completed") {
+              clearLostCountdown();
+              if (statusRef.current !== "connected") {
+                setStatus("connected");
+                setStatusNote("P2P channel established.");
+              }
+              return;
+            }
+            if (iceState === "disconnected" || iceState === "failed") {
+              setStatusNote("Connection lost. Attempting to reconnect...");
+              beginLostCountdown();
+            }
+          });
+        }
 
         peer.on("stream", (remoteStream: MediaStream) => {
           if (!mountedRef.current) return;
@@ -772,6 +878,7 @@ export default function StudioBridgePage() {
 
         peer.on("connect", () => {
           if (!mountedRef.current) return;
+          clearLostCountdown();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -830,6 +937,7 @@ export default function StudioBridgePage() {
 
         peer.on("close", () => {
           if (!mountedRef.current) return;
+          clearLostCountdown();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -839,7 +947,7 @@ export default function StudioBridgePage() {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
           }
-          if (statusRef.current !== "connected") {
+          if (!leaveSignalReceivedRef.current && statusRef.current !== "connected") {
             addLog("Peer closed");
             setStatus("failed");
             setStatusNote(
@@ -850,6 +958,18 @@ export default function StudioBridgePage() {
 
         const channel = supabase
           .channel(`studio-session-${sessionId}`)
+          .on("broadcast", { event: "session-control" }, (payload) => {
+            const msg = payload.payload as SessionControlMessage | undefined;
+            if (!msg || msg.type !== "LEAVE") return;
+            if (msg.room !== sessionId) return;
+            if (msg.from === activeRole) return;
+            leaveSignalReceivedRef.current = true;
+            addLog("Collaborator LEAVE received");
+            clearLostCountdown();
+            setCollaboratorLeft(true);
+            setStatus("failed");
+            setStatusNote("Collaborator has left the session.");
+          })
           .on(
             "postgres_changes",
             {
@@ -934,7 +1054,7 @@ export default function StudioBridgePage() {
       bridgeTeardownRef.current = null;
       performTeardown();
     };
-  }, []);
+  }, [beginLostCountdown, clearLostCountdown]);
 
   const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
@@ -1318,6 +1438,43 @@ export default function StudioBridgePage() {
               <p className="text-center text-xs text-stone-500">{statusNote}</p>
             </motion.div>
           )}
+
+          {collaboratorLeft ? (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-6 rounded-xl border border-orange-500/25 bg-stone-900/50 px-4 py-4 text-center"
+            >
+              <p className="text-sm font-semibold text-stone-200">Collaborator has left the session.</p>
+              <motion.button
+                type="button"
+                onClick={returnToLobby}
+                whileTap={{ scale: 0.97 }}
+                className="mt-4 w-full rounded-xl border border-orange-500/35 bg-gradient-to-r from-orange-500/15 to-stone-700/20 px-4 py-3 text-sm font-semibold text-stone-100 transition hover:from-orange-500/25 hover:to-stone-700/30"
+              >
+                Return to Lobby
+              </motion.button>
+            </motion.div>
+          ) : null}
+
+          {connectionLostCountdown !== null && !collaboratorLeft ? (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-6 rounded-xl border border-stone-700 bg-stone-900/40 px-4 py-4 text-center"
+            >
+              <p className="text-sm font-semibold text-stone-200">
+                {connectionLostCountdown > 0
+                  ? "Connection lost. Attempting to reconnect..."
+                  : "Signal timed out."}
+              </p>
+              {connectionLostCountdown > 0 ? (
+                <p className="mt-1 text-xs text-stone-400">
+                  Signal retry window: {connectionLostCountdown}s
+                </p>
+              ) : null}
+            </motion.div>
+          ) : null}
         </motion.div>
       </div>
     </div>
