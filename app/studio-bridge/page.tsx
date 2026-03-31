@@ -948,11 +948,8 @@ export default function StudioBridgePage() {
               return;
             }
             if (iceState === "failed") {
-              setStatus("failed");
-              setStatusNote(
-                "Connection failed. This can happen on some restricted Wi-Fi networks (like Universities). Try switching to Mobile Data."
-              );
               beginLostCountdown();
+              setStatusNote("Connection unstable, attempting to recover...");
             }
           });
         }
@@ -1074,10 +1071,6 @@ export default function StudioBridgePage() {
 
         peer.on("error", (err: unknown) => {
           if (!mountedRef.current) return;
-          if (connectTimeout !== null) {
-            clearTimeout(connectTimeout);
-            connectTimeout = null;
-          }
           const msg =
             err instanceof Error
               ? err.message
@@ -1094,35 +1087,18 @@ export default function StudioBridgePage() {
             code,
             iceServers: STUDIO_ICE_SERVERS.map((s) => s.urls),
           });
-          setPingMs(null);
-          if (pingIntervalRef.current) {
-            clearInterval(pingIntervalRef.current);
-            pingIntervalRef.current = null;
-          }
-          setStatus("failed");
-          setStatusNote(
-            "Connection failed. This can happen on some restricted Wi-Fi networks (like Universities). Try switching to Mobile Data."
-          );
         });
 
         peer.on("close", () => {
           if (!mountedRef.current) return;
-          clearLostCountdown();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
           }
-          setPingMs(null);
-          if (pingIntervalRef.current) {
-            clearInterval(pingIntervalRef.current);
-            pingIntervalRef.current = null;
-          }
           if (!leaveSignalReceivedRef.current && statusRef.current !== "connected") {
             addLog("Peer closed");
-            setStatus("failed");
-            setStatusNote(
-              "Connection failed. This can happen on some restricted Wi-Fi networks (like Universities). Try switching to Mobile Data."
-            );
+            beginLostCountdown();
+            setStatusNote("Connection lost, attempting to recover...");
           }
         });
 
