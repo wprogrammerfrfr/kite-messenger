@@ -935,6 +935,28 @@ export default function StudioBridgePage() {
             addLog(`ICE gathering state: ${rawPc.iceGatheringState}`);
           });
 
+          rawPc.addEventListener("icecandidate", (event) => {
+            if (event.candidate) {
+              addLog(
+                `ICE candidate gathered: type=${event.candidate.type} protocol=${event.candidate.protocol} port=${event.candidate.port}`
+              );
+            }
+          });
+
+          rawPc.addEventListener(
+            "icecandidateerror",
+            (event: RTCPeerConnectionIceErrorEvent) => {
+              addLog(
+                `ICE candidate error: ${event.errorCode} ${event.errorText} url: ${event.url}`
+              );
+              console.error("ICE candidate error detail:", {
+                errorCode: event.errorCode,
+                errorText: event.errorText,
+                url: event.url,
+              });
+            }
+          );
+
           rawPc.addEventListener("iceconnectionstatechange", () => {
             const iceState = rawPc.iceConnectionState;
             addLog(`iceConnectionState=${iceState}`);
