@@ -7,6 +7,14 @@ export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
+  {
+    urls: [
+      "turn:global.turn.metered.ca:3478?transport=udp",
+      "turns:global.turn.metered.ca:443?transport=tcp",
+    ],
+    username: process.env.NEXT_PUBLIC_METERED_USERNAME,
+    credential: process.env.NEXT_PUBLIC_METERED_PASSWORD,
+  },
 ];
 
 /** Adaptive behavior for strict networks + VPN tunnel fallback paths. */
