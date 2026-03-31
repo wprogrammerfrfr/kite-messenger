@@ -9,8 +9,8 @@ import { supabase } from "@/lib/supabase";
 import {
   acquireStudioMicStream,
   decodePeerDataChunk,
-  STUDIO_ICE_SERVERS,
   STUDIO_PEER_CONNECTION_CONFIG,
+  fetchTurnCredentials,
 } from "@/lib/studio-bridge-webrtc";
 
 type BridgeStatus = "connecting" | "connected" | "failed";
@@ -891,11 +891,16 @@ export default function StudioBridgePage() {
           `Negotiation: ${isHost ? "host initiates (offer first)" : "guest answers"}`
         );
 
+        const iceServers = await fetchTurnCredentials();
+        const peerConfig = {
+          ...STUDIO_PEER_CONNECTION_CONFIG,
+          iceServers,
+        };
         const peer = new Peer({
           initiator: isHost,
           trickle: true,
           stream: mediaStream,
-          config: STUDIO_PEER_CONNECTION_CONFIG,
+          config: peerConfig,
         });
         peerRef.current = peer;
 
