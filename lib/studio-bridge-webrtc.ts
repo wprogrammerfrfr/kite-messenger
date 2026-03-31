@@ -5,16 +5,19 @@
 /** Shared ICE server config (simple STUN only for localhost/basic networks). */
 export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
   {
     urls: [
-      "turn:global.turn.metered.ca:3478?transport=udp",
-      "turns:global.turn.metered.ca:443?transport=tcp",
+      "stun:stun.relay.metered.ca:80",
+      "turn:global.relay.metered.ca:80",
+      "turn:global.relay.metered.ca:80?transport=tcp",
+      "turn:global.relay.metered.ca:443",
+      "turns:global.relay.metered.ca:443?transport=tcp",
     ],
     username: process.env.NEXT_PUBLIC_METERED_USERNAME,
     credential: process.env.NEXT_PUBLIC_METERED_PASSWORD,
   },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
 ];
 
 /** Adaptive behavior for strict networks + VPN tunnel fallback paths. */
