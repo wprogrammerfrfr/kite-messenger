@@ -6,6 +6,7 @@ import {
   NetworkFirst,
   CacheFirst,
   ExpirationPlugin,
+  NetworkOnly,
 } from "serwist";
 
 declare global {
@@ -50,6 +51,10 @@ const serwist = new Serwist({
         url.pathname.includes("/rest/v1/") ||
         url.pathname.includes("/realtime/"),
       handler: supabaseNetworkFirst,
+    },
+    {
+      matcher: ({ url }) => url.pathname.includes("/studio-bridge"),
+      handler: new NetworkOnly(),
     },
     {
       matcher: ({ request, sameOrigin }) =>
