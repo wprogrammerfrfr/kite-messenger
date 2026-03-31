@@ -916,7 +916,7 @@ export default function StudioBridgePage() {
             }
 
             console.error("WebRTC timeout before connect", {
-              iceServers: STUDIO_ICE_SERVERS.map((s) => s.urls),
+              iceServers: STUDIO_ICE_SERVERS,
               localIceCandidateSeen,
             });
             setStatus("failed");
@@ -1135,7 +1135,7 @@ export default function StudioBridgePage() {
           console.error("WebRTC peer error detail", {
             message: msg,
             code,
-            iceServers: STUDIO_ICE_SERVERS.map((s) => s.urls),
+            iceServers: STUDIO_ICE_SERVERS,
           });
         });
 
