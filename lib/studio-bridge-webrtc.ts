@@ -1,27 +1,46 @@
 /**
- * Studio bridge WebRTC helpers (browser-only callers must guard with typeof window).
- */
+* Studio bridge WebRTC helpers (browser-only callers must guard with typeof window).
+*/
+
+function getTurnCredentials() {
+  const username = process.env.NEXT_PUBLIC_METERED_USERNAME ?? "";
+  const credential = process.env.NEXT_PUBLIC_METERED_PASSWORD ?? "";
+  if (!username || !credential) {
+    console.warn(
+      "[Kite] TURN credentials missing — relay will not work on restricted networks"
+    );
+  }
+  return { username, credential };
+}
 
 /** Shared ICE server config (simple STUN only for localhost/basic networks). */
 export const STUDIO_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
   {
     urls: [
-      "stun:stun.relay.metered.ca:80",
+      "turn:global.relay.metered.ca:80",
+      "turn:global.relay.metered.ca:80?transport=tcp",
       "turn:global.relay.metered.ca:443?transport=tcp",
       "turns:global.relay.metered.ca:443?transport=tcp",
     ],
-    username: process.env.NEXT_PUBLIC_METERED_USERNAME,
-    credential: process.env.NEXT_PUBLIC_METERED_PASSWORD,
+    ...getTurnCredentials(),
   },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
 ];
+
+if (typeof window !== "undefined") {
+  const creds = getTurnCredentials();
+  console.log("[Kite] TURN config loaded:", {
+    username: creds.username ? `${creds.username.slice(0, 6)}...` : "MISSING",
+    credential: creds.credential ? "present" : "MISSING",
+    urls: STUDIO_ICE_SERVERS[2]?.urls,
+  });
+}
 
 /** Adaptive behavior for strict networks + VPN tunnel fallback paths. */
 export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
   iceServers: STUDIO_ICE_SERVERS,
-  iceTransportPolicy: "all",
+  iceTransportPolicy: "relay",
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",
   iceCandidatePoolSize: 10,
