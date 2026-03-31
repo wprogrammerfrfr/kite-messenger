@@ -931,6 +931,10 @@ export default function StudioBridgePage() {
 
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {
+          rawPc.addEventListener("icegatheringstatechange", () => {
+            addLog(`ICE gathering state: ${rawPc.iceGatheringState}`);
+          });
+
           rawPc.addEventListener("iceconnectionstatechange", () => {
             const iceState = rawPc.iceConnectionState;
             addLog(`iceConnectionState=${iceState}`);
@@ -941,6 +945,30 @@ export default function StudioBridgePage() {
               setError(null);
               setStatus("connected");
               clearLostCountdown();
+              rawPc
+                .getStats()
+                .then((stats) => {
+                  stats.forEach((report) => {
+                    if (report.type === "candidate-pair" && report.state === "succeeded") {
+                      addLog(
+                        `SELECTED PAIR — local: ${report.localCandidateId} remote: ${report.remoteCandidateId}`
+                      );
+                    }
+                    if (report.type === "local-candidate") {
+                      addLog(
+                        `LOCAL candidate type: ${report.candidateType} protocol: ${report.protocol}`
+                      );
+                    }
+                    if (report.type === "remote-candidate") {
+                      addLog(
+                        `REMOTE candidate type: ${report.candidateType} protocol: ${report.protocol}`
+                      );
+                    }
+                  });
+                })
+                .catch(() => {
+                  // Stats may not be available in all environments; ignore errors.
+                });
               return;
             }
             if (iceState === "disconnected") {
