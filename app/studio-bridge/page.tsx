@@ -921,7 +921,7 @@ export default function StudioBridgePage() {
             }
 
             console.error("WebRTC timeout before connect", {
-              iceServers: STUDIO_ICE_SERVERS,
+              iceServers: "Fetched dynamically",
               localIceCandidateSeen,
             });
             setStatus("failed");
@@ -937,23 +937,16 @@ export default function StudioBridgePage() {
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {
           rawPc.addEventListener("icegatheringstatechange", () => {
-            addLog(`ICE gathering state: ${rawPc.iceGatheringState}`);
+            // no-op
           });
 
-          rawPc.addEventListener("icecandidate", (event) => {
-            if (event.candidate) {
-              addLog(
-                `ICE candidate gathered: type=${event.candidate.type} protocol=${event.candidate.protocol} port=${event.candidate.port}`
-              );
-            }
+          rawPc.addEventListener("icecandidate", (_event) => {
+            // no-op
           });
 
           rawPc.addEventListener(
             "icecandidateerror",
             (event: RTCPeerConnectionIceErrorEvent) => {
-              addLog(
-                `ICE candidate error: ${event.errorCode} ${event.errorText} url: ${event.url}`
-              );
               console.error("ICE candidate error detail:", {
                 errorCode: event.errorCode,
                 errorText: event.errorText,
@@ -1069,7 +1062,6 @@ export default function StudioBridgePage() {
                 from: activeRole,
                 candidate: signalData,
               };
-              addLog("ICE candidate found");
               enqueueIceAppend(candidateRecord);
               return;
             }
@@ -1140,7 +1132,7 @@ export default function StudioBridgePage() {
           console.error("WebRTC peer error detail", {
             message: msg,
             code,
-            iceServers: STUDIO_ICE_SERVERS,
+            iceServers: peerConfig?.iceServers ?? "fetched-at-runtime",
           });
         });
 
@@ -1166,7 +1158,6 @@ export default function StudioBridgePage() {
             setStatusNote("Creating answer...");
           }
           if (initial?.ice_candidates) {
-            addLog("Initial ICE loaded");
             applyRemoteIce(initial.ice_candidates, activeRole);
           }
         } else {
@@ -1181,7 +1172,6 @@ export default function StudioBridgePage() {
             peer.signal(current.answer);
           }
           if (current?.ice_candidates) {
-            addLog("Initial ICE loaded (host)");
             applyRemoteIce(current.ice_candidates, activeRole);
           }
         }
