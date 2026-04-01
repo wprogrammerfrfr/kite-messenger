@@ -1022,15 +1022,11 @@ export default function StudioBridgePage() {
           try {
             const text = decodePeerDataChunk(chunk);
             const msg = JSON.parse(text) as { t?: string; ts?: number };
-            if (msg.t === "ping" && typeof msg.ts === "number" && activeRole === "peer") {
+            if (msg.t === "ping" && typeof msg.ts === "number") {
               peer.send(JSON.stringify({ t: "pong", ts: msg.ts }));
-            } else if (
-              msg.t === "pong" &&
-              typeof msg.ts === "number" &&
-              activeRole === "host" &&
-              mountedRef.current
-            ) {
-              setPingMs(Math.round(performance.now() - msg.ts));
+            } else if (msg.t === "pong" && typeof msg.ts === "number" && mountedRef.current) {
+              const latency = Math.round(performance.now() - msg.ts);
+              setPingMs(latency);
             }
           } catch {
             // Ignore non-JSON or malformed ping payloads.
@@ -1114,10 +1110,25 @@ export default function StudioBridgePage() {
             clearTimeout(connectTimeout);
             connectTimeout = null;
           }
+          if (pingIntervalRef.current !== null) {
+            clearInterval(pingIntervalRef.current);
+          }
+          pingIntervalRef.current = window.setInterval(() => {
+            if (!mountedRef.current) return;
+            try {
+              peer.send(JSON.stringify({ t: "ping", ts: performance.now() }));
+            } catch {
+              // Best-effort ping; ignore send errors.
+            }
+          }, 2000);
         });
 
         peer.on("error", (err: unknown) => {
           if (!mountedRef.current) return;
+          if (pingIntervalRef.current !== null) {
+            clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = null;
+          }
           const msg =
             err instanceof Error
               ? err.message
@@ -1138,6 +1149,10 @@ export default function StudioBridgePage() {
 
         peer.on("close", () => {
           if (!mountedRef.current) return;
+          if (pingIntervalRef.current !== null) {
+            clearInterval(pingIntervalRef.current);
+            pingIntervalRef.current = null;
+          }
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -1572,7 +1587,7 @@ export default function StudioBridgePage() {
               animate={{ opacity: 1, y: 0 }}
               className="mt-8 space-y-4"
             >
-              {status === "connected" && role === "host" ? (
+              {status === "connected" ? (
                 <div className="rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center font-mono text-sm text-stone-200">
                   Ping:{" "}
                   <span className="text-emerald-400 tabular-nums">
