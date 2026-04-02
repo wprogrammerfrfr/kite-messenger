@@ -287,8 +287,8 @@ export default function StudioBridgePage() {
   const [roomCopyNote, setRoomCopyNote] = useState<string | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [remoteLevel, setRemoteLevel] = useState(0);
-  const [micMuted, setMicMuted] = useState(false);
-  const [speakerMuted, setSpeakerMuted] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [collaboratorLeft, setCollaboratorLeft] = useState(false);
   const [connectionLostCountdown, setConnectionLostCountdown] = useState<number | null>(null);
@@ -352,9 +352,9 @@ export default function StudioBridgePage() {
   const remoteIsLive = remoteLevel > 0.07;
 
   useEffect(() => {
-    speakerMutedRef.current = speakerMuted;
-    if (remoteAudioRef.current) remoteAudioRef.current.muted = speakerMuted;
-  }, [speakerMuted]);
+    speakerMutedRef.current = isSpeakerMuted;
+    if (remoteAudioRef.current) remoteAudioRef.current.muted = isSpeakerMuted;
+  }, [isSpeakerMuted]);
 
   useEffect(() => {
     if (!remoteStream) setRemoteLevel(0);
@@ -423,8 +423,8 @@ export default function StudioBridgePage() {
     }
   }, [sessionId, role]);
 
-  const toggleMicMuted = useCallback(() => {
-    setMicMuted((prev) => {
+  const toggleMic = useCallback(() => {
+    setIsMicMuted((prev) => {
       const nextMuted = !prev;
       const enabled = !nextMuted;
       localStreamRef.current?.getAudioTracks().forEach((track) => {
@@ -434,11 +434,11 @@ export default function StudioBridgePage() {
     });
   }, []);
 
-  const toggleSpeakerMuted = useCallback(() => {
-    setSpeakerMuted((prev) => {
+  const toggleSpeaker = useCallback(() => {
+    setIsSpeakerMuted((prev) => {
       const nextMuted = !prev;
       speakerMutedRef.current = nextMuted;
-      if (remoteAudioRef.current) remoteAudioRef.current.muted = nextMuted;
+      if (remoteAudioRef.current) remoteAudioRef.current.muted = !prev;
       return nextMuted;
     });
   }, []);
@@ -597,8 +597,8 @@ export default function StudioBridgePage() {
             setAudioTestDone(false);
             setAudioTestFailed(false);
             setRemoteLevel(0);
-            setMicMuted(false);
-            setSpeakerMuted(false);
+            setIsMicMuted(false);
+            setIsSpeakerMuted(false);
             speakerMutedRef.current = false;
             setConnectionLostCountdown(null);
           }
@@ -1490,49 +1490,53 @@ export default function StudioBridgePage() {
                   <motion.button
                     type="button"
                     disabled={!localMicStream || micPermissionDenied}
-                    onClick={toggleMicMuted}
+                    onClick={toggleMic}
                     whileTap={{ scale: 0.97 }}
                     className={`flex flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
-                      micMuted
+                      isMicMuted
                         ? "border-orange-500/35 text-orange-200/90"
                         : "border-stone-800/70 text-stone-200/90"
                     }`}
                     style={
-                      micMuted
+                      isMicMuted
                         ? {
                             boxShadow: `0 0 26px -10px ${ORANGE}cc`,
                           }
                         : undefined
                     }
                   >
-                    {micMuted ? <MicOff className="h-4 w-4" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
-                    <span className="text-[11px]">{micMuted ? "Muted" : "Mic"}</span>
+                    {isMicMuted ? (
+                      <MicOff className="h-4 w-4" aria-hidden />
+                    ) : (
+                      <Mic className="h-4 w-4" aria-hidden />
+                    )}
+                    <span className="text-[11px]">{isMicMuted ? "Muted" : "Mic"}</span>
                   </motion.button>
 
                   <motion.button
                     type="button"
                     disabled={!remoteStream}
-                    onClick={toggleSpeakerMuted}
+                    onClick={toggleSpeaker}
                     whileTap={{ scale: 0.97 }}
                     className={`flex flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
-                      speakerMuted
+                      isSpeakerMuted
                         ? "border-stone-800/70 text-stone-200/90"
                         : "border-emerald-500/35 text-emerald-200/90"
                     }`}
                     style={
-                      speakerMuted
+                      isSpeakerMuted
                         ? undefined
                         : {
                             boxShadow: `0 0 26px -10px ${EMERALD}cc`,
                           }
                     }
                   >
-                    {speakerMuted ? (
+                    {isSpeakerMuted ? (
                       <VolumeX className="h-4 w-4" aria-hidden />
                     ) : (
                       <Volume2 className="h-4 w-4" aria-hidden />
                     )}
-                    <span className="text-[11px]">{speakerMuted ? "Muted" : "Speaker"}</span>
+                    <span className="text-[11px]">{isSpeakerMuted ? "Muted" : "Speaker"}</span>
                   </motion.button>
 
                   <motion.button
@@ -1588,12 +1592,38 @@ export default function StudioBridgePage() {
               className="mt-8 space-y-4"
             >
               {status === "connected" ? (
-                <div className="rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center font-mono text-sm text-stone-200">
-                  Ping:{" "}
-                  <span className="text-emerald-400 tabular-nums">
-                    {pingMs === null ? "--" : `${pingMs}`}
-                  </span>{" "}
-                  ms
+                <div className="flex flex-wrap items-center justify-center gap-4 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
+                  <div className="font-mono text-sm text-stone-200">
+                    Ping:{" "}
+                    <span className="text-emerald-400 tabular-nums">
+                      {pingMs === null ? "--" : `${pingMs}`}
+                    </span>{" "}
+                    ms
+                  </div>
+                  <button
+                    type="button"
+                    onClick={toggleMic}
+                    className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
+                    aria-label={isMicMuted ? "Enable microphone" : "Mute microphone"}
+                    aria-pressed={isMicMuted}
+                  >
+                    <span className={`text-sm font-semibold ${isMicMuted ? "text-rose-500" : "text-emerald-400"}`}>
+                      MIC
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={toggleSpeaker}
+                    className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
+                    aria-label={isSpeakerMuted ? "Enable speaker" : "Mute speaker"}
+                    aria-pressed={isSpeakerMuted}
+                  >
+                    <span
+                      className={`text-sm font-semibold ${isSpeakerMuted ? "text-rose-500" : "text-emerald-400"}`}
+                    >
+                      SPK
+                    </span>
+                  </button>
                 </div>
               ) : null}
 
