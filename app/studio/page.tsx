@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
@@ -10,8 +9,6 @@ import { supabase } from "@/lib/supabase";
 const ORANGE = "#ff4500";
 /** Tailwind `emerald-500` — pairs with studio-bridge emerald UI. */
 const EMERALD = "#22c55e";
-
-const MotionLink = motion(Link);
 
 function SystemStatusDot() {
   return (
@@ -44,7 +41,7 @@ export default function StudioLobbyPage() {
   const router = useRouter();
   const [roomCode, setRoomCode] = useState("");
   const [joinError, setJoinError] = useState<string | null>(null);
-  const [joining, setJoining] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [joinSuccess, setJoinSuccess] = useState(false);
   const [joinShakeTick, setJoinShakeTick] = useState(0);
   const [welcomeMode, setWelcomeMode] = useState<"loading" | "loggedOut" | "welcomeBack">("loading");
@@ -151,16 +148,16 @@ export default function StudioLobbyPage() {
     setJoinError(null);
     setJoinSuccess(false);
 
-    if (joining) return;
-    const code = codeNormalized;
+    if (isConnecting) return;
+    const code = codeNormalized.trim();
     const lookupCode = code.toUpperCase();
     console.log("[Studio Lobby] Join Session lookup code:", lookupCode || "(empty)");
-    if (code.length !== 6) {
+    if (code.length !== 6 || !/^[a-zA-Z0-9]{6}$/.test(code)) {
       setJoinError("Enter the 6-character signal code.");
       return;
     }
 
-    setJoining(true);
+    setIsConnecting(true);
     void (async () => {
       try {
         const { data, error } = await supabase
@@ -184,10 +181,19 @@ export default function StudioLobbyPage() {
         console.error("[Studio Lobby] Join request exception", err);
         triggerJoinFailure("Signal not found. Check the code and try again.");
       } finally {
-        setJoining(false);
+        setIsConnecting(false);
       }
     })();
-  }, [codeNormalized, joining, router, triggerJoinFailure]);
+  }, [codeNormalized, isConnecting, router, triggerJoinFailure]);
+
+  const handleHostSession = useCallback(() => {
+    if (isConnecting) return;
+    setIsConnecting(true);
+    router.push("/studio-bridge");
+  }, [isConnecting, router]);
+
+  const joinCodeValid =
+    codeNormalized.trim().length === 6 && /^[a-zA-Z0-9]{6}$/.test(codeNormalized.trim());
 
   return (
     <div className="relative min-h-screen select-none overflow-hidden text-white antialiased [&_input]:select-text [&_textarea]:select-text">
@@ -301,13 +307,15 @@ export default function StudioLobbyPage() {
                 <p className="mt-3 text-sm font-medium leading-relaxed text-stone-400">
                   Start a new session and invite others.
                 </p>
-              <MotionLink
-                href="/studio-bridge"
-                className="mt-6 flex w-full items-center justify-center rounded-xl border border-orange-500/35 bg-gradient-to-r from-orange-500/15 to-emerald-500/15 px-4 py-3 text-sm font-semibold text-stone-100 transition hover:from-orange-500/25 hover:to-emerald-500/25 hover:border-orange-500/45"
-                whileTap={{ scale: 0.97 }}
+              <motion.button
+                type="button"
+                onClick={handleHostSession}
+                disabled={isConnecting}
+                className="mt-6 flex w-full items-center justify-center rounded-xl border border-orange-500/35 bg-gradient-to-r from-orange-500/15 to-emerald-500/15 px-4 py-3 text-sm font-semibold text-stone-100 transition hover:from-orange-500/25 hover:to-emerald-500/25 hover:border-orange-500/45 disabled:pointer-events-none disabled:opacity-50"
+                whileTap={isConnecting ? undefined : { scale: 0.97 }}
               >
-                Host Session
-              </MotionLink>
+                {isConnecting ? "Connecting..." : "Host Session"}
+              </motion.button>
             </div>
           </section>
 
@@ -362,11 +370,11 @@ export default function StudioLobbyPage() {
             <motion.button
               type="button"
               onClick={handleJoin}
-              className="mt-5 w-full rounded-xl border border-orange-500/25 bg-transparent px-4 py-3 text-sm font-semibold text-stone-200 transition hover:border-emerald-500/35 hover:bg-white/[0.04]"
-              whileTap={{ scale: 0.97 }}
-              disabled={joining}
+              className="mt-5 w-full rounded-xl border border-orange-500/25 bg-transparent px-4 py-3 text-sm font-semibold text-stone-200 transition hover:border-emerald-500/35 hover:bg-white/[0.04] disabled:pointer-events-none disabled:opacity-50"
+              whileTap={!joinCodeValid || isConnecting ? undefined : { scale: 0.97 }}
+              disabled={!joinCodeValid || isConnecting}
             >
-              Join Session
+              {isConnecting ? "Connecting..." : "Join Session"}
             </motion.button>
             <div className="relative mt-4 min-h-[52px]">
               <AnimatePresence mode="wait">

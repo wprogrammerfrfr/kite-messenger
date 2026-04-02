@@ -61,6 +61,15 @@ function randomSessionId(): string {
   return normalizeStudioSessionId(Math.random().toString(36).slice(2, 8));
 }
 
+const MIC_ACCESS_DENIED_COPY =
+  "Microphone access denied. Please allow microphone permissions to use the studio.";
+
+function isMicPermissionDeniedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  return name === "NotAllowedError" || name === "PermissionDeniedError";
+}
+
 function addLog(msg: string) {
   console.log(msg);
 }
@@ -753,10 +762,20 @@ export default function StudioBridgePage() {
           micDeniedThisInitRef.current = true;
           if (mountedRef.current) {
             setMicPermissionDenied(true);
-            setMicPermissionHint(
-              "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
-            );
-            setStatusNote("Microphone Required.");
+            if (isMicPermissionDeniedError(micErr)) {
+              setStatus("failed");
+              setMicSyncTimedOut(false);
+              setStatusNote(MIC_ACCESS_DENIED_COPY);
+              setMicPermissionHint(MIC_ACCESS_DENIED_COPY);
+            } else {
+              setMicPermissionHint(
+                "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
+              );
+              setStatusNote("Microphone Required.");
+            }
+          }
+          if (isMicPermissionDeniedError(micErr)) {
+            return;
           }
           throw new Error("Microphone permission is required for the studio bridge.");
         } finally {
