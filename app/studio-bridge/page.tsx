@@ -809,11 +809,31 @@ export default function StudioBridgePage() {
 
           const { data: fetched, error: fetchErr } = await supabase
             .from("studio_sessions")
-            .select("session_id, offer, answer, ice_candidates")
+            .select("session_id, offer, answer, ice_candidates, host_user_id")
             .eq("session_id", sessionId.toUpperCase())
             .single<StudioSessionRow>();
 
           if (fetchErr || !fetched) throw new Error("Room not found.");
+
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+          if (user?.id && fetched.host_user_id && user.id === fetched.host_user_id) {
+            micStream?.getTracks().forEach((t) => t.stop());
+            micStream = null;
+            localStreamRef.current = null;
+            if (localMonitorAudioRef.current) {
+              localMonitorAudioRef.current.srcObject = null;
+            }
+            if (mountedRef.current) {
+              setLocalMicStream(null);
+              setStatus("failed");
+              setStatusNote("You cannot join your own session as a guest.");
+              window.alert("You cannot join your own session as a guest.");
+            }
+            return;
+          }
+
           existingRowRef.current = fetched;
         }
 
