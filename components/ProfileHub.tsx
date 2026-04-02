@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, memo } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
-import { Sun, Moon, AlertTriangle } from "lucide-react";
+import { Sun, Moon, AlertTriangle, KeyRound } from "lucide-react";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { getStoredAppearance, setAppearanceMode } from "@/components/theme-provider";
 import { InstallKiteButton } from "@/components/InstallKiteButton";
@@ -96,6 +96,11 @@ export const ProfileHub = memo(function ProfileHub() {
   const [notificationsMuted, setNotificationsMuted] = useState(false);
   const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
   const [personalNotes, setPersonalNotes] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const notesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -624,6 +629,129 @@ export const ProfileHub = memo(function ProfileHub() {
                   minHeight: "7.5rem",
                 }}
               />
+            </section>
+
+            <section
+              className="rounded-2xl border p-4 sm:p-5"
+              style={{ borderColor: theme.border }}
+              aria-labelledby="security-heading"
+            >
+              <div className="mb-4 flex items-center gap-2">
+                <KeyRound
+                  className="h-4 w-4 shrink-0 text-emerald-500"
+                  aria-hidden
+                />
+                <h2
+                  id="security-heading"
+                  className="text-sm font-semibold uppercase tracking-[0.16em]"
+                  style={{ color: theme.textPrimary }}
+                >
+                  Security
+                </h2>
+              </div>
+              <p className="mb-4 text-xs" style={{ color: theme.textSecondary }}>
+                Choose a strong password. You’ll stay signed in on this device after updating.
+              </p>
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="profile-new-password"
+                    className="text-xs font-medium uppercase tracking-[0.18em]"
+                  >
+                    New Password
+                  </label>
+                  <input
+                    id="profile-new-password"
+                    type="password"
+                    autoComplete="new-password"
+                    value={newPassword}
+                    onChange={(e) => {
+                      setNewPassword(e.target.value);
+                      setPasswordError(null);
+                      setPasswordSuccess(null);
+                    }}
+                    className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
+                    style={{
+                      background: theme.inputBg,
+                      borderColor: theme.border,
+                      color: theme.textPrimary,
+                    }}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="profile-confirm-password"
+                    className="text-xs font-medium uppercase tracking-[0.18em]"
+                  >
+                    Confirm Password
+                  </label>
+                  <input
+                    id="profile-confirm-password"
+                    type="password"
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={(e) => {
+                      setConfirmPassword(e.target.value);
+                      setPasswordError(null);
+                      setPasswordSuccess(null);
+                    }}
+                    className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border"
+                    style={{
+                      background: theme.inputBg,
+                      borderColor: theme.border,
+                      color: theme.textPrimary,
+                    }}
+                  />
+                </div>
+                {passwordError ? (
+                  <div className="rounded-xl border border-red-400/70 bg-red-500/5 px-3 py-2 text-xs text-red-600">
+                    {passwordError}
+                  </div>
+                ) : null}
+                {passwordSuccess && !passwordError ? (
+                  <div className="rounded-xl border border-emerald-400/70 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-700">
+                    {passwordSuccess}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={passwordSaving}
+                  onClick={async () => {
+                    setPasswordError(null);
+                    setPasswordSuccess(null);
+                    if (newPassword.length < 8) {
+                      setPasswordError("Password must be at least 8 characters.");
+                      return;
+                    }
+                    if (newPassword !== confirmPassword) {
+                      setPasswordError("Passwords do not match.");
+                      return;
+                    }
+                    setPasswordSaving(true);
+                    try {
+                      const { error: updateErr } = await supabase.auth.updateUser({
+                        password: newPassword,
+                      });
+                      if (updateErr) {
+                        setPasswordError(updateErr.message);
+                      } else {
+                        setPasswordSuccess("Your password was updated successfully.");
+                        setNewPassword("");
+                        setConfirmPassword("");
+                      }
+                    } catch (err) {
+                      setPasswordError(
+                        err instanceof Error ? err.message : "Could not update password."
+                      );
+                    } finally {
+                      setPasswordSaving(false);
+                    }
+                  }}
+                  className="inline-flex w-full items-center justify-center rounded-xl border border-stone-600/80 bg-stone-900/40 px-4 py-2.5 text-sm font-semibold text-stone-100 shadow-sm transition hover:border-emerald-500/50 hover:bg-stone-800/60 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {passwordSaving ? "Updating…" : "Update password"}
+                </button>
+              </div>
             </section>
 
             <section className="rounded-2xl border p-4 sm:p-5" style={{ borderColor: theme.border }}>

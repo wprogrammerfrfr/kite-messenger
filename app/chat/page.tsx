@@ -190,6 +190,20 @@ type MessagesDecryptedItem = {
   isRead?: boolean | null;
 };
 
+function mergeChatMessagesById(
+  prev: MessagesDecryptedItem[],
+  incoming: MessagesDecryptedItem[]
+): MessagesDecryptedItem[] {
+  const byId = new Map<string, MessagesDecryptedItem>();
+  for (const m of prev) byId.set(String(m.id), m);
+  for (const m of incoming) byId.set(String(m.id), m);
+  return Array.from(byId.values()).sort((a, b) => {
+    const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return ta - tb;
+  });
+}
+
 function parseDecryptedPayload(decrypted: string): {
   text: string;
   isImage: boolean;
@@ -299,6 +313,8 @@ export default function Home() {
     viewerId: string;
     rows: MessagesFetchRow[];
   } | null>(null);
+  /** One pair-specific warmup fetch per (viewer, recipient) to fix empty filtered threads. */
+  const pairWarmupAttemptedRef = useRef<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesListEndRef = useRef<HTMLDivElement | null>(null);
@@ -308,6 +324,8 @@ export default function Home() {
   const [hasRecipientKey, setHasRecipientKey] = useState(false);
   const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
+  /** True while CPU-heavy decrypt of initial / thread messages is in flight. */
+  const [messagesDecryptLoading, setMessagesDecryptLoading] = useState(false);
 
   // Presence: users currently connected to "online-users".
   const [onlineUserIds, setOnlineUserIds] = useState<Record<string, boolean>>({});
@@ -769,13 +787,15 @@ export default function Home() {
     void loadContactAliases();
   }, [loadContactAliases]);
 
-  // Active thread: dm_connections + recipient nickname (message request / pending sender UI).
+  // Active thread: dm_connections + recipient profile (incl. public_key) in one parallel round-trip.
   useEffect(() => {
     let cancelled = false;
     if (!session || !activeRecipientId) {
       setDmThread({ status: null, initiatedBy: null });
       setActiveRecipientNickname(null);
       setActiveRecipientMeta(null);
+      setRecipientPublicKey(null);
+      setHasRecipientKey(false);
       return;
     }
 
@@ -783,8 +803,19 @@ export default function Home() {
     const other = activeRecipientId;
 
     void (async () => {
-      const row = await fetchDmConnectionForPair(supabase, me, other);
+      const [row, profileRes] = await Promise.all([
+        fetchDmConnectionForPair(supabase, me, other),
+        supabase
+          .from("profiles")
+          .select(
+            "nickname, role, preferred_locale, last_seen, profile_picture_url, public_key"
+          )
+          .eq("id", other)
+          .maybeSingle(),
+      ]);
+
       if (cancelled) return;
+
       if (!row) {
         setDmThread({ status: null, initiatedBy: null });
       } else {
@@ -799,38 +830,54 @@ export default function Home() {
           lastSeen: null,
           profilePictureUrl: myProfileBadges.profilePictureUrl,
         });
-        return;
+      } else {
+        const data = profileRes.data;
+        const nn =
+          typeof data?.nickname === "string" && data.nickname.trim().length > 0
+            ? data.nickname.trim()
+            : null;
+        setActiveRecipientNickname(nn);
+        setActiveRecipientMeta(
+          data
+            ? {
+                role: typeof data.role === "string" ? data.role : null,
+                preferred_locale:
+                  data.preferred_locale === "en" ||
+                  data.preferred_locale === "fa" ||
+                  data.preferred_locale === "ar" ||
+                  data.preferred_locale === "kr" ||
+                  data.preferred_locale === "tr"
+                    ? data.preferred_locale
+                    : null,
+                lastSeen:
+                  typeof data.last_seen === "string" ? data.last_seen : null,
+                profilePictureUrl:
+                  typeof data.profile_picture_url === "string"
+                    ? data.profile_picture_url
+                    : null,
+              }
+            : null
+        );
       }
-      const { data } = await supabase
-        .from("profiles")
-        .select("nickname, role, preferred_locale, last_seen, profile_picture_url")
-        .eq("id", other)
-        .maybeSingle();
-      if (cancelled) return;
-      const nn =
-        typeof data?.nickname === "string" && data.nickname.trim().length > 0
-          ? data.nickname.trim()
-          : null;
-      setActiveRecipientNickname(nn);
-      setActiveRecipientMeta(
-        data
-          ? {
-              role: typeof data.role === "string" ? data.role : null,
-              preferred_locale:
-                data.preferred_locale === "en" ||
-                data.preferred_locale === "fa" ||
-                data.preferred_locale === "ar" ||
-                data.preferred_locale === "kr" ||
-                data.preferred_locale === "tr"
-                  ? data.preferred_locale
-                  : null,
-              lastSeen:
-                typeof data.last_seen === "string" ? data.last_seen : null,
-              profilePictureUrl:
-                typeof data.profile_picture_url === "string" ? data.profile_picture_url : null,
-            }
-          : null
-      );
+
+      const pkRow = profileRes.data;
+      try {
+        if (pkRow?.public_key && typeof pkRow.public_key === "string") {
+          const key = await importPublicKeyFromBase64(pkRow.public_key);
+          if (!cancelled) {
+            setRecipientPublicKey(key);
+            setHasRecipientKey(true);
+          }
+        } else if (!cancelled) {
+          setRecipientPublicKey(null);
+          setHasRecipientKey(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setRecipientPublicKey(null);
+          setHasRecipientKey(false);
+        }
+      }
     })();
 
     return () => {
@@ -885,6 +932,45 @@ export default function Home() {
 
     return () => {
       supabase.removeChannel(channel);
+    };
+  }, [session?.user?.id, activeRecipientId]);
+
+  // Realtime: peer wiped the thread — clear local messages + offline snapshot for this pair.
+  useEffect(() => {
+    if (!session?.user?.id || !activeRecipientId) return;
+    const me = session.user.id;
+    const other = activeRecipientId;
+    const { user_low, user_high } = dmPairKey(me, other);
+    const threadId = `${user_low}:${user_high}`;
+    const channelName = `chat-thread-${user_low}-${user_high}`;
+
+    const ch = supabase
+      .channel(channelName)
+      .on(
+        "broadcast",
+        { event: "chat-wiped" },
+        (payload) => {
+          const p = payload.payload as { type?: string; threadId?: string };
+          if (p?.type !== "CHAT_WIPED" || p.threadId !== threadId) return;
+          const myId = session.user.id;
+          pairWarmupAttemptedRef.current.delete(`${myId}:${other}`);
+          setMessages((prev) => {
+            const next = prev.filter(
+              (m) =>
+                !(
+                  (m.senderId === myId && m.receiverId === other) ||
+                  (m.senderId === other && m.receiverId === myId)
+                )
+            );
+            void saveMessagesSnapshot(myId, next);
+            return next;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(ch);
     };
   }, [session?.user?.id, activeRecipientId]);
 
@@ -1028,52 +1114,6 @@ export default function Home() {
       cancelled = true;
     };
   }, [session, senderKeys]);
-
-  // When the activeRecipientId changes, fetch that user's public key from
-  // the profiles table and import it so we can encrypt messages to them.
-  useEffect(() => {
-  if (!activeRecipientId || !session) {
-    setRecipientPublicKey(null);
-    setHasRecipientKey(false);
-    return;
-  }
-
-  let cancelled = false;
-
-  const fetchFreshKey = async () => {
-    try {
-      // We force a fresh fetch from Supabase to catch new Incognito keys
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("public_key")
-        .eq("id", activeRecipientId)
-        .maybeSingle();
-
-      if (cancelled) return;
-
-      if (data?.public_key) {
-        const key = await importPublicKeyFromBase64(data.public_key);
-        setRecipientPublicKey(key);
-        setHasRecipientKey(true);
-      } else {
-        setRecipientPublicKey(null);
-        setHasRecipientKey(false);
-      }
-    } catch (err) {
-      if (!cancelled) {
-        console.error("Key sync error:", err);
-        setRecipientPublicKey(null);
-        setHasRecipientKey(false);
-      }
-    }
-  };
-
-  fetchFreshKey();
-
-  return () => {
-    cancelled = true;
-  };
-}, [activeRecipientId, session]); // Removed senderKeys dependency to force refresh on click
 
   // Load messages: realtime + initial query start as soon as `session` exists (parallel to E2E key init).
   useEffect(() => {
@@ -1314,10 +1354,18 @@ export default function Home() {
         pendingInitialMessagesRef.current = { viewerId, rows: data };
         return;
       }
-      const decrypted = await fn(chronological, viewerId);
-      if (!cancelled) {
-        setMessages(decrypted);
-        void saveMessagesSnapshot(viewerId, decrypted);
+      if (!cancelled) setMessagesDecryptLoading(true);
+      try {
+        const decrypted = await fn(chronological, viewerId);
+        if (!cancelled) {
+          setMessages((prev) => {
+            const merged = mergeChatMessagesById(prev, decrypted);
+            void saveMessagesSnapshot(viewerId, merged);
+            return merged;
+          });
+        }
+      } finally {
+        if (!cancelled) setMessagesDecryptLoading(false);
       }
     })();
 
@@ -1341,10 +1389,18 @@ export default function Home() {
     const chronological = [...pending.rows].reverse();
 
     void (async () => {
-      const decrypted = await fn(chronological, viewerId);
-      if (!cancelled) {
-        setMessages(decrypted);
-        void saveMessagesSnapshot(viewerId, decrypted);
+      if (!cancelled) setMessagesDecryptLoading(true);
+      try {
+        const decrypted = await fn(chronological, viewerId);
+        if (!cancelled) {
+          setMessages((prev) => {
+            const merged = mergeChatMessagesById(prev, decrypted);
+            void saveMessagesSnapshot(viewerId, merged);
+            return merged;
+          });
+        }
+      } finally {
+        if (!cancelled) setMessagesDecryptLoading(false);
       }
     })();
 
@@ -1352,6 +1408,69 @@ export default function Home() {
       cancelled = true;
     };
   }, [senderKeys, session?.user?.id, decryptInitialRows]);
+
+  // Low-traffic thread: if global inbox fetch missed this pair, load last 50 for the pair once.
+  useEffect(() => {
+    if (!session?.user?.id || !activeRecipientId || !senderKeys?.privateKey) return;
+    if (messagesDecryptLoading) return;
+
+    const myId = session.user.id;
+    const otherId = activeRecipientId;
+    const warmupKey = `${myId}:${otherId}`;
+
+    const hasForPair = messages.some(
+      (m) =>
+        (m.senderId === myId && m.receiverId === otherId) ||
+        (m.senderId === otherId && m.receiverId === myId)
+    );
+    if (hasForPair) return;
+
+    if (pairWarmupAttemptedRef.current.has(warmupKey)) return;
+    pairWarmupAttemptedRef.current.add(warmupKey);
+
+    let cancelled = false;
+    const pairFilter = `and(sender_id.eq.${myId},receiver_id.eq.${otherId}),and(sender_id.eq.${otherId},receiver_id.eq.${myId})`;
+
+    void (async () => {
+      const { data, error } = await supabase
+        .from("messages")
+        .select(
+          "id, encrypted_content, content_for_sender, sender_id, receiver_id, is_session_mode, is_read, created_at"
+        )
+        .or(pairFilter)
+        .order("created_at", { ascending: false })
+        .limit(CHAT_INITIAL_MESSAGE_LIMIT);
+
+      if (cancelled || error || !data?.length) return;
+
+      const fn = decryptInitialRowsRef.current;
+      if (!fn) return;
+
+      const chronological = [...data].reverse();
+      if (!cancelled) setMessagesDecryptLoading(true);
+      try {
+        const decrypted = await fn(chronological, myId);
+        if (cancelled) return;
+        setMessages((prev) => {
+          const merged = mergeChatMessagesById(prev, decrypted);
+          void saveMessagesSnapshot(myId, merged);
+          return merged;
+        });
+      } finally {
+        if (!cancelled) setMessagesDecryptLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeRecipientId,
+    session?.user?.id,
+    senderKeys?.privateKey,
+    messages,
+    messagesDecryptLoading,
+  ]);
 
   const sendMessage = useCallback(async () => {
     const trimmed = inputValue.trim();
@@ -2072,15 +2191,46 @@ export default function Home() {
       return;
     }
 
-    setMessages((prev) =>
-      prev.filter(
+    const { user_low, user_high } = dmPairKey(myId, otherId);
+    const threadId = `${user_low}:${user_high}`;
+    const wipeChannelName = `chat-thread-${user_low}-${user_high}`;
+    const wipeCh = supabase.channel(wipeChannelName);
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        supabase.removeChannel(wipeCh);
+        resolve();
+      };
+      const timeout = window.setTimeout(done, 4000);
+      let sent = false;
+      wipeCh.subscribe((status) => {
+        if (status === "SUBSCRIBED" && !sent) {
+          sent = true;
+          void wipeCh
+            .send({
+              type: "broadcast",
+              event: "chat-wiped",
+              payload: { type: "CHAT_WIPED", threadId },
+            })
+            .finally(() => {
+              window.clearTimeout(timeout);
+              done();
+            });
+        }
+      });
+    });
+
+    setMessages((prev) => {
+      const next = prev.filter(
         (m) =>
           !(
             (m.senderId === myId && m.receiverId === otherId) ||
             (m.senderId === otherId && m.receiverId === myId)
           )
-      )
-    );
+      );
+      void saveMessagesSnapshot(myId, next);
+      return next;
+    });
+    pairWarmupAttemptedRef.current.delete(`${myId}:${otherId}`);
     handleBackToList();
   }, [activeRecipientId, handleBackToList, language, session?.user?.id]);
 
@@ -2336,6 +2486,14 @@ export default function Home() {
         {/* Messages area */}
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-6">
           <div className="mx-auto w-full max-w-full space-y-4 lg:max-w-2xl">
+            {activeRecipientId ? (
+              <div
+                className="bg-stone-100 dark:bg-stone-900/40 text-stone-600 dark:text-stone-400 text-xs py-2 px-4 text-center border-b border-stone-200 dark:border-stone-800 mb-4"
+                role="status"
+              >
+                🔒 Privacy Mode: Messages are automatically deleted every 30 days.
+              </div>
+            ) : null}
             {!senderKeys && activeRecipientId ? (
               <div
                 className="rounded-2xl px-4 py-3 w-fit"
@@ -2349,6 +2507,27 @@ export default function Home() {
                   {t(language, "syncingSecurity")}
                 </p>
               </div>
+            ) : activeRecipientId && messagesDecryptLoading && senderKeys ? (
+              <div
+                className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-stone-200 bg-stone-100/80 px-6 py-8 dark:border-stone-800 dark:bg-stone-900/40"
+                role="status"
+                aria-live="polite"
+              >
+                <Loader2
+                  className="h-8 w-8 animate-spin text-emerald-600 dark:text-emerald-400"
+                  aria-hidden
+                  strokeWidth={2}
+                />
+                <p className="text-sm font-medium text-stone-600 dark:text-stone-400">
+                  Loading messages…
+                </p>
+                <div className="h-2 w-full max-w-xs overflow-hidden rounded-full bg-stone-200 dark:bg-stone-800">
+                  <div
+                    className="h-full w-1/3 animate-pulse rounded-full bg-emerald-500/70 dark:bg-emerald-400/60"
+                    aria-hidden
+                  />
+                </div>
+              </div>
             ) : filteredMessages.length === 0 ? (
               activeRecipientId ? (
                 <div
@@ -2359,8 +2538,9 @@ export default function Home() {
                     boxShadow: professionalMode ? "none" : "var(--glow)",
                   }}
                 >
-                  <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-                    {t(language, "noMessagesConversation")}
+                  <p className="text-sm text-stone-500 dark:text-stone-400">
+                    Your chat history is clear. Messages older than 30 days are removed for your
+                    privacy.
                   </p>
                 </div>
               ) : (

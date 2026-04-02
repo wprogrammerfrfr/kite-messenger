@@ -18,6 +18,7 @@ export function Auth() {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<Role>("musician");
   const [loading, setLoading] = useState(false);
+  const [resetSending, setResetSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -67,6 +68,34 @@ export function Auth() {
       );
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    setError(null);
+    setMessage(null);
+    const trimmed = email.trim();
+    if (!trimmed) {
+      setError("Please enter your email address.");
+      return;
+    }
+    if (typeof window === "undefined") return;
+    setResetSending(true);
+    try {
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(trimmed, {
+        redirectTo: `${window.location.origin}/auth/reset-password`,
+      });
+      if (resetError) {
+        setError(resetError.message);
+      } else {
+        setMessage("Check your email for a link to reset your password.");
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Something went wrong. Try again."
+      );
+    } finally {
+      setResetSending(false);
     }
   };
 
@@ -267,6 +296,19 @@ export function Auth() {
               {message}
             </div>
           )}
+
+          {isLogin ? (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => void handleForgotPassword()}
+                disabled={loading || resetSending}
+                className="text-xs font-medium text-stone-400 underline-offset-2 transition hover:text-emerald-400 hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {resetSending ? "Sending…" : "Forgot Password?"}
+              </button>
+            </div>
+          ) : null}
 
           <button
             type="submit"
