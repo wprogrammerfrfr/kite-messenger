@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import Peer, { type SignalData } from "simple-peer";
 import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { useRouter } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import {
   acquireStudioMicStream,
@@ -293,6 +294,8 @@ export default function StudioBridgePage() {
   const [collaboratorLeft, setCollaboratorLeft] = useState(false);
   const [connectionLostCountdown, setConnectionLostCountdown] = useState<number | null>(null);
   const [retryInitTick, setRetryInitTick] = useState(0);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
 
   const micDeniedThisInitRef = useRef(false);
 
@@ -461,6 +464,26 @@ export default function StudioBridgePage() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void supabase.auth.getUser().then(({ data: { user: next } }) => {
+      if (cancelled) return;
+      setUser(next ?? null);
+      setAuthReady(true);
+    });
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (cancelled) return;
+      setUser(session?.user ?? null);
+      setAuthReady(true);
+    });
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
     };
   }, []);
 
@@ -1377,6 +1400,17 @@ export default function StudioBridgePage() {
             </span>
           </div>
 
+          {!authReady ? (
+            <div className="mt-10 flex flex-col items-center rounded-2xl border border-stone-800/90 bg-stone-950/50 px-6 py-10 backdrop-blur-sm">
+              <div
+                className="h-9 w-9 rounded-full border-2 border-orange-500/35 border-t-emerald-400/80 animate-spin"
+                style={{ animationDuration: "1.1s" }}
+                aria-hidden
+              />
+              <p className="mt-4 text-sm font-medium text-stone-400">Checking your account…</p>
+            </div>
+          ) : user ? (
+            <>
           {sessionId ? (
             <motion.button
               type="button"
@@ -1706,6 +1740,41 @@ export default function StudioBridgePage() {
               ) : null}
             </motion.div>
           ) : null}
+            </>
+          ) : (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+              className="mt-10 w-full rounded-2xl border border-emerald-500/30 bg-stone-950/60 p-6 shadow-2xl backdrop-blur-sm"
+              style={{
+                boxShadow: `
+                  0 0 0 1px rgba(34,197,94,0.12),
+                  0 0 40px -16px rgba(255,69,0,0.2),
+                  0 0 48px -18px rgba(34,197,94,0.15),
+                  0 20px 40px -20px rgba(0,0,0,0.65)
+                `,
+              }}
+            >
+              <p className="text-center text-[11px] font-semibold uppercase tracking-widest text-stone-500">
+                Sign in required
+              </p>
+              <p className="mt-3 text-center text-sm font-medium leading-relaxed text-stone-300">
+                Log in to host or join a session.
+              </p>
+              <motion.button
+                type="button"
+                onClick={() => router.push("/")}
+                whileTap={{ scale: 0.98 }}
+                className="mt-6 w-full rounded-xl border border-orange-500/40 bg-gradient-to-r from-orange-500/18 to-emerald-500/18 px-4 py-3.5 text-sm font-semibold text-stone-100 shadow-lg transition hover:from-orange-500/28 hover:to-emerald-500/28"
+                style={{
+                  boxShadow: `0 0 24px -8px ${ORANGE}66, 0 0 28px -10px ${EMERALD}55`,
+                }}
+              >
+                Log in to host or join a session
+              </motion.button>
+            </motion.div>
+          )}
         </motion.div>
       </div>
     </div>
