@@ -16,14 +16,15 @@ export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
 };
 
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
+// WARNING: Echo cancellation is disabled. Headphones are MANDATORY to prevent feedback loops.
 export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
   return {
-    echoCancellation: true,
-    noiseSuppression: true,
-    // Reduce processing delay for music-oriented sessions.
+    echoCancellation: false,
+    noiseSuppression: false,
     autoGainControl: false,
+    // Reduce processing delay for music-oriented sessions.
     // Best-effort low-latency target (~50ms).
-    ...({ latency: { ideal: 0.05 } } as unknown as MediaTrackConstraints),
+    ...({ latency: { ideal: 0.01, max: 0.02 } } as unknown as MediaTrackConstraints),
     channelCount: 1,
     sampleRate: { ideal: 48000 },
   };
