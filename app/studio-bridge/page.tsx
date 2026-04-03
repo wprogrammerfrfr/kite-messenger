@@ -964,13 +964,7 @@ export default function StudioBridgePage() {
           trickle: true,
           stream: mediaStream,
           config: peerConfig,
-          sdpTransform: (sdp: string) => {
-            const result = forceMusicModeOpus(sdp)
-            if (result !== sdp) {
-              addLog('Opus music mode applied')
-            }
-            return result
-          }
+          sdpTransform: (sdp: string) => forceMusicModeOpus(sdp)
         });
         peerRef.current = peer;
 
