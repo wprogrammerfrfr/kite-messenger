@@ -13,6 +13,7 @@ import {
   STUDIO_PEER_CONNECTION_CONFIG,
   fetchTurnCredentials,
 } from "@/lib/studio-bridge-webrtc";
+import { forceMusicModeOpus } from '@/lib/sdp-utils'
 
 type BridgeStatus = "connecting" | "connected" | "failed";
 type Role = "host" | "peer";
@@ -963,6 +964,7 @@ export default function StudioBridgePage() {
           trickle: true,
           stream: mediaStream,
           config: peerConfig,
+          sdpTransform: (sdp: string) => forceMusicModeOpus(sdp)
         });
         peerRef.current = peer;
 
