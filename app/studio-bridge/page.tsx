@@ -336,6 +336,8 @@ export default function StudioBridgePage() {
   const historySavedRef = useRef(false);
   /** Prevents overlapping inits; cleared on effect cleanup so remount can proceed. */
   const bridgeInitInFlightRef = useRef(false);
+  /** Lazily created; resumed on "Enter Studio" so Safari unlocks audio on a user gesture. */
+  const studioAudioContextRef = useRef<AudioContext | null>(null);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -455,6 +457,22 @@ export default function StudioBridgePage() {
       if (remoteAudioRef.current) remoteAudioRef.current.muted = !prev;
       return nextMuted;
     });
+  }, []);
+
+  const onEnterStudioClick = useCallback(() => {
+    void (async () => {
+      try {
+        let ctx = studioAudioContextRef.current;
+        if (!ctx) {
+          ctx = new AudioContext();
+          studioAudioContextRef.current = ctx;
+        }
+        await ctx.resume().catch(() => {});
+      } catch {
+        // Ignore; UI still enters studio.
+      }
+      setEnteredStudio(true);
+    })();
   }, []);
 
   const returnToLobby = useCallback(() => {
@@ -1647,7 +1665,7 @@ export default function StudioBridgePage() {
               <motion.button
                 type="button"
                 disabled={!canEnterStudio}
-                onClick={() => setEnteredStudio(true)}
+                onClick={onEnterStudioClick}
                 className={`mt-8 w-full rounded-xl px-4 py-3.5 text-sm font-semibold transition ${
                   canEnterStudio
                     ? "border border-orange-500/40 text-stone-50 shadow-lg"
