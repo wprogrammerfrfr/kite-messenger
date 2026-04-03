@@ -15,6 +15,21 @@ export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
   iceCandidatePoolSize: 10,
 };
 
+type RtpReceiverWithJitter = RTCRtpReceiver & { jitterBufferTarget?: number };
+
+/** Minimize inbound audio playout buffering where `jitterBufferTarget` is supported (no-op otherwise). */
+export function applyLowLatencyInboundAudioReceivers(pc: RTCPeerConnection): void {
+  for (const receiver of pc.getReceivers()) {
+    if (receiver.track?.kind !== "audio") continue;
+    if (!("jitterBufferTarget" in receiver)) continue;
+    try {
+      (receiver as RtpReceiverWithJitter).jitterBufferTarget = 0;
+    } catch {
+      // Setting may throw on some builds; ignore.
+    }
+  }
+}
+
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
 // WARNING: Echo cancellation is disabled. Headphones are MANDATORY to prevent feedback loops.
 export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
