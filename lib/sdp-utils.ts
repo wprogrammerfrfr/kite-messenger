@@ -10,12 +10,22 @@ export function forceMusicModeOpus(sdp: string): string {
 
     if (fmtpMatch) {
       const existing = fmtpMatch[2].split(/;\s*/)
-      const existingKeys = existing.map(p => p.split('=')[0].trim())
-      const toAdd = newParams.filter(p => 
-        !existingKeys.includes(p.split('=')[0].trim())
+      const newParamMap = new Map(
+        newParams.map(p => {
+          const [k, v] = p.split('=')
+          return [k.trim(), v.trim()]
+        })
       )
-      if (toAdd.length === 0) return sdp
-      return sdp.replace(fmtpRegex, `$1${fmtpMatch[2]}; ${toAdd.join('; ')}`)
+      const merged = existing.map(p => {
+        const key = p.split('=')[0].trim()
+        return newParamMap.has(key) ? `${key}=${newParamMap.get(key)}` : p
+      })
+      newParamMap.forEach((v, k) => {
+        if (!existing.some(p => p.split('=')[0].trim() === k)) {
+          merged.push(`${k}=${v}`)
+        }
+      })
+      return sdp.replace(fmtpRegex, `$1${merged.join('; ')}`)
     } else {
       const rtpLine = rtpMatch[0]
       const newLine = `a=fmtp:${id} ${newParams.join('; ')}\r\n`
