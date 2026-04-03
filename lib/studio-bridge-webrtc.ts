@@ -22,10 +22,8 @@ export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
     echoCancellation: false,
     noiseSuppression: false,
     autoGainControl: false,
-    // Reduce processing delay for music-oriented sessions.
-    // Best-effort low-latency target (~50ms).
-    ...({ latency: { ideal: 0.01, max: 0.02 } } as unknown as MediaTrackConstraints),
-    channelCount: 1,
+    ...({ latency: { ideal: 0.05 } } as unknown as MediaTrackConstraints),
+    channelCount: 2,
     sampleRate: { ideal: 48000 },
   };
 }
