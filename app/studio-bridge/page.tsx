@@ -9,6 +9,7 @@ import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import {
   acquireStudioMicStream,
+  applyLowLatencyInboundAudioReceivers,
   decodePeerDataChunk,
   STUDIO_PEER_CONNECTION_CONFIG,
   fetchTurnCredentials,
@@ -1000,6 +1001,10 @@ export default function StudioBridgePage() {
 
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {
+          rawPc.addEventListener("track", () => {
+            applyLowLatencyInboundAudioReceivers(rawPc);
+          });
+
           rawPc.addEventListener("icegatheringstatechange", () => {
             // no-op
           });
@@ -1029,6 +1034,7 @@ export default function StudioBridgePage() {
               setError(null);
               setStatus("connected");
               clearLostCountdown();
+              applyLowLatencyInboundAudioReceivers(rawPc);
               rawPc
                 .getStats()
                 .then((stats) => {

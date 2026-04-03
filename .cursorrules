@@ -1,0 +1,29 @@
+# KITE STUDIO & KITE CHAT: SYSTEM MANDATES
+
+## 0. BEHAVIORAL PROTOCOL
+- DO NOT generate code prompts or implement changes unless EXPLICITLY requested by the user.
+- ALWAYS think of potential errors, edge cases, and crashes before suggesting a solution.
+- GOAL: Maximize performance and minimize latency.
+
+## 1. SCOPE & DOMAIN LOCK
+- Do NOT change any files outside the scope of Kite Studio unless explicitly instructed for Kite Chat.
+- NEVER change working logic. If the mic works, do not touch it. If signaling works, do not touch it.
+- NEVER hardcode secrets. API keys, TURN credentials, and Supabase keys MUST come from environment variables.
+
+## 2. THE RULE OF ONE (CRITICAL)
+- ONE prompt = ONE file = ONE logical change. 
+- NEVER combine two functional steps into a single code generation.
+
+## 3. READ BEFORE WRITE
+- ALWAYS read the target file before editing it. 
+- NEVER assume what the code looks like based on previous context.
+
+## 4. POST-EDIT REPORTING
+- After every code change, you MUST list exactly what was changed and explicitly list what was NOT touched.
+
+## 5. THE TESTING SEQUENCE
+Every phase must be designed to be tested in this exact order:
+1. Localhost, Chrome, two tabs.
+2. Same WiFi, two devices, two browsers.
+3. Different networks (one WiFi, one mobile data).
+4. METU or eduroam-style restrictive network.
