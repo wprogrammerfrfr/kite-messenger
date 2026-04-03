@@ -1182,7 +1182,7 @@ export default function StudioBridgePage() {
             try {
               peer.send(JSON.stringify({ t: "ping", ts: performance.now() }));
             } catch {
-              // Best-effort ping; ignore send errors.
+              console.warn("[Kite] Ping failed, peer likely closed");
             }
           }, 2000);
         });
@@ -1670,10 +1670,19 @@ export default function StudioBridgePage() {
                 <div className="flex flex-wrap items-center justify-center gap-4 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
                   <div className="font-mono text-sm text-stone-200">
                     Ping:{" "}
-                    <span className="text-emerald-400 tabular-nums">
-                      {pingMs === null ? "--" : `${pingMs}`}
-                    </span>{" "}
-                    ms
+                    <span
+                      className={`font-mono ${
+                        pingMs === null
+                          ? "text-gray-400"
+                          : pingMs < 30
+                            ? "text-emerald-400"
+                            : pingMs < 70
+                              ? "text-orange-400"
+                              : "text-red-500"
+                      }`}
+                    >
+                      {pingMs === null ? "-- ms" : `${pingMs} ms`}
+                    </span>
                   </div>
                   <button
                     type="button"
