@@ -534,6 +534,17 @@ export default function StudioBridgePage() {
     );
   }, [status]);
 
+  /** Stop local monitor path once P2P is live (muted alone is not always enough on WebKit). */
+  useEffect(() => {
+    if (status !== "connected") return;
+    const el = localMonitorAudioRef.current;
+    if (!el) return;
+    el.muted = true;
+    el.volume = 0;
+    void el.pause();
+    el.srcObject = null;
+  }, [status]);
+
   /** Online + Supabase reachable (does not wait for WebRTC peer). */
   useEffect(() => {
     if (typeof window === "undefined") return;
