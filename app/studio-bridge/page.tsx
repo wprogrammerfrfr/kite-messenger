@@ -880,13 +880,42 @@ export default function StudioBridgePage() {
           addLog("Phase 2: guest fetch studio_sessions");
           setStatusNote("Fetching room...");
 
-          const { data: fetched, error: fetchErr } = await supabase
+          const guestOfferReady = (row: StudioSessionRow) =>
+            row.offer != null && typeof row.offer === "object";
+
+          let { data: fetched, error: fetchErr } = await supabase
             .from("studio_sessions")
             .select("session_id, offer, answer, ice_candidates, host_user_id")
             .eq("session_id", sessionId.toUpperCase())
             .single<StudioSessionRow>();
 
           if (fetchErr || !fetched) throw new Error("Room not found.");
+
+          if (!guestOfferReady(fetched)) {
+            addLog("Phase 2: guest offer empty; retry after 2s");
+            setStatusNote("Waiting for host…");
+            await new Promise((resolve) => window.setTimeout(resolve, 2000));
+            if (cancelled || !mountedRef.current) {
+              micStream.getTracks().forEach((track) => track.stop());
+              micStream = null;
+              localStreamRef.current = null;
+              if (mountedRef.current) setLocalMicStream(null);
+              return;
+            }
+            const retry = await supabase
+              .from("studio_sessions")
+              .select("session_id, offer, answer, ice_candidates, host_user_id")
+              .eq("session_id", sessionId.toUpperCase())
+              .single<StudioSessionRow>();
+            fetchErr = retry.error;
+            fetched = retry.data ?? null;
+            if (fetchErr || !fetched) throw new Error("Room not found.");
+            if (!guestOfferReady(fetched)) {
+              throw new Error(
+                "Session not ready. The host may still be setting up—try again in a moment."
+              );
+            }
+          }
 
           const {
             data: { user },
