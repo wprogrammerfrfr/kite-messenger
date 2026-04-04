@@ -55,6 +55,10 @@ const OBSIDIAN = "#0c0a09";
 const BRIDGE_INIT_FAIL_NOTE = "Could not initialize studio signaling bridge.";
 const P2P_CONNECTED_NOTE = "P2P Connected.";
 
+/** Data-channel ping interval is 2s; three highs ≈ sustained poor latency. */
+const HIGH_PING_WARN_MS = 150;
+const HIGH_PING_WARN_SAMPLES = 3;
+
 /** Single source of truth for session_id casing and shape (6-char A–Z / 0–9). */
 function normalizeStudioSessionId(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6).toUpperCase();
@@ -290,6 +294,7 @@ export default function StudioBridgePage() {
   const [pingMs, setPingMs] = useState<number | null>(null);
   /** Inbound audio loss ratio as 0–100 for display (`getStats` while connected). */
   const [inboundPacketLossPercent, setInboundPacketLossPercent] = useState<number | null>(null);
+  const [highPingTipOpen, setHighPingTipOpen] = useState(false);
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const [micPermissionHint, setMicPermissionHint] = useState<string | null>(null);
@@ -343,6 +348,8 @@ export default function StudioBridgePage() {
   const bridgeInitInFlightRef = useRef(false);
   /** Lazily created; resumed on "Enter Studio" so Safari unlocks audio on a user gesture. */
   const studioAudioContextRef = useRef<AudioContext | null>(null);
+  const highPingStreakRef = useRef(0);
+  const highPingTipDismissedRef = useRef(false);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -406,6 +413,36 @@ export default function StudioBridgePage() {
     const id = window.setInterval(tick, 2000);
     return () => clearInterval(id);
   }, [status]);
+
+  useEffect(() => {
+    if (status !== "connected") {
+      highPingStreakRef.current = 0;
+      highPingTipDismissedRef.current = false;
+      setHighPingTipOpen(false);
+      return;
+    }
+    if (pingMs === null) return;
+
+    if (pingMs <= HIGH_PING_WARN_MS) {
+      highPingStreakRef.current = 0;
+      highPingTipDismissedRef.current = false;
+      setHighPingTipOpen(false);
+      return;
+    }
+
+    highPingStreakRef.current += 1;
+    if (
+      highPingStreakRef.current >= HIGH_PING_WARN_SAMPLES &&
+      !highPingTipDismissedRef.current
+    ) {
+      setHighPingTipOpen(true);
+    }
+  }, [pingMs, status]);
+
+  const dismissHighPingTip = useCallback(() => {
+    highPingTipDismissedRef.current = true;
+    setHighPingTipOpen(false);
+  }, []);
 
   const runAudioTest = useCallback(async () => {
     if (audioTestDone || audioTestPlaying || micPermissionDenied) return;
@@ -648,10 +685,13 @@ export default function StudioBridgePage() {
       teardownRan = true;
       cancelled = true;
       peerConnectionRef.current = null;
+      highPingStreakRef.current = 0;
+      highPingTipDismissedRef.current = false;
       void (async () => {
         try {
           setPingMs(null);
           setInboundPacketLossPercent(null);
+          setHighPingTipOpen(false);
           clearLostCountdown();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
@@ -1825,6 +1865,28 @@ export default function StudioBridgePage() {
                       </span>
                     </button>
                   </div>
+                  {highPingTipOpen ? (
+                    <motion.div
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="rounded-xl border border-orange-500/35 bg-stone-900/85 px-4 py-3 shadow-lg"
+                      role="status"
+                    >
+                      <p className="text-center text-sm font-medium leading-relaxed text-stone-200">
+                        Latency has stayed high. Try a different network, switch to Wi‑Fi, or move
+                        closer to your router.
+                      </p>
+                      <div className="mt-3 flex justify-center">
+                        <button
+                          type="button"
+                          onClick={dismissHighPingTip}
+                          className="rounded-lg border border-stone-600 bg-stone-800/60 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:bg-stone-800"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </motion.div>
+                  ) : null}
                   {localMicStream ? (
                     <div className="rounded-xl border border-stone-800/90 bg-stone-950/40 px-4 py-3">
                       <MicLevelBars stream={localMicStream} />
