@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState, memo } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
-import { Sun, Moon, AlertTriangle, KeyRound } from "lucide-react";
+import { Sun, Moon, AlertTriangle, KeyRound, Smartphone } from "lucide-react";
+import { E2eConnectPhoneModal } from "@/components/E2eConnectPhoneModal";
+import {
+  importPrivateKeyFromBase64,
+  wrapPrivateKeyWithPin,
+} from "@/lib/crypto";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { getStoredAppearance, setAppearanceMode } from "@/components/theme-provider";
 import { InstallKiteButton } from "@/components/InstallKiteButton";
@@ -31,6 +36,10 @@ import {
   settingsProfileCacheKey,
   writeJsonCache,
 } from "@/lib/kite-tab-cache";
+
+/** Same storage key as chat (`app/chat/page.tsx`) for the local E2EE keypair. */
+const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
+const E2E_KEY_STORAGE_LEGACY = "nexus-e2e-keypair";
 
 type Role = "musician" | "therapist" | "responder";
 
@@ -101,6 +110,7 @@ export const ProfileHub = memo(function ProfileHub() {
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
+  const [e2eConnectModalOpen, setE2eConnectModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const notesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -443,6 +453,51 @@ export const ProfileHub = memo(function ProfileHub() {
     }
   };
 
+  const handleE2ePinBackupConfirm = async (pin: string) => {
+    if (!session) {
+      throw new Error(t(language, "profileNotAuthenticated"));
+    }
+    let stored: string | null = null;
+    try {
+      stored =
+        localStorage.getItem(E2E_KEY_STORAGE_KEY) ??
+        localStorage.getItem(E2E_KEY_STORAGE_LEGACY);
+    } catch {
+      throw new Error(t(language, "e2ePinVaultErrorNoLocalKeys"));
+    }
+    if (!stored) {
+      throw new Error(t(language, "e2ePinVaultErrorNoLocalKeys"));
+    }
+    let parsed: { privateKeyBase64?: unknown };
+    try {
+      parsed = JSON.parse(stored) as { privateKeyBase64?: unknown };
+    } catch {
+      throw new Error(t(language, "e2ePinVaultErrorGeneric"));
+    }
+    if (typeof parsed.privateKeyBase64 !== "string" || !parsed.privateKeyBase64.trim()) {
+      throw new Error(t(language, "e2ePinVaultErrorNoLocalKeys"));
+    }
+    let privateKey: CryptoKey;
+    try {
+      privateKey = await importPrivateKeyFromBase64(parsed.privateKeyBase64);
+    } catch {
+      throw new Error(t(language, "e2ePinVaultErrorGeneric"));
+    }
+    const wrapped = await wrapPrivateKeyWithPin(privateKey, pin);
+    const { error } = await supabase
+      .from("profiles")
+      .update({
+        key_backup_salt: wrapped.saltBase64,
+        encrypted_private_key_backup: wrapped.encryptedPrivateKeyBackupBase64,
+      })
+      .eq("id", session.user.id);
+    if (error) {
+      throw new Error(t(language, "e2ePinVaultErrorUploadFailed"));
+    }
+    setError(null);
+    setSuccess(t(language, "e2ePinVaultSuccess"));
+  };
+
   return (
     <div
       className="min-h-[calc(100dvh-var(--bottom-nav-height))] px-4 py-6 sm:py-8"
@@ -663,6 +718,22 @@ export const ProfileHub = memo(function ProfileHub() {
               <p className="mb-4 text-xs" style={{ color: theme.textSecondary }}>
                 Choose a strong password. You’ll stay signed in on this device after updating.
               </p>
+              <div className="mb-6">
+                <button
+                  type="button"
+                  onClick={() => setE2eConnectModalOpen(true)}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition hover:opacity-95 active:scale-[0.99]"
+                  style={{
+                    borderColor: theme.border,
+                    background: theme.inputBg,
+                    color: theme.textPrimary,
+                  }}
+                  aria-label={t(language, "e2ePinVaultConnectAria")}
+                >
+                  <Smartphone className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
+                  {t(language, "e2eSyncDevicesButton")}
+                </button>
+              </div>
               <div className="space-y-4">
                 <div className="space-y-1.5">
                   <label
@@ -1047,6 +1118,20 @@ export const ProfileHub = memo(function ProfileHub() {
           />
         </div>
       ) : null}
+      <E2eConnectPhoneModal
+        open={e2eConnectModalOpen && Boolean(session)}
+        onOpenChange={setE2eConnectModalOpen}
+        language={language}
+        theme={{
+          panelBg: theme.panelBg,
+          border: theme.border,
+          accent: theme.accent,
+          textPrimary: theme.textPrimary,
+          textSecondary: theme.textSecondary,
+          inputBg: theme.inputBg,
+        }}
+        onConfirm={handleE2ePinBackupConfirm}
+      />
     </div>
   );
 });
