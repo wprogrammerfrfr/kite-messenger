@@ -11,6 +11,7 @@ import {
   acquireStudioMicStream,
   applyLowLatencyInboundAudioReceivers,
   decodePeerDataChunk,
+  parseInboundAudioPacketLoss,
   STUDIO_PEER_CONNECTION_CONFIG,
   fetchTurnCredentials,
 } from "@/lib/studio-bridge-webrtc";
@@ -287,6 +288,8 @@ export default function StudioBridgePage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [role, setRole] = useState<Role | null>(null);
   const [pingMs, setPingMs] = useState<number | null>(null);
+  /** Inbound audio loss ratio as 0–100 for display (`getStats` while connected). */
+  const [inboundPacketLossPercent, setInboundPacketLossPercent] = useState<number | null>(null);
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const [micPermissionHint, setMicPermissionHint] = useState<string | null>(null);
@@ -311,6 +314,8 @@ export default function StudioBridgePage() {
   const micDeniedThisInitRef = useRef(false);
 
   const peerRef = useRef<Peer.Instance | null>(null);
+  /** Underlying PC for `getStats` polling; cleared with peer teardown. */
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const speakerMutedRef = useRef(false);
@@ -375,6 +380,32 @@ export default function StudioBridgePage() {
   useEffect(() => {
     if (!remoteStream) setRemoteLevel(0);
   }, [remoteStream]);
+
+  useEffect(() => {
+    if (status !== "connected") {
+      setInboundPacketLossPercent(null);
+      return;
+    }
+    const tick = () => {
+      const pc = peerConnectionRef.current;
+      if (!pc || !mountedRef.current) return;
+      void pc
+        .getStats()
+        .then((stats) => {
+          if (!mountedRef.current) return;
+          const parsed = parseInboundAudioPacketLoss(stats);
+          if (parsed === null) {
+            setInboundPacketLossPercent(null);
+            return;
+          }
+          setInboundPacketLossPercent(Math.round(parsed.ratio * 1000) / 10);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const id = window.setInterval(tick, 2000);
+    return () => clearInterval(id);
+  }, [status]);
 
   const runAudioTest = useCallback(async () => {
     if (audioTestDone || audioTestPlaying || micPermissionDenied) return;
@@ -605,6 +636,7 @@ export default function StudioBridgePage() {
     appliedRemoteSignalRef.current = false;
     seenIceRef.current.clear();
     existingRowRef.current = null;
+    peerConnectionRef.current = null;
 
     // Defensive cleanup: stop any lingering local tracks from previous failed sync attempts.
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -615,9 +647,11 @@ export default function StudioBridgePage() {
       if (teardownRan) return;
       teardownRan = true;
       cancelled = true;
+      peerConnectionRef.current = null;
       void (async () => {
         try {
           setPingMs(null);
+          setInboundPacketLossPercent(null);
           clearLostCountdown();
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
@@ -1059,6 +1093,7 @@ export default function StudioBridgePage() {
 
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {
+          peerConnectionRef.current = rawPc;
           rawPc.addEventListener("track", () => {
             applyLowLatencyInboundAudioReceivers(rawPc);
           });
@@ -1747,6 +1782,22 @@ export default function StudioBridgePage() {
                         }`}
                       >
                         {pingMs === null ? "-- ms" : `${pingMs} ms`}
+                      </span>
+                    </div>
+                    <div className="font-mono text-sm text-stone-200">
+                      Loss:{" "}
+                      <span
+                        className={`font-mono ${
+                          inboundPacketLossPercent === null
+                            ? "text-gray-400"
+                            : inboundPacketLossPercent < 0.5
+                              ? "text-emerald-400"
+                              : inboundPacketLossPercent < 2
+                                ? "text-orange-400"
+                                : "text-red-500"
+                        }`}
+                      >
+                        {inboundPacketLossPercent === null ? "--" : `${inboundPacketLossPercent}%`}
                       </span>
                     </div>
                     <button

@@ -30,6 +30,36 @@ export function applyLowLatencyInboundAudioReceivers(pc: RTCPeerConnection): voi
   }
 }
 
+/** Parsed from `getStats()` for inbound remote audio (single-stream P2P). */
+export type InboundAudioPacketLoss = {
+  /** `packetsLost / (packetsLost + packetsReceived)`, range [0, 1]. */
+  ratio: number;
+  packetsLost: number;
+  packetsReceived: number;
+};
+
+/**
+ * Extract packet loss for the inbound audio RTP stream, if present.
+ * Ignores video; first matching `inbound-rtp` wins (typical for one audio m-line).
+ */
+export function parseInboundAudioPacketLoss(
+  stats: RTCStatsReport
+): InboundAudioPacketLoss | null {
+  let result: InboundAudioPacketLoss | null = null;
+  stats.forEach((r) => {
+    if (result !== null) return;
+    if (r.type !== "inbound-rtp") return;
+    const inbound = r as RTCInboundRtpStreamStats;
+    if (inbound.kind !== "audio") return;
+    const lost = Number(inbound.packetsLost ?? 0);
+    const recv = Number(inbound.packetsReceived ?? 0);
+    const total = lost + recv;
+    const ratio = total > 0 ? lost / total : 0;
+    result = { ratio, packetsLost: lost, packetsReceived: recv };
+  });
+  return result;
+}
+
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
 // WARNING: Echo cancellation is disabled. Headphones are MANDATORY to prevent feedback loops.
 export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
