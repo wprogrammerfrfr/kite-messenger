@@ -249,6 +249,28 @@ type TranslationKey =
   | "profileSwitchToLightMode"
   | "profileSwitchToDarkMode"
   | "profileNotificationsLabel"
+  | "e2eSyncDevicesButton"
+  | "e2ePinVaultModalTitle"
+  | "e2ePinVaultModalBody"
+  | "e2ePinVaultPinLabel"
+  | "e2ePinVaultConfirmPinLabel"
+  | "e2ePinVaultSubmit"
+  | "e2ePinVaultCancel"
+  | "e2ePinVaultSaving"
+  | "e2ePinVaultSuccess"
+  | "e2ePinVaultErrorPinsMismatch"
+  | "e2ePinVaultErrorInvalidPin"
+  | "e2ePinVaultErrorNoLocalKeys"
+  | "e2ePinVaultErrorUploadFailed"
+  | "e2ePinVaultErrorGeneric"
+  | "e2ePinVaultConnectAria"
+  | "e2eRestoreModalTitle"
+  | "e2eRestoreModalBody"
+  | "e2eRestorePinLabel"
+  | "e2eRestoreSubmit"
+  | "e2eRestoreCancel"
+  | "e2eRestoreBusy"
+  | "e2eRestoreErrorWrongPin"
   | "discoverSearchBarPlaceholder"
   | "chatHeaderRecipientLastSeen"
   | "chatEmptySelectConversation"
@@ -562,6 +584,34 @@ const translationsEn: TranslationRecord = {
     profileSwitchToLightMode: "Switch to light mode",
     profileSwitchToDarkMode: "Switch to dark mode",
     profileNotificationsLabel: "Notifications",
+    e2eSyncDevicesButton: "Sync devices",
+    e2ePinVaultModalTitle: "Sync your secure key",
+    e2ePinVaultModalBody:
+      "Your messages are end-to-end encrypted and tied to this device. Create a 6-digit PIN to encrypt a backup of your key. You can unlock it on another phone or after clearing this browser. Kite never sees your PIN or your private key—only an encrypted package is stored on your account.",
+    e2ePinVaultPinLabel: "Create 6-digit PIN",
+    e2ePinVaultConfirmPinLabel: "Confirm PIN",
+    e2ePinVaultSubmit: "Save encrypted backup",
+    e2ePinVaultCancel: "Cancel",
+    e2ePinVaultSaving: "Saving backup…",
+    e2ePinVaultSuccess:
+      "Encrypted backup saved. You can restore it on another device with your PIN.",
+    e2ePinVaultErrorPinsMismatch: "PINs do not match.",
+    e2ePinVaultErrorInvalidPin: "PIN must be exactly 6 digits.",
+    e2ePinVaultErrorNoLocalKeys:
+      "Open Chat on this device once so your secure key is created, then try again.",
+    e2ePinVaultErrorUploadFailed:
+      "Could not save backup. Check your connection and try again.",
+    e2ePinVaultErrorGeneric: "Something went wrong. Try again.",
+    e2ePinVaultConnectAria: "Sync devices — encrypted key backup with a PIN",
+    e2eRestoreModalTitle: "Restore your secure key",
+    e2eRestoreModalBody:
+      "A backup of your chat key was found for this account. Enter your 6-digit PIN to unlock it on this device.",
+    e2eRestorePinLabel: "Enter PIN",
+    e2eRestoreSubmit: "Restore",
+    e2eRestoreCancel: "Cancel",
+    e2eRestoreBusy: "Unlocking…",
+    e2eRestoreErrorWrongPin:
+      "Could not unlock backup. Check your PIN and try again.",
     discoverSearchBarPlaceholder: "Find a user by nickname",
     chatHeaderRecipientLastSeen: "Last seen {{time}}",
     chatEmptySelectConversation: "Select a conversation to start",
@@ -879,6 +929,34 @@ export const translations: Record<Language, TranslationRecord> = {
     profileSwitchToLightMode: "رفتن به حالت روشن",
     profileSwitchToDarkMode: "رفتن به حالت تاریک",
     profileNotificationsLabel: "اعلان‌ها",
+    e2eSyncDevicesButton: "همگام‌سازی دستگاه‌ها",
+    e2ePinVaultModalTitle: "همگام‌سازی کلید امن شما",
+    e2ePinVaultModalBody:
+      "پیام‌های شما رمزگذاری سرتاسر دارند و به این دستگاه وابسته‌اند. یک پین ۶ رقمی بسازید تا از کلیدتان پشتیبان رمزشده بگیرید. می‌توانید در گوشی دیگر یا پس از پاک کردن این مرورگر با پین آن را باز کنید. Kite هرگز پین یا کلید خصوصی شما را نمی‌بیند—فقط یک بستهٔ رمزشده در حسابتان ذخیره می‌شود.",
+    e2ePinVaultPinLabel: "پین ۶ رقمی بسازید",
+    e2ePinVaultConfirmPinLabel: "تأیید پین",
+    e2ePinVaultSubmit: "ذخیرهٔ پشتیبان رمزشده",
+    e2ePinVaultCancel: "لغو",
+    e2ePinVaultSaving: "در حال ذخیرهٔ پشتیبان…",
+    e2ePinVaultSuccess:
+      "پشتیبان رمزشده ذخیره شد. می‌توانید با پین روی دستگاه دیگر بازیابی کنید.",
+    e2ePinVaultErrorPinsMismatch: "پین‌ها یکسان نیستند.",
+    e2ePinVaultErrorInvalidPin: "پین باید دقیقاً ۶ رقم باشد.",
+    e2ePinVaultErrorNoLocalKeys:
+      "یک‌بار گفتگو را روی این دستگاه باز کنید تا کلید امن ساخته شود، سپس دوباره تلاش کنید.",
+    e2ePinVaultErrorUploadFailed:
+      "ذخیرهٔ پشتیبان انجام نشد. اتصال را بررسی و دوباره تلاش کنید.",
+    e2ePinVaultErrorGeneric: "خطایی رخ داد. دوباره تلاش کنید.",
+    e2ePinVaultConnectAria: "همگام‌سازی دستگاه‌ها — پشتیبان رمزشدهٔ کلید با پین",
+    e2eRestoreModalTitle: "بازیابی کلید امن شما",
+    e2eRestoreModalBody:
+      "برای این حساب پشتیبان کلید گفتگو پیدا شد. پین ۶ رقمی را وارد کنید تا روی این دستگاه باز شود.",
+    e2eRestorePinLabel: "پین را وارد کنید",
+    e2eRestoreSubmit: "بازیابی",
+    e2eRestoreCancel: "لغو",
+    e2eRestoreBusy: "در حال باز کردن قفل…",
+    e2eRestoreErrorWrongPin:
+      "پشتیبان باز نشد. پین را بررسی و دوباره تلاش کنید.",
     discoverSearchBarPlaceholder: "پیدا کردن کاربر با نام مستعار",
     chatHeaderRecipientLastSeen: "آخرین بازدید {{time}}",
     chatEmptySelectConversation: "یک گفتگو را برای شروع انتخاب کنید",
@@ -1193,6 +1271,34 @@ export const translations: Record<Language, TranslationRecord> = {
     profileSwitchToLightMode: "التبديل إلى الوضع الفاتح",
     profileSwitchToDarkMode: "التبديل إلى الوضع الداكن",
     profileNotificationsLabel: "الإشعارات",
+    e2eSyncDevicesButton: "مزامنة الأجهزة",
+    e2ePinVaultModalTitle: "مزامنة مفتاحك الآمن",
+    e2ePinVaultModalBody:
+      "رسائلك مشفّرة من طرف إلى طرف ومرتبطة بهذا الجهاز. أنشئ رمزاً مكوناً من 6 أرقام لتشفير نسخة احتياطية من مفتاحك. يمكنك فتحها على هاتف آخر أو بعد مسح هذا المتصفح. لا يرى Kite رمزك أو مفتاحك الخاص—يُخزَّن فقط حزمة مشفّرة في حسابك.",
+    e2ePinVaultPinLabel: "أنشئ رمزاً من 6 أرقام",
+    e2ePinVaultConfirmPinLabel: "تأكيد الرمز",
+    e2ePinVaultSubmit: "حفظ النسخة الاحتياطية المشفّرة",
+    e2ePinVaultCancel: "إلغاء",
+    e2ePinVaultSaving: "جارٍ حفظ النسخة الاحتياطية…",
+    e2ePinVaultSuccess:
+      "تم حفظ النسخة الاحتياطية المشفّرة. يمكنك استعادتها على جهاز آخر برمزك.",
+    e2ePinVaultErrorPinsMismatch: "الرمزان غير متطابقين.",
+    e2ePinVaultErrorInvalidPin: "يجب أن يكون الرمز 6 أرقام بالضبط.",
+    e2ePinVaultErrorNoLocalKeys:
+      "افتح الدردشة مرة على هذا الجهاز ليُنشأ مفتاحك الآمن، ثم حاول مرة أخرى.",
+    e2ePinVaultErrorUploadFailed:
+      "تعذر حفظ النسخة الاحتياطية. تحقق من الاتصال وحاول مرة أخرى.",
+    e2ePinVaultErrorGeneric: "حدث خطأ. حاول مرة أخرى.",
+    e2ePinVaultConnectAria: "مزامنة الأجهزة — نسخة احتياطية مشفّرة للمفتاح برمز",
+    e2eRestoreModalTitle: "استعادة مفتاحك الآمن",
+    e2eRestoreModalBody:
+      "وُجدت نسخة احتياطية لمفتاح الدردشة لهذا الحساب. أدخل رمزك المكون من 6 أرقام لفتحه على هذا الجهاز.",
+    e2eRestorePinLabel: "أدخل الرمز",
+    e2eRestoreSubmit: "استعادة",
+    e2eRestoreCancel: "إلغاء",
+    e2eRestoreBusy: "جارٍ الفتح…",
+    e2eRestoreErrorWrongPin:
+      "تعذر فتح النسخة الاحتياطية. تحقق من الرمز وحاول مرة أخرى.",
     discoverSearchBarPlaceholder: "البحث عن مستخدم بالاسم المستعار",
     chatHeaderRecipientLastSeen: "آخر ظهور {{time}}",
     chatEmptySelectConversation: "اختر محادثة للبدء",
@@ -1341,6 +1447,34 @@ export const translations: Record<Language, TranslationRecord> = {
     profileSwitchToLightMode: "라이트 모드로 전환",
     profileSwitchToDarkMode: "다크 모드로 전환",
     profileNotificationsLabel: "알림",
+    e2eSyncDevicesButton: "기기 동기화",
+    e2ePinVaultModalTitle: "보안 키 동기화",
+    e2ePinVaultModalBody:
+      "메시지는 종단간 암호화되어 이 기기에 묶여 있습니다. 6자리 PIN으로 키의 암호화 백업을 만드세요. 다른 휴나 이 브라우저를 지운 뒤에도 PIN으로 잠금을 해제할 수 있습니다. Kite는 PIN이나 개인 키를 보지 않으며, 계정에는 암호화된 패키지만 저장됩니다.",
+    e2ePinVaultPinLabel: "6자리 PIN 만들기",
+    e2ePinVaultConfirmPinLabel: "PIN 확인",
+    e2ePinVaultSubmit: "암호화 백업 저장",
+    e2ePinVaultCancel: "취소",
+    e2ePinVaultSaving: "백업 저장 중…",
+    e2ePinVaultSuccess:
+      "암호화 백업이 저장되었습니다. 다른 기기에서 PIN으로 복원할 수 있습니다.",
+    e2ePinVaultErrorPinsMismatch: "PIN이 일치하지 않습니다.",
+    e2ePinVaultErrorInvalidPin: "PIN은 정확히 6자리 숫자여야 합니다.",
+    e2ePinVaultErrorNoLocalKeys:
+      "이 기기에서 채팅을 한 번 열어 보안 키가 만들어지게 한 뒤 다시 시도하세요.",
+    e2ePinVaultErrorUploadFailed:
+      "백업을 저장할 수 없습니다. 연결을 확인하고 다시 시도하세요.",
+    e2ePinVaultErrorGeneric: "문제가 발생했습니다. 다시 시도하세요.",
+    e2ePinVaultConnectAria: "기기 동기화 — PIN으로 암호화된 키 백업",
+    e2eRestoreModalTitle: "보안 키 복원",
+    e2eRestoreModalBody:
+      "이 계정에 채팅 키 백업이 있습니다. 이 기기에서 잠금을 해제하려면 6자리 PIN을 입력하세요.",
+    e2eRestorePinLabel: "PIN 입력",
+    e2eRestoreSubmit: "복원",
+    e2eRestoreCancel: "취소",
+    e2eRestoreBusy: "잠금 해제 중…",
+    e2eRestoreErrorWrongPin:
+      "백업을 열 수 없습니다. PIN을 확인하고 다시 시도하세요.",
     discoverSearchBarPlaceholder: "닉네임으로 사용자 찾기",
     chatHeaderRecipientLastSeen: "마지막 접속 {{time}}",
     chatEmptySelectConversation: "대화를 선택해 시작하세요",
@@ -1486,6 +1620,34 @@ export const translations: Record<Language, TranslationRecord> = {
     profileSwitchToLightMode: "Açık moda geç",
     profileSwitchToDarkMode: "Koyu moda geç",
     profileNotificationsLabel: "Bildirimler",
+    e2eSyncDevicesButton: "Cihazları eşitle",
+    e2ePinVaultModalTitle: "Güvenli anahtarınızı eşitleyin",
+    e2ePinVaultModalBody:
+      "Mesajlarınız uçtan uca şifrelidir ve bu cihaza bağlıdır. Anahtarınızın şifreli yedeği için 6 haneli bir PIN oluşturun. Başka bir telefonda veya bu tarayıcı temizlendikten sonra PIN ile açabilirsiniz. Kite PIN’inizi veya özel anahtarınızı görmez—hesabınızda yalnızca şifreli bir paket saklanır.",
+    e2ePinVaultPinLabel: "6 haneli PIN oluştur",
+    e2ePinVaultConfirmPinLabel: "PIN’i onayla",
+    e2ePinVaultSubmit: "Şifreli yedeği kaydet",
+    e2ePinVaultCancel: "İptal",
+    e2ePinVaultSaving: "Yedek kaydediliyor…",
+    e2ePinVaultSuccess:
+      "Şifreli yedek kaydedildi. PIN ile başka bir cihazda geri yükleyebilirsiniz.",
+    e2ePinVaultErrorPinsMismatch: "PIN’ler eşleşmiyor.",
+    e2ePinVaultErrorInvalidPin: "PIN tam olarak 6 rakam olmalıdır.",
+    e2ePinVaultErrorNoLocalKeys:
+      "Güvenli anahtarın oluşması için bu cihazda Sohbet’i bir kez açın, sonra tekrar deneyin.",
+    e2ePinVaultErrorUploadFailed:
+      "Yedek kaydedilemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+    e2ePinVaultErrorGeneric: "Bir sorun oluştu. Tekrar deneyin.",
+    e2ePinVaultConnectAria: "Cihazları eşitle — PIN ile şifreli anahtar yedeği",
+    e2eRestoreModalTitle: "Güvenli anahtarınızı geri yükleyin",
+    e2eRestoreModalBody:
+      "Bu hesap için sohbet anahtarı yedeği bulundu. Bu cihazda açmak için 6 haneli PIN’inizi girin.",
+    e2eRestorePinLabel: "PIN girin",
+    e2eRestoreSubmit: "Geri yükle",
+    e2eRestoreCancel: "İptal",
+    e2eRestoreBusy: "Kilit açılıyor…",
+    e2eRestoreErrorWrongPin:
+      "Yedek açılamadı. PIN’i kontrol edip tekrar deneyin.",
     discoverSearchBarPlaceholder: "Takma adla kullanıcı bul",
     chatHeaderRecipientLastSeen: "Son görülme {{time}}",
     chatEmptySelectConversation: "Başlamak için bir sohbet seçin",
