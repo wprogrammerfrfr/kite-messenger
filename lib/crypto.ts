@@ -289,6 +289,16 @@ function normalizePinForBackup(pin: string): string {
   return trimmed;
 }
 
+/**
+ * Copy bytes into a plain ArrayBuffer. DOM lib typings require BufferSource backed by
+ * ArrayBuffer (not SharedArrayBuffer); views from subarray/getRandomValues can widen to ArrayBufferLike.
+ */
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
 async function deriveAesKeyFromPin(
   pin: string,
   salt: Uint8Array
@@ -306,7 +316,7 @@ async function deriveAesKeyFromPin(
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      salt,
+      salt: toArrayBuffer(salt),
       iterations: PIN_BACKUP_PBKDF2_ITERATIONS,
     },
     keyMaterial,
@@ -387,11 +397,11 @@ export async function unwrapPrivateKeyWithPin(
   const pkcs8 = await crypto.subtle.decrypt(
     {
       name: "AES-GCM",
-      iv,
+      iv: toArrayBuffer(iv),
       tagLength: 128,
     },
     aesKey,
-    ciphertext
+    toArrayBuffer(ciphertext)
   );
 
   return crypto.subtle.importKey(
@@ -404,9 +414,7 @@ export async function unwrapPrivateKeyWithPin(
 }
 
 function uint8ArrayToBase64(bytes: Uint8Array): string {
-  return arrayBufferToBase64(
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-  );
+  return arrayBufferToBase64(toArrayBuffer(bytes));
 }
 
 function base64ToUint8Array(base64: string): Uint8Array {
