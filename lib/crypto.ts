@@ -17,6 +17,14 @@ const AES_KEY_LENGTH_BITS = 256;
 const GCM_IV_LENGTH_BYTES = 12;
 const HKDF_INFO = new TextEncoder().encode("nexus-e2e-aes-gcm-v1");
 
+/** Salt length for PIN-derived backup key (PBKDF2). */
+const PIN_BACKUP_SALT_BYTES = 16;
+/**
+ * PBKDF2 iteration count for PIN backup. 6-digit PINs are low entropy; keep this high.
+ * Tune if UX on low-end devices is unacceptable (measure before lowering).
+ */
+const PIN_BACKUP_PBKDF2_ITERATIONS = 310_000;
+
 /** Result of key pair generation. Keep the private key secure and never share it. */
 export interface KeyPair {
   publicKey: CryptoKey;
@@ -261,6 +269,148 @@ export async function decryptMessage(
 ): Promise<string> {
   const payload = JSON.parse(encrypted) as EncryptedPayload;
   return decrypt(payload, recipientPrivateKey);
+}
+
+/**
+ * Values to store in `profiles.key_backup_salt` and `profiles.encrypted_private_key_backup`.
+ * Only salt and ciphertext (IV + AES-GCM output) leave the device; PIN and raw key never do.
+ */
+export interface PinWrappedPrivateKeyBackup {
+  saltBase64: string;
+  /** Base64 of IV (12 bytes) concatenated with AES-GCM ciphertext (includes auth tag). */
+  encryptedPrivateKeyBackupBase64: string;
+}
+
+function normalizePinForBackup(pin: string): string {
+  const trimmed = pin.trim();
+  if (!/^\d{6}$/.test(trimmed)) {
+    throw new Error("PIN must be exactly 6 digits");
+  }
+  return trimmed;
+}
+
+async function deriveAesKeyFromPin(
+  pin: string,
+  salt: Uint8Array
+): Promise<CryptoKey> {
+  const normalized = normalizePinForBackup(pin);
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(normalized),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt,
+      iterations: PIN_BACKUP_PBKDF2_ITERATIONS,
+    },
+    keyMaterial,
+    AES_KEY_LENGTH_BITS
+  );
+
+  return crypto.subtle.importKey(
+    "raw",
+    derived,
+    { name: "AES-GCM", length: AES_KEY_LENGTH_BITS },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+/**
+ * Wraps the ECDH private key (PKCS#8) with AES-GCM using a key derived from the PIN (PBKDF2).
+ * Caller should validate UX (PIN confirmation) before calling.
+ */
+export async function wrapPrivateKeyWithPin(
+  privateKey: CryptoKey,
+  pin: string
+): Promise<PinWrappedPrivateKeyBackup> {
+  normalizePinForBackup(pin);
+
+  const salt = crypto.getRandomValues(new Uint8Array(PIN_BACKUP_SALT_BYTES));
+  const aesKey = await deriveAesKeyFromPin(pin, salt);
+
+  const pkcs8 = await crypto.subtle.exportKey("pkcs8", privateKey);
+  const iv = crypto.getRandomValues(new Uint8Array(GCM_IV_LENGTH_BYTES));
+
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv,
+      tagLength: 128,
+    },
+    aesKey,
+    pkcs8
+  );
+
+  const ct = new Uint8Array(ciphertext);
+  const combined = new Uint8Array(GCM_IV_LENGTH_BYTES + ct.length);
+  combined.set(iv, 0);
+  combined.set(ct, GCM_IV_LENGTH_BYTES);
+
+  return {
+    saltBase64: uint8ArrayToBase64(salt),
+    encryptedPrivateKeyBackupBase64: uint8ArrayToBase64(combined),
+  };
+}
+
+/**
+ * Decrypts a PIN backup and imports the ECDH private key. Wrong PIN or tampered data throws.
+ */
+export async function unwrapPrivateKeyWithPin(
+  encryptedPrivateKeyBackupBase64: string,
+  saltBase64: string,
+  pin: string
+): Promise<CryptoKey> {
+  normalizePinForBackup(pin);
+
+  const salt = base64ToUint8Array(saltBase64);
+  if (salt.length < 8) {
+    throw new Error("Invalid backup salt");
+  }
+
+  const combined = base64ToUint8Array(encryptedPrivateKeyBackupBase64);
+  if (combined.length < GCM_IV_LENGTH_BYTES + 16) {
+    throw new Error("Invalid encrypted backup");
+  }
+
+  const iv = combined.subarray(0, GCM_IV_LENGTH_BYTES);
+  const ciphertext = combined.subarray(GCM_IV_LENGTH_BYTES);
+
+  const aesKey = await deriveAesKeyFromPin(pin, salt);
+
+  const pkcs8 = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv,
+      tagLength: 128,
+    },
+    aesKey,
+    ciphertext
+  );
+
+  return crypto.subtle.importKey(
+    "pkcs8",
+    pkcs8,
+    { name: "ECDH", namedCurve: ECDH_CURVE },
+    true,
+    ["deriveBits"]
+  );
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  return arrayBufferToBase64(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  );
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  return new Uint8Array(base64ToArrayBuffer(base64));
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
