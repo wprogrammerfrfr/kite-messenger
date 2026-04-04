@@ -1702,48 +1702,66 @@ export default function StudioBridgePage() {
               className="mt-8 space-y-4"
             >
               {status === "connected" ? (
-                <div className="flex flex-wrap items-center justify-center gap-4 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
-                  <div className="font-mono text-sm text-stone-200">
-                    Ping:{" "}
-                    <span
-                      className={`font-mono ${
-                        pingMs === null
-                          ? "text-gray-400"
-                          : pingMs < 30
-                            ? "text-emerald-400"
-                            : pingMs < 70
-                              ? "text-orange-400"
-                              : "text-red-500"
-                      }`}
+                <>
+                  <div className="flex flex-wrap items-center justify-center gap-4 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
+                    <div className="font-mono text-sm text-stone-200">
+                      Ping:{" "}
+                      <span
+                        className={`font-mono ${
+                          pingMs === null
+                            ? "text-gray-400"
+                            : pingMs < 30
+                              ? "text-emerald-400"
+                              : pingMs < 70
+                                ? "text-orange-400"
+                                : "text-red-500"
+                        }`}
+                      >
+                        {pingMs === null ? "-- ms" : `${pingMs} ms`}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={toggleMic}
+                      className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
+                      aria-label={isMicMuted ? "Enable microphone" : "Mute microphone"}
+                      aria-pressed={isMicMuted}
                     >
-                      {pingMs === null ? "-- ms" : `${pingMs} ms`}
-                    </span>
+                      <span className={`text-sm font-semibold ${isMicMuted ? "text-rose-500" : "text-emerald-400"}`}>
+                        MIC
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={toggleSpeaker}
+                      className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
+                      aria-label={isSpeakerMuted ? "Enable speaker" : "Mute speaker"}
+                      aria-pressed={isSpeakerMuted}
+                    >
+                      <span
+                        className={`text-sm font-semibold ${isSpeakerMuted ? "text-rose-500" : "text-emerald-400"}`}
+                      >
+                        SPK
+                      </span>
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={toggleMic}
-                    className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
-                    aria-label={isMicMuted ? "Enable microphone" : "Mute microphone"}
-                    aria-pressed={isMicMuted}
-                  >
-                    <span className={`text-sm font-semibold ${isMicMuted ? "text-rose-500" : "text-emerald-400"}`}>
-                      MIC
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={toggleSpeaker}
-                    className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
-                    aria-label={isSpeakerMuted ? "Enable speaker" : "Mute speaker"}
-                    aria-pressed={isSpeakerMuted}
-                  >
-                    <span
-                      className={`text-sm font-semibold ${isSpeakerMuted ? "text-rose-500" : "text-emerald-400"}`}
-                    >
-                      SPK
-                    </span>
-                  </button>
-                </div>
+                  {localMicStream ? (
+                    <div className="rounded-xl border border-stone-800/90 bg-stone-950/40 px-4 py-3">
+                      <MicLevelBars stream={localMicStream} />
+                      <p className="mt-2 text-center text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                        Default Input Level
+                      </p>
+                    </div>
+                  ) : null}
+                  {remoteStream ? (
+                    <div className="rounded-xl border border-stone-800/90 bg-stone-950/40 px-4 py-3">
+                      <MicLevelBars stream={remoteStream} onLevel={setRemoteLevel} />
+                      <p className="mt-2 text-center text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                        Incoming Remote Level
+                      </p>
+                    </div>
+                  ) : null}
+                </>
               ) : null}
 
               {role === "host" && inviteLink ? (
