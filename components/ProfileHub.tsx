@@ -331,31 +331,42 @@ export const ProfileHub = memo(function ProfileHub() {
         }
       }
 
-      const { error: upsertError } = await supabase.from("profiles").upsert(
-        {
-          id: session.user.id,
-          nickname: trimmedNickname || null,
-          bio: bio.trim() || null,
-          emergency_contact: emergencyContact.trim() || null,
-          profile_picture_url: profilePictureUrl.trim() || null,
-          role,
-          preferred_locale: language,
-        },
-        { onConflict: "id" }
-      );
+      const { data, error: upsertError } = await supabase
+        .from("profiles")
+        .upsert(
+          {
+            id: session.user.id,
+            nickname: trimmedNickname || null,
+            bio: bio.trim() || null,
+            emergency_contact: emergencyContact.trim() || null,
+            profile_picture_url: profilePictureUrl.trim() || null,
+            role,
+            preferred_locale: language,
+          },
+          { onConflict: "id" }
+        )
+        .select();
 
-      if (upsertError) {
-        setError(upsertError.message);
-      } else {
-        setSuccess(t(language, "profileUpdatedSuccess"));
-        writeJsonCache(settingsProfileCacheKey(session.user.id), {
-          nickname: trimmedNickname,
-          bio: bio.trim(),
-          emergencyContact: emergencyContact.trim(),
-          profilePictureUrl: profilePictureUrl.trim(),
-          role,
+      if (upsertError || !data || data.length === 0) {
+        console.error("[Kite] Profile save silent failure:", {
+          upsertError,
+          rowsReturned: data?.length ?? 0,
         });
+        setError(
+          upsertError?.message ??
+            "Save failed: Session blocked. Please log out and log back in."
+        );
+        return;
       }
+
+      setSuccess(t(language, "profileUpdatedSuccess"));
+      writeJsonCache(settingsProfileCacheKey(session.user.id), {
+        nickname: trimmedNickname,
+        bio: bio.trim(),
+        emergencyContact: emergencyContact.trim(),
+        profilePictureUrl: profilePictureUrl.trim(),
+        role,
+      });
     } catch (err) {
       setError(
         err instanceof Error ? err.message : t(language, "profileUpdateFailedGeneric")
