@@ -9,6 +9,7 @@ import {
   exportPrivateKeyToBase64,
   importPublicKeyFromBase64,
   importPrivateKeyFromBase64,
+  unwrapPrivateKeyWithPin,
   type KeyPair,
 } from "@/lib/crypto";
 import {
@@ -43,6 +44,10 @@ const AuthLazy = dynamic(
 
 const SafetyProfileModal = dynamic(
   () => import("@/components/SafetyProfileModal").then((m) => m.SafetyProfileModal),
+  { ssr: false, loading: () => null }
+);
+const E2ePinRestoreModal = dynamic(
+  () => import("@/components/E2ePinRestoreModal").then((m) => m.E2ePinRestoreModal),
   { ssr: false, loading: () => null }
 );
 import {
@@ -364,6 +369,58 @@ export default function Home() {
   /** Local-only labels for contacts (`contact_aliases`). */
   const [contactAliases, setContactAliases] = useState<Record<string, string>>({});
   const [dmActionBusy, setDmActionBusy] = useState(false);
+
+  type E2eRestorePayload = {
+    encryptedPrivateKeyBackupBase64: string;
+    saltBase64: string;
+    publicKeyBase64: string;
+  };
+  const [e2eRestorePayload, setE2eRestorePayload] = useState<E2eRestorePayload | null>(null);
+  const e2eRestorePayloadRef = useRef<E2eRestorePayload | null>(null);
+  const [e2eRestoreModalOpen, setE2eRestoreModalOpen] = useState(false);
+  const [e2eRestoreBusy, setE2eRestoreBusy] = useState(false);
+  const [e2eRestoreError, setE2eRestoreError] = useState<string | null>(null);
+  /** True until local read + optional server backup check + create/restore decision finishes. */
+  const [e2eKeyBootstrapLoading, setE2eKeyBootstrapLoading] = useState(true);
+
+  useEffect(() => {
+    e2eRestorePayloadRef.current = e2eRestorePayload;
+  }, [e2eRestorePayload]);
+
+  const handleE2eRestoreSubmit = useCallback(
+    (pin: string) => {
+      if (!session?.user?.id) return;
+      void (async () => {
+        const payload = e2eRestorePayloadRef.current;
+        if (!payload) return;
+        setE2eRestoreBusy(true);
+        setE2eRestoreError(null);
+        try {
+          const privateKey = await unwrapPrivateKeyWithPin(
+            payload.encryptedPrivateKeyBackupBase64,
+            payload.saltBase64,
+            pin
+          );
+          const publicKey = await importPublicKeyFromBase64(payload.publicKeyBase64);
+          const privateKeyBase64 = await exportPrivateKeyToBase64(privateKey);
+          const stored = {
+            publicKeyBase64: payload.publicKeyBase64,
+            privateKeyBase64,
+          };
+          localStorage.setItem(E2E_KEY_STORAGE_KEY, JSON.stringify(stored));
+          setSenderKeys({ publicKey, privateKey });
+          setE2eRestorePayload(null);
+          setE2eRestoreModalOpen(false);
+          setE2eRestoreError(null);
+        } catch {
+          setE2eRestoreError(t(language, "e2eRestoreErrorWrongPin"));
+        } finally {
+          setE2eRestoreBusy(false);
+        }
+      })();
+    },
+    [session?.user?.id, language]
+  );
 
   const dmThreadRef = useRef(dmThread);
   const activeRecipientIdRef = useRef(activeRecipientId);
@@ -984,34 +1041,92 @@ export default function Home() {
     }
   }, []);
 
-  // Generate or restore a persistent key pair for the current user.
+  // Generate, restore from localStorage, or prompt for PIN backup (same user as session).
   useEffect(() => {
     let cancelled = false;
 
     const loadOrCreateKeys = async () => {
+      if (!session?.user?.id) {
+        setSenderKeys(null);
+        setE2eRestorePayload(null);
+        setE2eRestoreModalOpen(false);
+        setE2eRestoreError(null);
+        setE2eKeyBootstrapLoading(false);
+        return;
+      }
+
+      setE2eKeyBootstrapLoading(true);
+      setE2eRestorePayload(null);
+      setE2eRestoreModalOpen(false);
+      setE2eRestoreError(null);
+
       try {
         const stored =
           localStorage.getItem(E2E_KEY_STORAGE_KEY) ??
           localStorage.getItem("nexus-e2e-keypair");
         if (stored) {
           const parsed = JSON.parse(stored) as {
-            publicKeyBase64: string;
-            privateKeyBase64: string;
+            publicKeyBase64?: string;
+            privateKeyBase64?: string;
           };
-
-          const [publicKey, privateKey] = await Promise.all([
-            importPublicKeyFromBase64(parsed.publicKeyBase64),
-            importPrivateKeyFromBase64(parsed.privateKeyBase64),
-          ]);
-
-          if (cancelled) return;
-
-          setSenderKeys({ publicKey, privateKey });
-          localStorage.setItem(E2E_KEY_STORAGE_KEY, JSON.stringify(parsed));
-          return;
+          if (parsed.publicKeyBase64 && parsed.privateKeyBase64) {
+            const [publicKey, privateKey] = await Promise.all([
+              importPublicKeyFromBase64(parsed.publicKeyBase64),
+              importPrivateKeyFromBase64(parsed.privateKeyBase64),
+            ]);
+            if (cancelled) return;
+            setSenderKeys({ publicKey, privateKey });
+            localStorage.setItem(
+              E2E_KEY_STORAGE_KEY,
+              JSON.stringify({
+                publicKeyBase64: parsed.publicKeyBase64,
+                privateKeyBase64: parsed.privateKeyBase64,
+              })
+            );
+            if (!cancelled) setE2eKeyBootstrapLoading(false);
+            return;
+          }
         }
       } catch (error) {
         console.error("Failed to restore E2E keypair from storage", error);
+      }
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("encrypted_private_key_backup, key_backup_salt, public_key")
+        .eq("id", session.user.id)
+        .maybeSingle();
+
+      if (cancelled) return;
+
+      if (
+        error &&
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).code !== "PGRST116"
+      ) {
+        console.error("Failed to load profile for E2EE restore", error);
+      }
+
+      const encRaw =
+        data && typeof data.encrypted_private_key_backup === "string"
+          ? data.encrypted_private_key_backup.trim()
+          : "";
+      const saltRaw =
+        data && typeof data.key_backup_salt === "string"
+          ? data.key_backup_salt.trim()
+          : "";
+      const pubRaw =
+        data && typeof data.public_key === "string" ? data.public_key.trim() : "";
+
+      if (encRaw && saltRaw && pubRaw) {
+        setE2eRestorePayload({
+          encryptedPrivateKeyBackupBase64: encRaw,
+          saltBase64: saltRaw,
+          publicKeyBase64: pubRaw,
+        });
+        setE2eRestoreModalOpen(true);
+        setE2eKeyBootstrapLoading(false);
+        return;
       }
 
       const keys = await generateKeyPair();
@@ -1032,14 +1147,15 @@ export default function Home() {
       } catch (error) {
         console.error("Failed to persist E2E keypair", error);
       }
+      if (!cancelled) setE2eKeyBootstrapLoading(false);
     };
 
-    loadOrCreateKeys();
+    void loadOrCreateKeys();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [session?.user?.id]);
 
   // Once we have a logged-in user and a local key pair, ensure their public key
   // is uploaded to the `profiles` table so others can establish a secure channel.
@@ -2289,6 +2405,44 @@ export default function Home() {
       transition={{ duration: motionDuration, ease: "easeOut" }}
     >
       <main className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
+        {e2eKeyBootstrapLoading && !senderKeys && !e2eRestorePayload ? (
+          <div
+            className="shrink-0 border-b px-3 py-2.5 text-center text-xs sm:text-sm sm:px-4"
+            style={{
+              borderColor: "var(--border)",
+              background: "var(--panel-bg)",
+              color: "var(--text-secondary)",
+            }}
+            role="status"
+          >
+            {t(language, "syncingSecurity")}
+          </div>
+        ) : null}
+        {e2eRestorePayload && !senderKeys && !e2eRestoreModalOpen ? (
+          <div
+            className="shrink-0 border-b px-3 py-3 sm:px-4"
+            style={{
+              borderColor: "var(--border)",
+              background: "var(--panel-bg)",
+            }}
+            role="status"
+          >
+            <p className="mb-2 text-xs sm:text-sm" style={{ color: "var(--text-secondary)" }}>
+              {t(language, "e2eRestoreModalTitle")}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setE2eRestoreError(null);
+                setE2eRestoreModalOpen(true);
+              }}
+              className="rounded-xl px-4 py-2 text-xs font-semibold text-white sm:text-sm"
+              style={{ background: "var(--accent)" }}
+            >
+              {t(language, "e2eRestoreSubmit")}
+            </button>
+          </div>
+        ) : null}
         {!activeRecipientId ? (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
             <header
@@ -2826,6 +2980,26 @@ export default function Home() {
           onContactAliasUpdated={handleContactAliasUpdated}
         />
       ) : null}
+
+      <E2ePinRestoreModal
+        open={e2eRestoreModalOpen && Boolean(e2eRestorePayload)}
+        onOpenChange={(open) => {
+          setE2eRestoreModalOpen(open);
+          if (!open) setE2eRestoreError(null);
+        }}
+        language={language}
+        busy={e2eRestoreBusy}
+        errorMessage={e2eRestoreError}
+        onSubmit={handleE2eRestoreSubmit}
+        theme={{
+          panelBg: bodyTheme["--panel-bg"],
+          border: bodyTheme["--border"],
+          accent: bodyTheme["--accent"],
+          textPrimary: bodyTheme["--text-primary"],
+          textSecondary: bodyTheme["--text-secondary"],
+          inputBg: bodyTheme["--input-bg"],
+        }}
+      />
     </motion.div>
     </MotionConfig>
   );
