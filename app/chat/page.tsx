@@ -60,6 +60,7 @@ import {
 import { MotionConfig, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import {
+  AlertTriangle,
   ArrowLeft,
   Loader2,
   MapPin,
@@ -384,16 +385,17 @@ export default function Home() {
   const [e2eKeyBootstrapLoading, setE2eKeyBootstrapLoading] = useState(true);
   /**
    * Server has a registered `public_key` but no complete PIN backup (no ciphertext + salt).
-   * Blocks silent keygen until the user confirms (banner wired in a follow-up step).
+   * Blocks silent keygen until the user confirms via the chat banner.
    */
   const [e2eUnsyncedServerKeyNoBackup, setE2eUnsyncedServerKeyNoBackup] =
     useState(false);
+  const [e2eUnsyncedGenerateBusy, setE2eUnsyncedGenerateBusy] = useState(false);
 
   useEffect(() => {
     e2eRestorePayloadRef.current = e2eRestorePayload;
   }, [e2eRestorePayload]);
 
-  /** Shared by bootstrap and the “generate new keys anyway” escape hatch (Phase 1 step 2). */
+  /** Shared by bootstrap and the unsynced-device banner escape hatch. */
   const generateAndPersistNewE2eKeys = useCallback(
     async (isCancelled?: () => boolean) => {
       const keys = await generateKeyPair();
@@ -417,6 +419,21 @@ export default function Home() {
     },
     []
   );
+
+  const e2eUnsyncedGenerateBusyRef = useRef(false);
+  const handleE2eUnsyncedGenerateAnyway = useCallback(() => {
+    if (e2eUnsyncedGenerateBusyRef.current) return;
+    e2eUnsyncedGenerateBusyRef.current = true;
+    setE2eUnsyncedGenerateBusy(true);
+    void (async () => {
+      try {
+        await generateAndPersistNewE2eKeys();
+      } finally {
+        e2eUnsyncedGenerateBusyRef.current = false;
+        setE2eUnsyncedGenerateBusy(false);
+      }
+    })();
+  }, [generateAndPersistNewE2eKeys]);
 
   const handleE2eRestoreSubmit = useCallback(
     (pin: string) => {
@@ -1084,6 +1101,8 @@ export default function Home() {
         setE2eRestoreModalOpen(false);
         setE2eRestoreError(null);
         setE2eUnsyncedServerKeyNoBackup(false);
+        e2eUnsyncedGenerateBusyRef.current = false;
+        setE2eUnsyncedGenerateBusy(false);
         setE2eKeyBootstrapLoading(false);
         return;
       }
@@ -2440,6 +2459,56 @@ export default function Home() {
             role="status"
           >
             {t(language, "syncingSecurity")}
+          </div>
+        ) : null}
+        {e2eUnsyncedServerKeyNoBackup &&
+        !senderKeys &&
+        !e2eRestorePayload &&
+        !e2eKeyBootstrapLoading ? (
+          <div
+            className="shrink-0 border-b px-3 py-3 sm:px-4"
+            style={{
+              borderColor: "var(--border)",
+              background: "var(--panel-bg)",
+            }}
+            role="alert"
+          >
+            <div className="mb-2 flex items-start gap-2">
+              <AlertTriangle
+                className="mt-0.5 h-4 w-4 shrink-0 text-amber-500"
+                aria-hidden
+              />
+              <div className="min-w-0 flex-1 space-y-2">
+                <p
+                  className="text-sm font-semibold"
+                  style={{ color: "var(--text-primary)" }}
+                >
+                  {t(language, "e2eUnsyncedDeviceTitle")}
+                </p>
+                <p className="text-xs sm:text-sm" style={{ color: "var(--text-secondary)" }}>
+                  {t(language, "e2eUnsyncedDeviceBody")}
+                </p>
+                <p className="text-xs sm:text-sm text-amber-600/95 dark:text-amber-400/95">
+                  {t(language, "e2eUnsyncedDeviceHint")}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleE2eUnsyncedGenerateAnyway}
+              disabled={e2eUnsyncedGenerateBusy}
+              className="w-full rounded-xl px-4 py-2.5 text-xs font-semibold text-white sm:text-sm disabled:opacity-50"
+              style={{ background: "var(--accent)" }}
+            >
+              {e2eUnsyncedGenerateBusy ? (
+                <span className="inline-flex items-center justify-center gap-2">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                  {t(language, "chatLoadingShort")}
+                </span>
+              ) : (
+                t(language, "e2eUnsyncedGenerateNewKeys")
+              )}
+            </button>
           </div>
         ) : null}
         {e2eRestorePayload && !senderKeys && !e2eRestoreModalOpen ? (

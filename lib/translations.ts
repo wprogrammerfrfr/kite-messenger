@@ -629,12 +629,11 @@ const translationsEn: TranslationRecord = {
     e2eRestoreBusy: "Unlocking…",
     e2eRestoreErrorWrongPin:
       "Could not unlock backup. Check your PIN and try again.",
-    e2eUnsyncedDeviceTitle: "Your chat key may still be on another device",
+    e2eUnsyncedDeviceTitle: "New device detected!",
     e2eUnsyncedDeviceBody:
-      "This account already has a secure key registered, but there is no PIN backup. To read your existing messages here, open Kite on a device where you are already signed in, go to Profile, and use Sync devices to create a 6-digit PIN backup.",
-    e2eUnsyncedDeviceHint:
-      "If you generate new keys, older encrypted messages will no longer be readable.",
-    e2eUnsyncedGenerateNewKeys: "Generate new keys anyway",
+      "You won't be able to see your previous messages on this device. To access your chat history here, please go back to your original device, open your Profile, and set a Sync PIN.",
+    e2eUnsyncedDeviceHint: "",
+    e2eUnsyncedGenerateNewKeys: "I understand",
     e2eProfileBackupActiveLabel: "PIN backup active",
     e2eProfileOverwriteBackupTitle: "Replace existing backup?",
     e2eProfileOverwriteBackupBody:
@@ -997,12 +996,11 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "در حال باز کردن قفل…",
     e2eRestoreErrorWrongPin:
       "پشتیبان باز نشد. پین را بررسی و دوباره تلاش کنید.",
-    e2eUnsyncedDeviceTitle: "کلید گفتگو ممکن است روی دستگاه دیگری باشد",
+    e2eUnsyncedDeviceTitle: "دستگاه جدید تشخیص داده شد!",
     e2eUnsyncedDeviceBody:
-      "این حساب از قبل کلید امن ثبت‌شده دارد، اما پشتیبان پین ندارد. برای خواندن پیام‌های فعلی اینجا، Kite را روی دستگاهی باز کنید که قبلاً وارد شده‌اید، به پروفایل بروید و با «همگام‌سازی دستگاه‌ها» پشتیبان پین ۶ رقمی بسازید.",
-    e2eUnsyncedDeviceHint:
-      "اگر کلیدهای جدید بسازید، پیام‌های رمزشدهٔ قدیمی دیگر خوانا نخواهند بود.",
-    e2eUnsyncedGenerateNewKeys: "باز هم کلیدهای جدید بسازم",
+      "روی این دستگاه نمی‌توانید پیام‌های قبلی را ببینید. برای دسترسی به تاریخچهٔ گفتگو اینجا، لطفاً به دستگاه اصلی خود برگردید، پروفایل را باز کنید و یک پین همگام‌سازی تنظیم کنید.",
+    e2eUnsyncedDeviceHint: "",
+    e2eUnsyncedGenerateNewKeys: "متوجه شدم",
     e2eProfileBackupActiveLabel: "پشتیبان پین فعال است",
     e2eProfileOverwriteBackupTitle: "پشتیبان فعلی جایگزین شود؟",
     e2eProfileOverwriteBackupBody:
@@ -1362,12 +1360,11 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "جارٍ الفتح…",
     e2eRestoreErrorWrongPin:
       "تعذر فتح النسخة الاحتياطية. تحقق من الرمز وحاول مرة أخرى.",
-    e2eUnsyncedDeviceTitle: "قد يكون مفتاح الدردشة على جهاز آخر",
+    e2eUnsyncedDeviceTitle: "تم اكتشاف جهاز جديد!",
     e2eUnsyncedDeviceBody:
-      "هذا الحساب لديه مفتاح آمن مسجّل مسبقًا، لكن لا توجد نسخة احتياطية برمز. لقراءة رسائلك الحالية هنا، افتح Kite على جهازٍ سجّلت الدخول فيه، واذهب إلى الملف الشخصي واستخدم «مزامنة الأجهزة» لإنشاء نسخة احتياطية برمز من 6 أرقام.",
-    e2eUnsyncedDeviceHint:
-      "إذا أنشأت مفاتيحًا جديدة، فلن تُقرأ الرسائل المشفّرة القديمة بعد ذلك.",
-    e2eUnsyncedGenerateNewKeys: "إنشاء مفاتيح جديدة على أي حال",
+      "لن تتمكن من رؤية رسائلك السابقة على هذا الجهاز. للوصول إلى سجل الدردشة هنا، ارجع إلى جهازك الأصلي وافتح ملفك الشخصي واضبط رمز المزامنة.",
+    e2eUnsyncedDeviceHint: "",
+    e2eUnsyncedGenerateNewKeys: "أفهم",
     e2eProfileBackupActiveLabel: "نسخة احتياطية بالرمز نشطة",
     e2eProfileOverwriteBackupTitle: "استبدال النسخة الاحتياطية الحالية؟",
     e2eProfileOverwriteBackupBody:
@@ -1561,12 +1558,11 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "잠금 해제 중…",
     e2eRestoreErrorWrongPin:
       "백업을 열 수 없습니다. PIN을 확인하고 다시 시도하세요.",
-    e2eUnsyncedDeviceTitle: "채팅 키가 다른 기기에 있을 수 있습니다",
+    e2eUnsyncedDeviceTitle: "새 기기로 감지되었습니다!",
     e2eUnsyncedDeviceBody:
-      "이 계정에는 이미 보안 키가 등록되어 있지만 PIN 백업이 없습니다. 기존 메시지를 이 기기에서 읽으려면 이미 로그인한 기기에서 Kite를 열고 프로필로 이동한 뒤 기기 동기화로 6자리 PIN 백업을 만드세요.",
-    e2eUnsyncedDeviceHint:
-      "새 키를 만들면 이전에 암호화된 메시지는 더 이상 읽을 수 없습니다.",
-    e2eUnsyncedGenerateNewKeys: "그래도 새 키 만들기",
+      "이 기기에서는 이전 메시지를 볼 수 없습니다. 여기에서 채팅 기록을 쓰려면 처음 쓰던 기기로 돌아가 프로필을 연 뒤 동기화 PIN을 설정하세요.",
+    e2eUnsyncedDeviceHint: "",
+    e2eUnsyncedGenerateNewKeys: "이해했습니다",
     e2eProfileBackupActiveLabel: "PIN 백업 사용 중",
     e2eProfileOverwriteBackupTitle: "기존 백업을 바꿀까요?",
     e2eProfileOverwriteBackupBody:
@@ -1757,12 +1753,11 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "Kilit açılıyor…",
     e2eRestoreErrorWrongPin:
       "Yedek açılamadı. PIN’i kontrol edip tekrar deneyin.",
-    e2eUnsyncedDeviceTitle: "Sohbet anahtarınız başka bir cihazda olabilir",
+    e2eUnsyncedDeviceTitle: "Yeni cihaz algılandı!",
     e2eUnsyncedDeviceBody:
-      "Bu hesapta zaten kayıtlı bir güvenli anahtar var ancak PIN yedeği yok. Mevcut mesajlarınızı burada okumak için daha önce oturum açtığınız bir cihazda Kite’ı açın, Profile gidin ve Cihazları eşitle ile 6 haneli PIN yedeği oluşturun.",
-    e2eUnsyncedDeviceHint:
-      "Yeni anahtarlar oluşturursanız, eski şifreli mesajlar artık okunamaz.",
-    e2eUnsyncedGenerateNewKeys: "Yine de yeni anahtarlar oluştur",
+      "Bu cihazda önceki mesajlarınızı göremezsiniz. Sohbet geçmişinize buradan erişmek için lütfen ilk cihazınıza dönün, Profil’i açın ve bir Eşitleme PIN’i oluşturun.",
+    e2eUnsyncedDeviceHint: "",
+    e2eUnsyncedGenerateNewKeys: "Anladım",
     e2eProfileBackupActiveLabel: "PIN yedeği etkin",
     e2eProfileOverwriteBackupTitle: "Mevcut yedek değiştirilsin mi?",
     e2eProfileOverwriteBackupBody:
