@@ -381,6 +381,8 @@ export default function Home() {
   const [e2eRestoreModalOpen, setE2eRestoreModalOpen] = useState(false);
   const [e2eRestoreBusy, setE2eRestoreBusy] = useState(false);
   const [e2eRestoreError, setE2eRestoreError] = useState<string | null>(null);
+  const [e2eForgotPinBusy, setE2eForgotPinBusy] = useState(false);
+  const [e2eForgotPinError, setE2eForgotPinError] = useState<string | null>(null);
   /** True until local read + optional server backup check + create/restore decision finishes. */
   const [e2eKeyBootstrapLoading, setE2eKeyBootstrapLoading] = useState(true);
   /**
@@ -461,6 +463,7 @@ export default function Home() {
           setE2eRestorePayload(null);
           setE2eRestoreModalOpen(false);
           setE2eRestoreError(null);
+          setE2eForgotPinError(null);
         } catch {
           setE2eRestoreError(t(language, "e2eRestoreErrorWrongPin"));
         } finally {
@@ -470,6 +473,39 @@ export default function Home() {
     },
     [session?.user?.id, language]
   );
+
+  const handleE2eForgotPinConfirm = useCallback(() => {
+    const userId = session?.user?.id;
+    if (!userId) return;
+    setE2eForgotPinBusy(true);
+    setE2eForgotPinError(null);
+    void (async () => {
+      try {
+        await generateAndPersistNewE2eKeys();
+        const { error } = await supabase
+          .from("profiles")
+          .update({
+            encrypted_private_key_backup: null,
+            key_backup_salt: null,
+          })
+          .eq("id", userId);
+        if (error) {
+          console.error("Failed to clear E2EE PIN backup", error);
+          setE2eForgotPinError(t(language, "e2eForgotPinError"));
+          return;
+        }
+        setE2eRestorePayload(null);
+        setE2eRestoreModalOpen(false);
+        setE2eRestoreError(null);
+        setE2eForgotPinError(null);
+      } catch (err) {
+        console.error("Forgot PIN reset failed", err);
+        setE2eForgotPinError(t(language, "e2eForgotPinError"));
+      } finally {
+        setE2eForgotPinBusy(false);
+      }
+    })();
+  }, [session?.user?.id, generateAndPersistNewE2eKeys, language]);
 
   const dmThreadRef = useRef(dmThread);
   const activeRecipientIdRef = useRef(activeRecipientId);
@@ -3078,12 +3114,18 @@ export default function Home() {
         open={e2eRestoreModalOpen && Boolean(e2eRestorePayload)}
         onOpenChange={(open) => {
           setE2eRestoreModalOpen(open);
-          if (!open) setE2eRestoreError(null);
+          if (!open) {
+            setE2eRestoreError(null);
+            setE2eForgotPinError(null);
+          }
         }}
         language={language}
         busy={e2eRestoreBusy}
         errorMessage={e2eRestoreError}
         onSubmit={handleE2eRestoreSubmit}
+        onForgotPinConfirm={handleE2eForgotPinConfirm}
+        forgotPinBusy={e2eForgotPinBusy}
+        forgotPinError={e2eForgotPinError}
         theme={{
           panelBg: bodyTheme["--panel-bg"],
           border: bodyTheme["--border"],
