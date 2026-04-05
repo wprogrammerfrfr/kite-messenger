@@ -271,6 +271,23 @@ type TranslationKey =
   | "e2eRestoreCancel"
   | "e2eRestoreBusy"
   | "e2eRestoreErrorWrongPin"
+  | "e2eUnsyncedDeviceTitle"
+  | "e2eUnsyncedDeviceBody"
+  | "e2eUnsyncedDeviceHint"
+  | "e2eUnsyncedGenerateNewKeys"
+  | "e2eProfileBackupActiveLabel"
+  | "e2eProfileOverwriteBackupTitle"
+  | "e2eProfileOverwriteBackupBody"
+  | "e2eProfileOverwriteConfirm"
+  | "e2eProfileOverwriteCancel"
+  | "e2eProfileBackupStatusError"
+  | "e2eForgotPinButton"
+  | "e2eForgotPinWarningTitle"
+  | "e2eForgotPinWarningBody"
+  | "e2eForgotPinConfirm"
+  | "e2eForgotPinCancel"
+  | "e2eForgotPinBusy"
+  | "e2eForgotPinError"
   | "discoverSearchBarPlaceholder"
   | "chatHeaderRecipientLastSeen"
   | "chatEmptySelectConversation"
@@ -612,6 +629,29 @@ const translationsEn: TranslationRecord = {
     e2eRestoreBusy: "Unlocking…",
     e2eRestoreErrorWrongPin:
       "Could not unlock backup. Check your PIN and try again.",
+    e2eUnsyncedDeviceTitle: "Your chat key may still be on another device",
+    e2eUnsyncedDeviceBody:
+      "This account already has a secure key registered, but there is no PIN backup. To read your existing messages here, open Kite on a device where you are already signed in, go to Profile, and use Sync devices to create a 6-digit PIN backup.",
+    e2eUnsyncedDeviceHint:
+      "If you generate new keys, older encrypted messages will no longer be readable.",
+    e2eUnsyncedGenerateNewKeys: "Generate new keys anyway",
+    e2eProfileBackupActiveLabel: "PIN backup active",
+    e2eProfileOverwriteBackupTitle: "Replace existing backup?",
+    e2eProfileOverwriteBackupBody:
+      "You already have an encrypted key backup on this account. Saving a new backup will replace it. You will need the new PIN to unlock your key on other devices.",
+    e2eProfileOverwriteConfirm: "Replace backup",
+    e2eProfileOverwriteCancel: "Keep current backup",
+    e2eProfileBackupStatusError:
+      "Could not load backup status. Try again.",
+    e2eForgotPinButton: "Forgot PIN?",
+    e2eForgotPinWarningTitle: "Reset your secure key?",
+    e2eForgotPinWarningBody:
+      "This removes your encrypted PIN backup from your account and creates new keys on this device. Messages encrypted with your old key will be lost permanently. This cannot be undone.",
+    e2eForgotPinConfirm: "Delete backup and reset",
+    e2eForgotPinCancel: "Go back",
+    e2eForgotPinBusy: "Resetting…",
+    e2eForgotPinError:
+      "Could not remove the backup from the server. Your new keys are on this device—try again.",
     discoverSearchBarPlaceholder: "Find a user by nickname",
     chatHeaderRecipientLastSeen: "Last seen {{time}}",
     chatEmptySelectConversation: "Select a conversation to start",
@@ -957,6 +997,29 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "در حال باز کردن قفل…",
     e2eRestoreErrorWrongPin:
       "پشتیبان باز نشد. پین را بررسی و دوباره تلاش کنید.",
+    e2eUnsyncedDeviceTitle: "کلید گفتگو ممکن است روی دستگاه دیگری باشد",
+    e2eUnsyncedDeviceBody:
+      "این حساب از قبل کلید امن ثبت‌شده دارد، اما پشتیبان پین ندارد. برای خواندن پیام‌های فعلی اینجا، Kite را روی دستگاهی باز کنید که قبلاً وارد شده‌اید، به پروفایل بروید و با «همگام‌سازی دستگاه‌ها» پشتیبان پین ۶ رقمی بسازید.",
+    e2eUnsyncedDeviceHint:
+      "اگر کلیدهای جدید بسازید، پیام‌های رمزشدهٔ قدیمی دیگر خوانا نخواهند بود.",
+    e2eUnsyncedGenerateNewKeys: "باز هم کلیدهای جدید بسازم",
+    e2eProfileBackupActiveLabel: "پشتیبان پین فعال است",
+    e2eProfileOverwriteBackupTitle: "پشتیبان فعلی جایگزین شود؟",
+    e2eProfileOverwriteBackupBody:
+      "از قبل پشتیبان رمزشدهٔ کلید روی این حساب دارید. ذخیرهٔ پشتیبان جدید آن را جایگزین می‌کند. برای باز کردن کلید روی دستگاه‌های دیگر به پین جدید نیاز خواهید داشت.",
+    e2eProfileOverwriteConfirm: "جایگزین کردن پشتیبان",
+    e2eProfileOverwriteCancel: "نگه داشتن پشتیبان فعلی",
+    e2eProfileBackupStatusError:
+      "وضعیت پشتیبان بارگذاری نشد. دوباره تلاش کنید.",
+    e2eForgotPinButton: "پین را فراموش کرده‌اید؟",
+    e2eForgotPinWarningTitle: "کلید امن بازنشانی شود؟",
+    e2eForgotPinWarningBody:
+      "پشتیبان رمزشدهٔ پین از حساب شما حذف و کلیدهای جدید روی این دستگاه ساخته می‌شود. پیام‌های رمزشده با کلید قبلی برای همیشه از دست می‌روند. این کار برگشت‌ناپذیر است.",
+    e2eForgotPinConfirm: "حذف پشتیبان و بازنشانی",
+    e2eForgotPinCancel: "بازگشت",
+    e2eForgotPinBusy: "در حال بازنشانی…",
+    e2eForgotPinError:
+      "پشتیبان از سرور حذف نشد. کلیدهای جدید روی این دستگاه است—دوباره تلاش کنید.",
     discoverSearchBarPlaceholder: "پیدا کردن کاربر با نام مستعار",
     chatHeaderRecipientLastSeen: "آخرین بازدید {{time}}",
     chatEmptySelectConversation: "یک گفتگو را برای شروع انتخاب کنید",
@@ -1299,6 +1362,29 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "جارٍ الفتح…",
     e2eRestoreErrorWrongPin:
       "تعذر فتح النسخة الاحتياطية. تحقق من الرمز وحاول مرة أخرى.",
+    e2eUnsyncedDeviceTitle: "قد يكون مفتاح الدردشة على جهاز آخر",
+    e2eUnsyncedDeviceBody:
+      "هذا الحساب لديه مفتاح آمن مسجّل مسبقًا، لكن لا توجد نسخة احتياطية برمز. لقراءة رسائلك الحالية هنا، افتح Kite على جهازٍ سجّلت الدخول فيه، واذهب إلى الملف الشخصي واستخدم «مزامنة الأجهزة» لإنشاء نسخة احتياطية برمز من 6 أرقام.",
+    e2eUnsyncedDeviceHint:
+      "إذا أنشأت مفاتيحًا جديدة، فلن تُقرأ الرسائل المشفّرة القديمة بعد ذلك.",
+    e2eUnsyncedGenerateNewKeys: "إنشاء مفاتيح جديدة على أي حال",
+    e2eProfileBackupActiveLabel: "نسخة احتياطية بالرمز نشطة",
+    e2eProfileOverwriteBackupTitle: "استبدال النسخة الاحتياطية الحالية؟",
+    e2eProfileOverwriteBackupBody:
+      "لديك بالفعل نسخة احتياطية مشفّرة للمفتاح على هذا الحساب. حفظ نسخة جديدة يستبدلها. ستحتاج إلى الرمز الجديد لفتح المفتاح على أجهزة أخرى.",
+    e2eProfileOverwriteConfirm: "استبدال النسخة الاحتياطية",
+    e2eProfileOverwriteCancel: "الإبقاء على النسخة الحالية",
+    e2eProfileBackupStatusError:
+      "تعذر تحميل حالة النسخة الاحتياطية. حاول مرة أخرى.",
+    e2eForgotPinButton: "نسيت الرمز؟",
+    e2eForgotPinWarningTitle: "إعادة تعيين مفتاحك الآمن؟",
+    e2eForgotPinWarningBody:
+      "يزيل هذا النسخة الاحتياطية المشفّرة بالرمز من حسابك وينشئ مفاتيحًا جديدة على هذا الجهاز. ستفقد الرسائل المشفّرة بالمفتاح السابق نهائيًا. لا يمكن التراجع.",
+    e2eForgotPinConfirm: "حذف النسخة الاحتياطية وإعادة التعيين",
+    e2eForgotPinCancel: "رجوع",
+    e2eForgotPinBusy: "جارٍ إعادة التعيين…",
+    e2eForgotPinError:
+      "تعذر إزالة النسخة الاحتياطية من الخادم. المفاتيح الجديدة على هذا الجهاز—حاول مرة أخرى.",
     discoverSearchBarPlaceholder: "البحث عن مستخدم بالاسم المستعار",
     chatHeaderRecipientLastSeen: "آخر ظهور {{time}}",
     chatEmptySelectConversation: "اختر محادثة للبدء",
@@ -1475,6 +1561,29 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "잠금 해제 중…",
     e2eRestoreErrorWrongPin:
       "백업을 열 수 없습니다. PIN을 확인하고 다시 시도하세요.",
+    e2eUnsyncedDeviceTitle: "채팅 키가 다른 기기에 있을 수 있습니다",
+    e2eUnsyncedDeviceBody:
+      "이 계정에는 이미 보안 키가 등록되어 있지만 PIN 백업이 없습니다. 기존 메시지를 이 기기에서 읽으려면 이미 로그인한 기기에서 Kite를 열고 프로필로 이동한 뒤 기기 동기화로 6자리 PIN 백업을 만드세요.",
+    e2eUnsyncedDeviceHint:
+      "새 키를 만들면 이전에 암호화된 메시지는 더 이상 읽을 수 없습니다.",
+    e2eUnsyncedGenerateNewKeys: "그래도 새 키 만들기",
+    e2eProfileBackupActiveLabel: "PIN 백업 사용 중",
+    e2eProfileOverwriteBackupTitle: "기존 백업을 바꿀까요?",
+    e2eProfileOverwriteBackupBody:
+      "이미 계정에 암호화된 키 백업이 있습니다. 새 백업을 저장하면 기존 백업이 대체됩니다. 다른 기기에서 키를 잠금 해제하려면 새 PIN이 필요합니다.",
+    e2eProfileOverwriteConfirm: "백업 바꾸기",
+    e2eProfileOverwriteCancel: "현재 백업 유지",
+    e2eProfileBackupStatusError:
+      "백업 상태를 불러오지 못했습니다. 다시 시도하세요.",
+    e2eForgotPinButton: "PIN을 잊으셨나요?",
+    e2eForgotPinWarningTitle: "보안 키를 재설정할까요?",
+    e2eForgotPinWarningBody:
+      "계정에서 암호화된 PIN 백업이 제거되고 이 기기에 새 키가 만들어집니다. 이전 키로 암호화된 메시지는 영구적으로 복구할 수 없습니다. 되돌릴 수 없습니다.",
+    e2eForgotPinConfirm: "백업 삭제 후 재설정",
+    e2eForgotPinCancel: "돌아가기",
+    e2eForgotPinBusy: "재설정 중…",
+    e2eForgotPinError:
+      "서버에서 백업을 제거하지 못했습니다. 새 키는 이 기기에 있습니다—다시 시도하세요.",
     discoverSearchBarPlaceholder: "닉네임으로 사용자 찾기",
     chatHeaderRecipientLastSeen: "마지막 접속 {{time}}",
     chatEmptySelectConversation: "대화를 선택해 시작하세요",
@@ -1648,6 +1757,29 @@ export const translations: Record<Language, TranslationRecord> = {
     e2eRestoreBusy: "Kilit açılıyor…",
     e2eRestoreErrorWrongPin:
       "Yedek açılamadı. PIN’i kontrol edip tekrar deneyin.",
+    e2eUnsyncedDeviceTitle: "Sohbet anahtarınız başka bir cihazda olabilir",
+    e2eUnsyncedDeviceBody:
+      "Bu hesapta zaten kayıtlı bir güvenli anahtar var ancak PIN yedeği yok. Mevcut mesajlarınızı burada okumak için daha önce oturum açtığınız bir cihazda Kite’ı açın, Profile gidin ve Cihazları eşitle ile 6 haneli PIN yedeği oluşturun.",
+    e2eUnsyncedDeviceHint:
+      "Yeni anahtarlar oluşturursanız, eski şifreli mesajlar artık okunamaz.",
+    e2eUnsyncedGenerateNewKeys: "Yine de yeni anahtarlar oluştur",
+    e2eProfileBackupActiveLabel: "PIN yedeği etkin",
+    e2eProfileOverwriteBackupTitle: "Mevcut yedek değiştirilsin mi?",
+    e2eProfileOverwriteBackupBody:
+      "Bu hesapta zaten şifreli bir anahtar yedeğiniz var. Yeni yedek kaydetmek onun yerine geçer. Diğer cihazlarda anahtarınızı açmak için yeni PIN’e ihtiyaç duyarsınız.",
+    e2eProfileOverwriteConfirm: "Yedeği değiştir",
+    e2eProfileOverwriteCancel: "Mevcut yedeği koru",
+    e2eProfileBackupStatusError:
+      "Yedek durumu yüklenemedi. Tekrar deneyin.",
+    e2eForgotPinButton: "PIN’i mi unuttunuz?",
+    e2eForgotPinWarningTitle: "Güvenli anahtarınız sıfırlansın mı?",
+    e2eForgotPinWarningBody:
+      "Bu işlem hesabınızdan şifreli PIN yedeğini kaldırır ve bu cihazda yeni anahtarlar oluşturur. Eski anahtarla şifrelenmiş mesajlar kalıcı olarak kaybolur. Geri alınamaz.",
+    e2eForgotPinConfirm: "Yedeği sil ve sıfırla",
+    e2eForgotPinCancel: "Geri dön",
+    e2eForgotPinBusy: "Sıfırlanıyor…",
+    e2eForgotPinError:
+      "Yedek sunucudan kaldırılamadı. Yeni anahtarlar bu cihazda—tekrar deneyin.",
     discoverSearchBarPlaceholder: "Takma adla kullanıcı bul",
     chatHeaderRecipientLastSeen: "Son görülme {{time}}",
     chatEmptySelectConversation: "Başlamak için bir sohbet seçin",
