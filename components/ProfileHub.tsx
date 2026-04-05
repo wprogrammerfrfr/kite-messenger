@@ -111,6 +111,8 @@ export const ProfileHub = memo(function ProfileHub() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const [e2eConnectModalOpen, setE2eConnectModalOpen] = useState(false);
+  /** True when server has both PIN backup fields populated (same rule as chat restore). Phase 3 step 2 consumes for UI. */
+  const [pinBackupActive, setPinBackupActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const notesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -245,7 +247,9 @@ export const ProfileHub = memo(function ProfileHub() {
 
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("nickname, bio, emergency_contact, role, profile_picture_url, preferred_locale")
+          .select(
+            "nickname, bio, emergency_contact, role, profile_picture_url, preferred_locale, encrypted_private_key_backup, key_backup_salt"
+          )
           .eq("id", userId)
           .maybeSingle();
 
@@ -254,7 +258,22 @@ export const ProfileHub = memo(function ProfileHub() {
         if (profileError && profileError.code !== "PGRST116") {
           // PGRST116 = no rows found
           setError(profileError.message);
+          setPinBackupActive(false);
         } else if (profile) {
+          const row = profile as Profile & {
+            encrypted_private_key_backup?: unknown;
+            key_backup_salt?: unknown;
+          };
+          const encRaw =
+            typeof row.encrypted_private_key_backup === "string"
+              ? row.encrypted_private_key_backup.trim()
+              : "";
+          const saltRaw =
+            typeof row.key_backup_salt === "string"
+              ? row.key_backup_salt.trim()
+              : "";
+          setPinBackupActive(Boolean(encRaw && saltRaw));
+
           const typedProfile = profile as Profile;
           setNickname(typedProfile.nickname ?? "");
           setBio(typedProfile.bio ?? "");
@@ -284,6 +303,8 @@ export const ProfileHub = memo(function ProfileHub() {
                 ? typedProfile.role
                 : "musician",
           });
+        } else {
+          setPinBackupActive(false);
         }
 
         setLoading(false);
@@ -297,6 +318,7 @@ export const ProfileHub = memo(function ProfileHub() {
         typeof navigator !== "undefined" && !navigator.onLine;
       if (!offline) {
         setSession(null);
+        setPinBackupActive(false);
         setError(t(readStoredLanguage(), "profileMustLoginSettings"));
       }
       setLoading(false);
