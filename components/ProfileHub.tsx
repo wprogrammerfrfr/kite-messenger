@@ -111,8 +111,10 @@ export const ProfileHub = memo(function ProfileHub() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const [e2eConnectModalOpen, setE2eConnectModalOpen] = useState(false);
-  /** True when server has both PIN backup fields populated (same rule as chat restore). Phase 3 step 2 consumes for UI. */
+  /** True when server has both PIN backup fields populated (same rule as chat restore). */
   const [pinBackupActive, setPinBackupActive] = useState(false);
+  const [e2eOverwriteBackupPromptOpen, setE2eOverwriteBackupPromptOpen] =
+    useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const notesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -516,8 +518,17 @@ export const ProfileHub = memo(function ProfileHub() {
     if (error) {
       throw new Error(t(language, "e2ePinVaultErrorUploadFailed"));
     }
+    setPinBackupActive(true);
     setError(null);
     setSuccess(t(language, "e2ePinVaultSuccess"));
+  };
+
+  const requestOpenE2eConnectModal = () => {
+    if (pinBackupActive) {
+      setE2eOverwriteBackupPromptOpen(true);
+    } else {
+      setE2eConnectModalOpen(true);
+    }
   };
 
   return (
@@ -740,21 +751,81 @@ export const ProfileHub = memo(function ProfileHub() {
               <p className="mb-4 text-xs" style={{ color: theme.textSecondary }}>
                 Choose a strong password. You’ll stay signed in on this device after updating.
               </p>
-              <div className="mb-6">
-                <button
-                  type="button"
-                  onClick={() => setE2eConnectModalOpen(true)}
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition hover:opacity-95 active:scale-[0.99]"
-                  style={{
-                    borderColor: theme.border,
-                    background: theme.inputBg,
-                    color: theme.textPrimary,
-                  }}
-                  aria-label={t(language, "e2ePinVaultConnectAria")}
-                >
-                  <Smartphone className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
-                  {t(language, "e2eSyncDevicesButton")}
-                </button>
+              <div className="mb-6 space-y-3">
+                {pinBackupActive ? (
+                  <p
+                    className="flex items-center gap-2 text-xs font-medium"
+                    style={{ color: theme.textSecondary }}
+                  >
+                    <span
+                      className="inline-flex items-center rounded-full px-2.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wider"
+                      style={{
+                        background: "rgba(16, 185, 129, 0.18)",
+                        color: "rgb(5, 150, 105)",
+                      }}
+                    >
+                      {t(language, "e2eProfileBackupActiveLabel")}
+                    </span>
+                  </p>
+                ) : null}
+                {e2eOverwriteBackupPromptOpen ? (
+                  <div
+                    className="rounded-xl border p-4 space-y-3"
+                    style={{ borderColor: theme.border, background: theme.inputBg }}
+                    role="region"
+                    aria-labelledby="e2e-overwrite-backup-title"
+                  >
+                    <p
+                      id="e2e-overwrite-backup-title"
+                      className="text-sm font-semibold"
+                      style={{ color: theme.textPrimary }}
+                    >
+                      {t(language, "e2eProfileOverwriteBackupTitle")}
+                    </p>
+                    <p className="text-xs leading-relaxed" style={{ color: theme.textSecondary }}>
+                      {t(language, "e2eProfileOverwriteBackupBody")}
+                    </p>
+                    <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setE2eOverwriteBackupPromptOpen(false)}
+                        className="w-full rounded-xl px-4 py-2.5 text-sm font-semibold border sm:w-auto"
+                        style={{
+                          borderColor: theme.border,
+                          color: theme.textSecondary,
+                        }}
+                      >
+                        {t(language, "e2eProfileOverwriteCancel")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setE2eOverwriteBackupPromptOpen(false);
+                          setE2eConnectModalOpen(true);
+                        }}
+                        className="w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-white sm:w-auto"
+                        style={{ background: theme.accent }}
+                      >
+                        {t(language, "e2eProfileOverwriteConfirm")}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={requestOpenE2eConnectModal}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-semibold transition hover:opacity-95 active:scale-[0.99]"
+                    style={{
+                      borderColor: theme.border,
+                      background: theme.inputBg,
+                      color: theme.textPrimary,
+                    }}
+                    aria-label={t(language, "e2ePinVaultConnectAria")}
+                  >
+                    <Smartphone className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
+                    {t(language, "e2eSyncDevicesButton")}
+                  </button>
+                )}
               </div>
               <div className="space-y-4">
                 <div className="space-y-1.5">
@@ -1142,7 +1213,10 @@ export const ProfileHub = memo(function ProfileHub() {
       ) : null}
       <E2eConnectPhoneModal
         open={e2eConnectModalOpen && Boolean(session)}
-        onOpenChange={setE2eConnectModalOpen}
+        onOpenChange={(open) => {
+          setE2eConnectModalOpen(open);
+          if (!open) setE2eOverwriteBackupPromptOpen(false);
+        }}
         language={language}
         theme={{
           panelBg: theme.panelBg,
