@@ -382,10 +382,41 @@ export default function Home() {
   const [e2eRestoreError, setE2eRestoreError] = useState<string | null>(null);
   /** True until local read + optional server backup check + create/restore decision finishes. */
   const [e2eKeyBootstrapLoading, setE2eKeyBootstrapLoading] = useState(true);
+  /**
+   * Server has a registered `public_key` but no complete PIN backup (no ciphertext + salt).
+   * Blocks silent keygen until the user confirms (banner wired in a follow-up step).
+   */
+  const [e2eUnsyncedServerKeyNoBackup, setE2eUnsyncedServerKeyNoBackup] =
+    useState(false);
 
   useEffect(() => {
     e2eRestorePayloadRef.current = e2eRestorePayload;
   }, [e2eRestorePayload]);
+
+  /** Shared by bootstrap and the “generate new keys anyway” escape hatch (Phase 1 step 2). */
+  const generateAndPersistNewE2eKeys = useCallback(
+    async (isCancelled?: () => boolean) => {
+      const keys = await generateKeyPair();
+      if (isCancelled?.()) return;
+      setSenderKeys(keys);
+      try {
+        const [publicKeyBase64, privateKeyBase64] = await Promise.all([
+          exportPublicKeyToBase64(keys.publicKey),
+          exportPrivateKeyToBase64(keys.privateKey),
+        ]);
+        localStorage.setItem(
+          E2E_KEY_STORAGE_KEY,
+          JSON.stringify({ publicKeyBase64, privateKeyBase64 })
+        );
+      } catch (error) {
+        console.error("Failed to persist E2E keypair", error);
+      }
+      if (isCancelled?.()) return;
+      setE2eUnsyncedServerKeyNoBackup(false);
+      setE2eKeyBootstrapLoading(false);
+    },
+    []
+  );
 
   const handleE2eRestoreSubmit = useCallback(
     (pin: string) => {
@@ -409,6 +440,7 @@ export default function Home() {
           };
           localStorage.setItem(E2E_KEY_STORAGE_KEY, JSON.stringify(stored));
           setSenderKeys({ publicKey, privateKey });
+          setE2eUnsyncedServerKeyNoBackup(false);
           setE2eRestorePayload(null);
           setE2eRestoreModalOpen(false);
           setE2eRestoreError(null);
@@ -1051,6 +1083,7 @@ export default function Home() {
         setE2eRestorePayload(null);
         setE2eRestoreModalOpen(false);
         setE2eRestoreError(null);
+        setE2eUnsyncedServerKeyNoBackup(false);
         setE2eKeyBootstrapLoading(false);
         return;
       }
@@ -1059,6 +1092,7 @@ export default function Home() {
       setE2eRestorePayload(null);
       setE2eRestoreModalOpen(false);
       setE2eRestoreError(null);
+      setE2eUnsyncedServerKeyNoBackup(false);
 
       try {
         const stored =
@@ -1069,13 +1103,14 @@ export default function Home() {
             publicKeyBase64?: string;
             privateKeyBase64?: string;
           };
-          if (parsed.publicKeyBase64 && parsed.privateKeyBase64) {
+            if (parsed.publicKeyBase64 && parsed.privateKeyBase64) {
             const [publicKey, privateKey] = await Promise.all([
               importPublicKeyFromBase64(parsed.publicKeyBase64),
               importPrivateKeyFromBase64(parsed.privateKeyBase64),
             ]);
             if (cancelled) return;
             setSenderKeys({ publicKey, privateKey });
+            setE2eUnsyncedServerKeyNoBackup(false);
             localStorage.setItem(
               E2E_KEY_STORAGE_KEY,
               JSON.stringify({
@@ -1119,6 +1154,7 @@ export default function Home() {
         data && typeof data.public_key === "string" ? data.public_key.trim() : "";
 
       if (encRaw && saltRaw && pubRaw) {
+        setE2eUnsyncedServerKeyNoBackup(false);
         setE2eRestorePayload({
           encryptedPrivateKeyBackupBase64: encRaw,
           saltBase64: saltRaw,
@@ -1129,25 +1165,13 @@ export default function Home() {
         return;
       }
 
-      const keys = await generateKeyPair();
-      if (cancelled) return;
-
-      setSenderKeys(keys);
-
-      try {
-        const [publicKeyBase64, privateKeyBase64] = await Promise.all([
-          exportPublicKeyToBase64(keys.publicKey),
-          exportPrivateKeyToBase64(keys.privateKey),
-        ]);
-
-        localStorage.setItem(
-          E2E_KEY_STORAGE_KEY,
-          JSON.stringify({ publicKeyBase64, privateKeyBase64 })
-        );
-      } catch (error) {
-        console.error("Failed to persist E2E keypair", error);
+      if (pubRaw && !(encRaw && saltRaw)) {
+        setE2eUnsyncedServerKeyNoBackup(true);
+        setE2eKeyBootstrapLoading(false);
+        return;
       }
-      if (!cancelled) setE2eKeyBootstrapLoading(false);
+
+      await generateAndPersistNewE2eKeys(() => cancelled);
     };
 
     void loadOrCreateKeys();
@@ -1155,7 +1179,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [session?.user?.id]);
+  }, [session?.user?.id, generateAndPersistNewE2eKeys]);
 
   // Once we have a logged-in user and a local key pair, ensure their public key
   // is uploaded to the `profiles` table so others can establish a secure channel.
