@@ -385,6 +385,8 @@ export default function Home() {
   const [e2eForgotPinError, setE2eForgotPinError] = useState<string | null>(null);
   /** True until local read + optional server backup check + create/restore decision finishes. */
   const [e2eKeyBootstrapLoading, setE2eKeyBootstrapLoading] = useState(true);
+  /** Profile fetch failed (non–no-row) during E2EE bootstrap; do not fall through to keygen. */
+  const [e2eNetworkError, setE2eNetworkError] = useState(false);
   /**
    * Server has a registered `public_key` but no complete PIN backup (no ciphertext + salt).
    * Blocks silent keygen until the user confirms via the chat banner.
@@ -402,20 +404,22 @@ export default function Home() {
     async (isCancelled?: () => boolean) => {
       const keys = await generateKeyPair();
       if (isCancelled?.()) return;
-      setSenderKeys(keys);
+      const [publicKeyBase64, privateKeyBase64] = await Promise.all([
+        exportPublicKeyToBase64(keys.publicKey),
+        exportPrivateKeyToBase64(keys.privateKey),
+      ]);
+      if (isCancelled?.()) return;
       try {
-        const [publicKeyBase64, privateKeyBase64] = await Promise.all([
-          exportPublicKeyToBase64(keys.publicKey),
-          exportPrivateKeyToBase64(keys.privateKey),
-        ]);
         localStorage.setItem(
           E2E_KEY_STORAGE_KEY,
           JSON.stringify({ publicKeyBase64, privateKeyBase64 })
         );
       } catch (error) {
         console.error("Failed to persist E2E keypair", error);
+        throw error;
       }
       if (isCancelled?.()) return;
+      setSenderKeys(keys);
       setE2eUnsyncedServerKeyNoBackup(false);
       setE2eKeyBootstrapLoading(false);
     },
@@ -457,7 +461,15 @@ export default function Home() {
             publicKeyBase64: payload.publicKeyBase64,
             privateKeyBase64,
           };
-          localStorage.setItem(E2E_KEY_STORAGE_KEY, JSON.stringify(stored));
+          try {
+            localStorage.setItem(E2E_KEY_STORAGE_KEY, JSON.stringify(stored));
+          } catch (storageErr) {
+            console.error("Failed to persist restored E2E keypair", storageErr);
+            setE2eRestoreError(
+              "Could not save your keys on this device (storage full or blocked). Free space or adjust browser settings, then try again."
+            );
+            return;
+          }
           setSenderKeys({ publicKey, privateKey });
           setE2eUnsyncedServerKeyNoBackup(false);
           setE2eRestorePayload(null);
@@ -1137,12 +1149,14 @@ export default function Home() {
         setE2eRestoreModalOpen(false);
         setE2eRestoreError(null);
         setE2eUnsyncedServerKeyNoBackup(false);
+        setE2eNetworkError(false);
         e2eUnsyncedGenerateBusyRef.current = false;
         setE2eUnsyncedGenerateBusy(false);
         setE2eKeyBootstrapLoading(false);
         return;
       }
 
+      setE2eNetworkError(false);
       setE2eKeyBootstrapLoading(true);
       setE2eRestorePayload(null);
       setE2eRestoreModalOpen(false);
@@ -1164,17 +1178,25 @@ export default function Home() {
               importPrivateKeyFromBase64(parsed.privateKeyBase64),
             ]);
             if (cancelled) return;
-            setSenderKeys({ publicKey, privateKey });
-            setE2eUnsyncedServerKeyNoBackup(false);
-            localStorage.setItem(
-              E2E_KEY_STORAGE_KEY,
-              JSON.stringify({
-                publicKeyBase64: parsed.publicKeyBase64,
-                privateKeyBase64: parsed.privateKeyBase64,
-              })
-            );
-            if (!cancelled) setE2eKeyBootstrapLoading(false);
-            return;
+            let normalizedPersisted = false;
+            try {
+              localStorage.setItem(
+                E2E_KEY_STORAGE_KEY,
+                JSON.stringify({
+                  publicKeyBase64: parsed.publicKeyBase64,
+                  privateKeyBase64: parsed.privateKeyBase64,
+                })
+              );
+              normalizedPersisted = true;
+            } catch (normErr) {
+              console.error("Failed to normalize E2E keypair in storage", normErr);
+            }
+            if (normalizedPersisted) {
+              setSenderKeys({ publicKey, privateKey });
+              setE2eUnsyncedServerKeyNoBackup(false);
+              if (!cancelled) setE2eKeyBootstrapLoading(false);
+              return;
+            }
           }
         }
       } catch (error) {
@@ -1195,6 +1217,9 @@ export default function Home() {
         (error as any).code !== "PGRST116"
       ) {
         console.error("Failed to load profile for E2EE restore", error);
+        setE2eNetworkError(true);
+        setE2eKeyBootstrapLoading(false);
+        return;
       }
 
       const encRaw =
@@ -1226,7 +1251,11 @@ export default function Home() {
         return;
       }
 
-      await generateAndPersistNewE2eKeys(() => cancelled);
+      try {
+        await generateAndPersistNewE2eKeys(() => cancelled);
+      } catch {
+        if (!cancelled) setE2eKeyBootstrapLoading(false);
+      }
     };
 
     void loadOrCreateKeys();
@@ -2495,6 +2524,30 @@ export default function Home() {
             role="status"
           >
             {t(language, "syncingSecurity")}
+          </div>
+        ) : null}
+        {e2eNetworkError ? (
+          <div
+            className="shrink-0 border-b px-3 py-3 sm:px-4"
+            style={{
+              borderColor: "var(--border)",
+              background: "var(--panel-bg)",
+            }}
+            role="alert"
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle
+                className="mt-0.5 h-4 w-4 shrink-0 text-amber-500"
+                aria-hidden
+              />
+              <p
+                className="min-w-0 flex-1 text-xs font-semibold sm:text-sm"
+                style={{ color: "var(--text-primary)" }}
+              >
+                Network error verifying security. Please check your connection and refresh the
+                page.
+              </p>
+            </div>
           </div>
         ) : null}
         {e2eUnsyncedServerKeyNoBackup &&
