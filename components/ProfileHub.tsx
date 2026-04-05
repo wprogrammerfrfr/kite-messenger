@@ -104,7 +104,6 @@ export const ProfileHub = memo(function ProfileHub() {
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
   const [notificationsMuted, setNotificationsMuted] = useState(false);
   const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
-  const [personalNotes, setPersonalNotes] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordSaving, setPasswordSaving] = useState(false);
@@ -116,7 +115,6 @@ export const ProfileHub = memo(function ProfileHub() {
   const [e2eOverwriteBackupPromptOpen, setE2eOverwriteBackupPromptOpen] =
     useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const notesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const theme =
     appearance === "light"
@@ -164,37 +162,6 @@ export const ProfileHub = memo(function ProfileHub() {
     return () => {
       window.removeEventListener("storage", sync);
       window.removeEventListener(NEXUS_LANG_CHANGE_EVENT, sync);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !session?.user?.id) return;
-    try {
-      const key = `kite-personal-notes-${session.user.id}`;
-      setPersonalNotes(localStorage.getItem(key) ?? "");
-    } catch {
-      setPersonalNotes("");
-    }
-  }, [session?.user?.id]);
-
-  const persistPersonalNotes = (text: string) => {
-    if (typeof window === "undefined" || !session?.user?.id) return;
-    try {
-      localStorage.setItem(`kite-personal-notes-${session.user.id}`, text);
-    } catch {
-      // ignore quota
-    }
-  };
-
-  const onPersonalNotesChange = (text: string) => {
-    setPersonalNotes(text);
-    if (notesSaveTimerRef.current) clearTimeout(notesSaveTimerRef.current);
-    notesSaveTimerRef.current = setTimeout(() => persistPersonalNotes(text), 400);
-  };
-
-  useEffect(() => {
-    return () => {
-      if (notesSaveTimerRef.current) clearTimeout(notesSaveTimerRef.current);
     };
   }, []);
 
@@ -696,39 +663,6 @@ export const ProfileHub = memo(function ProfileHub() {
                 }}
               />
             </div>
-
-            <section
-              className="rounded-2xl border p-4 sm:p-5"
-              style={{ borderColor: theme.border }}
-              aria-labelledby="personal-notes-heading"
-            >
-              <div className="mb-3">
-                <h2
-                  id="personal-notes-heading"
-                  className="text-sm font-semibold uppercase tracking-[0.16em]"
-                  style={{ color: theme.textPrimary }}
-                >
-                  {t(language, "profilePersonalNotesTitle")}
-                </h2>
-                <p className="mt-1 text-xs" style={{ color: theme.textSecondary }}>
-                  {t(language, "profilePersonalNotesHint")}
-                </p>
-              </div>
-              <textarea
-                value={personalNotes}
-                onChange={(e) => onPersonalNotesChange(e.target.value)}
-                onBlur={() => persistPersonalNotes(personalNotes)}
-                placeholder={t(language, "profilePersonalNotesPlaceholder")}
-                rows={5}
-                className="w-full rounded-xl px-3 py-2.5 text-sm outline-none border resize-y font-mono leading-relaxed"
-                style={{
-                  background: "rgba(12, 12, 18, 0.95)",
-                  borderColor: "rgba(255, 69, 0, 0.28)",
-                  color: "rgba(245, 245, 244, 0.95)",
-                  minHeight: "7.5rem",
-                }}
-              />
-            </section>
 
             <section
               className="rounded-2xl border p-4 sm:p-5"
