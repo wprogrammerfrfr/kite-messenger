@@ -173,7 +173,12 @@ const LIGHT_THERAPIST_THEME: ThemeVars = {
 const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
 const KEY_MISMATCH_TEXT = "[Secure Message - Key Mismatch]";
 const CHAT_FILE_MAX_BYTES = 5 * 1024 * 1024;
-/** Initial fetch: newest rows only, then reverse for chronological decrypt/display. */
+/**
+ * Initial fetch: newest rows only, then reverse for chronological decrypt/display.
+ * `decryptInitialRows` decrypts this many rows in parallel via `Promise.all`; the
+ * count is small enough that memory/CPU is fine. If this limit grows much larger,
+ * consider bounded concurrency (chunked awaits) to avoid flooding the main thread.
+ */
 const CHAT_INITIAL_MESSAGE_LIMIT = 50;
 
 type MessagesFetchRow = {
@@ -632,9 +637,9 @@ export default function Home() {
       const privateKey = senderKeys?.privateKey ?? null;
       if (!privateKey) return [];
 
-      const decrypted: MessagesDecryptedItem[] = [];
-      for (const row of chronological) {
-        if (!row.encrypted_content) continue;
+      const tasks = chronological.map(async (row): Promise<MessagesDecryptedItem | null> => {
+        if (!row.encrypted_content) return null;
+
         const id =
           row.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -647,7 +652,7 @@ export default function Home() {
           const decryptedText = await decryptWithRetry(encryptedForViewer, privateKey);
           const p = parseDecryptedPayload(decryptedText);
 
-          decrypted.push({
+          return {
             id,
             text: p.text,
             isSessionMode: Boolean(row.is_session_mode),
@@ -661,9 +666,9 @@ export default function Home() {
             senderId: row.sender_id ?? null,
             receiverId: row.receiver_id ?? null,
             isRead: row.is_read ?? null,
-          });
+          };
         } catch {
-          decrypted.push({
+          return {
             id,
             text: KEY_MISMATCH_TEXT,
             isSessionMode: Boolean(row.is_session_mode),
@@ -671,10 +676,12 @@ export default function Home() {
             senderId: row.sender_id ?? null,
             receiverId: row.receiver_id ?? null,
             isRead: row.is_read ?? null,
-          });
+          };
         }
-      }
-      return decrypted;
+      });
+
+      const results = await Promise.all(tasks);
+      return results.filter((r): r is MessagesDecryptedItem => r !== null);
     },
     [decryptWithRetry, senderKeys]
   );
