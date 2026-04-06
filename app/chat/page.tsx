@@ -58,7 +58,14 @@ import {
   fetchDmConnectionForPair,
 } from "@/lib/dm-connections";
 import { MotionConfig, motion } from "framer-motion";
-import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -301,6 +308,7 @@ export default function Home() {
       isRead?: boolean | null;
     }>
   >([]);
+  const messagesRef = useRef<MessagesDecryptedItem[]>([]);
   // Sender key pair (current user); recipient key pair used only for recipient's public key for encryption
   const [senderKeys, setSenderKeys] = useState<KeyPair | null>(null);
   const [recipientPublicKey, setRecipientPublicKey] = useState<CryptoKey | null>(null);
@@ -527,6 +535,10 @@ export default function Home() {
   useEffect(() => {
     activeRecipientIdRef.current = activeRecipientId;
   }, [activeRecipientId]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     languageRef.current = language;
@@ -1642,7 +1654,7 @@ export default function Home() {
     const otherId = activeRecipientId;
     const warmupKey = `${myId}:${otherId}`;
 
-    const hasForPair = messages.some(
+    const hasForPair = messagesRef.current.some(
       (m) =>
         (m.senderId === myId && m.receiverId === otherId) ||
         (m.senderId === otherId && m.receiverId === myId)
@@ -1687,12 +1699,13 @@ export default function Home() {
 
     return () => {
       cancelled = true;
+      // Cancelled warmups should be retryable when user returns to this thread.
+      pairWarmupAttemptedRef.current.delete(warmupKey);
     };
   }, [
     activeRecipientId,
     session?.user?.id,
     senderKeys?.privateKey,
-    messages,
     messagesDecryptLoading,
   ]);
 
@@ -1843,6 +1856,76 @@ export default function Home() {
       ? filteredMessages[filteredMessages.length - 1]?.id
       : undefined;
 
+  /** Stable fingerprint of unread inbound for the active thread (mark-read effect deps on this, not `messages`). */
+  const unreadInboundSignatureRef = useRef("");
+  const unreadInboundSignature = useMemo(() => {
+    if (!session?.user?.id || !activeRecipientId) return "";
+    const myId = session.user.id;
+    const ids: string[] = [];
+    for (const m of messages) {
+      if (
+        m.receiverId === myId &&
+        m.senderId === activeRecipientId &&
+        m.isRead !== true
+      ) {
+        ids.push(String(m.id));
+      }
+    }
+    ids.sort();
+    return ids.join(",");
+  }, [messages, activeRecipientId, session?.user?.id]);
+  unreadInboundSignatureRef.current = unreadInboundSignature;
+
+  const flushMarkActiveThreadAsRead = useCallback(() => {
+    if (isLowBandwidthMode) return;
+    const myId = session?.user?.id;
+    if (!myId || !activeRecipientId) return;
+    if (document.visibilityState !== "visible") return;
+    if (typeof document.hasFocus === "function" && !document.hasFocus()) return;
+    const pendingRecipientBlock =
+      activeRecipientId !== myId &&
+      dmThread.status === "pending" &&
+      dmThread.initiatedBy != null &&
+      dmThread.initiatedBy !== myId;
+    if (pendingRecipientBlock) return;
+    if (!unreadInboundSignatureRef.current) return;
+
+    void (async () => {
+      try {
+        await supabase
+          .from("messages")
+          .update({ is_read: true })
+          .eq("receiver_id", myId)
+          .eq("sender_id", activeRecipientId)
+          .eq("is_read", false);
+
+        setMessages((prev) => {
+          let changed = false;
+          const next = prev.map((m) => {
+            if (
+              m.receiverId === myId &&
+              m.senderId === activeRecipientId &&
+              m.isRead !== true
+            ) {
+              changed = true;
+              return { ...m, isRead: true };
+            }
+            return m;
+          });
+          return changed ? next : prev;
+        });
+      } catch {
+        // Don't block UI if the column doesn't exist yet.
+      }
+    })();
+  }, [
+    isLowBandwidthMode,
+    session?.user?.id,
+    activeRecipientId,
+    dmThread.status,
+    dmThread.initiatedBy,
+  ]);
+
   useEffect(() => {
     if (!activeRecipientId || filteredMessages.length === 0) return;
     messagesListEndRef.current?.scrollIntoView({
@@ -1858,47 +1941,25 @@ export default function Home() {
 
   // Mark messages as read when they come from the currently active recipient (after you accepted).
   useEffect(() => {
+    if (!unreadInboundSignature) return;
+    flushMarkActiveThreadAsRead();
+  }, [unreadInboundSignature, flushMarkActiveThreadAsRead]);
+
+  useEffect(() => {
     if (isLowBandwidthMode) return;
-    if (!session || !activeRecipientId) return;
-    if (document.visibilityState !== "visible") return;
-    if (typeof document.hasFocus === "function" && !document.hasFocus()) return;
-    const myId = session.user.id;
-    const pendingRecipientBlock =
-      activeRecipientId !== myId &&
-      dmThread.status === "pending" &&
-      dmThread.initiatedBy != null &&
-      dmThread.initiatedBy !== myId;
-    if (pendingRecipientBlock) return;
-
-    (async () => {
-      try {
-        await supabase
-          .from("messages")
-          .update({ is_read: true })
-          .eq("receiver_id", myId)
-          .eq("sender_id", activeRecipientId)
-          .eq("is_read", false);
-
-        setMessages((prev) =>
-          prev.map((m) => {
-            if (m.receiverId === myId && m.senderId === activeRecipientId) {
-              return { ...m, isRead: true };
-            }
-            return m;
-          })
-        );
-      } catch {
-        // Don't block UI if the column doesn't exist yet.
-      }
-    })();
-  }, [
-    session,
-    activeRecipientId,
-    messages,
-    dmThread.status,
-    dmThread.initiatedBy,
-    isLowBandwidthMode,
-  ]);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") flushMarkActiveThreadAsRead();
+    };
+    const onFocus = () => {
+      flushMarkActiveThreadAsRead();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [flushMarkActiveThreadAsRead, isLowBandwidthMode]);
 
   // Realtime: update read receipts without re-decrypting message content.
   useEffect(() => {
