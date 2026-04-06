@@ -12,6 +12,7 @@ import {
   unwrapPrivateKeyWithPin,
   type KeyPair,
 } from "@/lib/crypto";
+import { isSameUserId } from "@/lib/user-id";
 import {
   NEXUS_LANG_CHANGE_EVENT,
   readStoredLanguage,
@@ -321,8 +322,17 @@ export default function Home() {
   const [notificationsMuted, setNotificationsMuted] = useState(false);
   const languageRef = useRef<Language>(readStoredLanguage());
   const senderKeysRef = useRef<KeyPair | null>(null);
+  senderKeysRef.current = senderKeys;
   const decryptWithRetryRef = useRef<
-    ((ciphertext: string, privateKey: CryptoKey | null) => Promise<string>) | null
+    | ((
+        ciphertext: string,
+        privateKey: CryptoKey | null,
+        mismatchProbe?: {
+          row: { sender_id?: string | null };
+          isUsingSenderCopy: boolean;
+        }
+      ) => Promise<string>)
+    | null
   >(null);
   const isLowBandwidthModeRef = useRef(false);
   const decryptInitialRowsRef = useRef<
@@ -341,6 +351,8 @@ export default function Home() {
   const [isOwnKeySyncing, setIsOwnKeySyncing] = useState(false);
   const [hasOwnKeyInDb, setHasOwnKeyInDb] = useState(false);
   const [hasRecipientKey, setHasRecipientKey] = useState(false);
+  /** Inbound decrypt produced key mismatch — recipient may have rotated keys. */
+  const [keyMismatchWarning, setKeyMismatchWarning] = useState(false);
   const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
   const [appearance, setAppearance] = useState<"light" | "dark">("dark");
   /** True while CPU-heavy decrypt of initial / thread messages is in flight. */
@@ -380,6 +392,10 @@ export default function Home() {
     const recipient = searchParams.get("recipient");
     setActiveRecipientId(recipient ?? null);
   }, [searchParams]);
+
+  useEffect(() => {
+    setKeyMismatchWarning(false);
+  }, [activeRecipientId]);
   /** Local-only labels for contacts (`contact_aliases`). */
   const [contactAliases, setContactAliases] = useState<Record<string, string>>({});
   const [dmActionBusy, setDmActionBusy] = useState(false);
@@ -589,37 +605,108 @@ export default function Home() {
   const wait = useCallback((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)), []);
 
   const decryptWithRetry = useCallback(
-    async (ciphertext: string, privateKey: CryptoKey | null): Promise<string> => {
+    async (
+      ciphertext: string,
+      privateKey: CryptoKey | null,
+      mismatchProbe?: {
+        row: { sender_id?: string | null };
+        isUsingSenderCopy: boolean;
+      }
+    ): Promise<string> => {
+      if (!senderKeysRef.current?.privateKey) {
+        console.warn("[KITE NO-KEY]", {
+          ref_is_null: senderKeysRef.current === null,
+          state_is_null: senderKeys === null,
+          ref_has_private: !!senderKeysRef.current?.privateKey,
+          state_has_private: !!senderKeys?.privateKey,
+        });
+        return KEY_MISMATCH_TEXT;
+      }
+
+      const logPreDecrypt = () => {
+        if (!mismatchProbe) return;
+        const { row, isUsingSenderCopy } = mismatchProbe;
+        console.log("[KITE PRE-DECRYPT]", {
+          is_self: isSameUserId(row.sender_id, session?.user?.id),
+          column: isUsingSenderCopy ? "sender_copy" : "encrypted_content",
+          value_type: typeof ciphertext,
+          value_length: ciphertext?.length ?? 0,
+          value_preview: ciphertext?.slice(0, 40) ?? "NULL_OR_UNDEFINED",
+        });
+      };
+
       if (!privateKey) {
-        await wait(500);
-        if (!senderKeys?.privateKey) {
-          return KEY_MISMATCH_TEXT;
-        }
         try {
-          return await decryptMessage(ciphertext, senderKeys.privateKey);
-        } catch {
+          logPreDecrypt();
+          return await decryptMessage(ciphertext, senderKeysRef.current!.privateKey);
+        } catch (error) {
+          if (mismatchProbe) {
+            console.error("[KITE MISMATCH]", {
+              is_self: isSameUserId(
+                mismatchProbe.row.sender_id,
+                session?.user?.id
+              ),
+              column: mismatchProbe.isUsingSenderCopy
+                ? "sender_copy"
+                : "encrypted_content",
+              error: error instanceof Error ? error.message : undefined,
+            });
+          }
           return KEY_MISMATCH_TEXT;
         }
       }
 
       try {
+        logPreDecrypt();
         return await decryptMessage(ciphertext, privateKey);
-      } catch {
+      } catch (firstError) {
+        console.warn("[KITE RETRY]", { firstError });
         await wait(500);
-        const retryKey = senderKeys?.privateKey ?? privateKey;
+        const retryKey = senderKeysRef.current?.privateKey ?? privateKey;
         try {
+          logPreDecrypt();
           return await decryptMessage(ciphertext, retryKey);
-        } catch {
+        } catch (error) {
+          if (mismatchProbe) {
+            let _recipientPubInPayload = "N/A";
+            let _localPubKey = "N/A";
+            try {
+              const _parsed = JSON.parse(ciphertext);
+              _recipientPubInPayload = (
+                _parsed.senderPublicKeyBase64 ?? "missing"
+              ).slice(0, 40);
+            } catch {}
+            try {
+              const _raw = localStorage.getItem("kite-e2e-v1");
+              if (_raw) {
+                const _parsed2 = JSON.parse(_raw);
+                _localPubKey = (
+                  _parsed2.publicKeyBase64 ?? "missing"
+                ).slice(0, 40);
+              }
+            } catch {}
+            console.log("[KITE KEY COMPARE]", {
+              sender_pub_in_payload: _recipientPubInPayload,
+              my_local_pub_key: _localPubKey,
+              keys_match: _recipientPubInPayload === _localPubKey,
+            });
+            console.error("[KITE MISMATCH]", {
+              is_self: isSameUserId(
+                mismatchProbe.row.sender_id,
+                session?.user?.id
+              ),
+              column: mismatchProbe.isUsingSenderCopy
+                ? "sender_copy"
+                : "encrypted_content",
+              error: error instanceof Error ? error.message : undefined,
+            });
+          }
           return KEY_MISMATCH_TEXT;
         }
       }
     },
-    [senderKeys, wait]
+    [wait, session?.user?.id]
   );
-
-  useEffect(() => {
-    senderKeysRef.current = senderKeys;
-  }, [senderKeys]);
 
   useEffect(() => {
     decryptWithRetryRef.current = decryptWithRetry;
@@ -637,19 +724,42 @@ export default function Home() {
       const privateKey = senderKeys?.privateKey ?? null;
       if (!privateKey) return [];
 
-      const tasks = chronological.map(async (row): Promise<MessagesDecryptedItem | null> => {
+      const tasks = chronological.map(async (row, index): Promise<MessagesDecryptedItem | null> => {
         if (!row.encrypted_content) return null;
 
         const id =
           row.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+        const senderCopy =
+          typeof row.content_for_sender === "string" ? row.content_for_sender.trim() : "";
         const encryptedForViewer =
-          viewerId && row.sender_id === viewerId && row.content_for_sender
-            ? row.content_for_sender
-            : row.encrypted_content;
+          viewerId &&
+          isSameUserId(row.sender_id, viewerId) &&
+          senderCopy.length > 0
+            ? senderCopy
+            : typeof row.encrypted_content === "string"
+              ? row.encrypted_content.trim()
+              : row.encrypted_content;
+
+        if (index < 5) {
+          console.log("[Kite Debug] Column Selection:", {
+            sender: row.sender_id,
+            viewer: viewerId,
+            choice: encryptedForViewer ? "sender" : "recipient",
+          });
+        }
+
+        const isUsingSenderCopy =
+          Boolean(viewerId) &&
+          isSameUserId(row.sender_id, viewerId) &&
+          senderCopy.length > 0;
 
         try {
-          const decryptedText = await decryptWithRetry(encryptedForViewer, privateKey);
+          const decryptedText = await decryptWithRetry(
+            encryptedForViewer,
+            privateKey,
+            { row, isUsingSenderCopy }
+          );
           const p = parseDecryptedPayload(decryptedText);
 
           return {
@@ -1182,46 +1292,10 @@ export default function Home() {
       setE2eRestoreError(null);
       setE2eUnsyncedServerKeyNoBackup(false);
 
-      try {
-        const stored =
-          localStorage.getItem(E2E_KEY_STORAGE_KEY) ??
-          localStorage.getItem("nexus-e2e-keypair");
-        if (stored) {
-          const parsed = JSON.parse(stored) as {
-            publicKeyBase64?: string;
-            privateKeyBase64?: string;
-          };
-            if (parsed.publicKeyBase64 && parsed.privateKeyBase64) {
-            const [publicKey, privateKey] = await Promise.all([
-              importPublicKeyFromBase64(parsed.publicKeyBase64),
-              importPrivateKeyFromBase64(parsed.privateKeyBase64),
-            ]);
-            if (cancelled) return;
-            let normalizedPersisted = false;
-            try {
-              localStorage.setItem(
-                E2E_KEY_STORAGE_KEY,
-                JSON.stringify({
-                  publicKeyBase64: parsed.publicKeyBase64,
-                  privateKeyBase64: parsed.privateKeyBase64,
-                })
-              );
-              normalizedPersisted = true;
-            } catch (normErr) {
-              console.error("Failed to normalize E2E keypair in storage", normErr);
-            }
-            if (normalizedPersisted) {
-              setSenderKeys({ publicKey, privateKey });
-              setE2eUnsyncedServerKeyNoBackup(false);
-              if (!cancelled) setE2eKeyBootstrapLoading(false);
-              return;
-            }
-          }
-        }
-      } catch (error) {
-        console.error("Failed to restore E2E keypair from storage", error);
-      }
-
+      // Server is source of truth for the canonical public key. Fetch before trusting
+      // localStorage so a stale tab cannot adopt rogue keys without verification.
+      // Tradeoff: if this request fails, we do not fall back to unverified local keys
+      // (security over offline-only UX; dedicated offline mode would be a separate feature).
       const { data, error } = await supabase
         .from("profiles")
         .select("encrypted_private_key_backup, key_backup_salt, public_key")
@@ -1251,6 +1325,86 @@ export default function Home() {
           : "";
       const pubRaw =
         data && typeof data.public_key === "string" ? data.public_key.trim() : "";
+
+      let localPublicKeyDbg = "";
+      try {
+        const dbgStored =
+          localStorage.getItem(E2E_KEY_STORAGE_KEY) ??
+          localStorage.getItem("nexus-e2e-keypair");
+        if (dbgStored) {
+          const dbgParsed = JSON.parse(dbgStored) as { publicKeyBase64?: string };
+          if (typeof dbgParsed.publicKeyBase64 === "string") {
+            localPublicKeyDbg = dbgParsed.publicKeyBase64.trim();
+          }
+        }
+      } catch {
+        // ignore parse errors for debug log
+      }
+      console.log("[Kite Debug] Key Compare:", {
+        serverPublicKey: pubRaw,
+        localPublicKey: localPublicKeyDbg,
+      });
+
+      try {
+        const stored =
+          localStorage.getItem(E2E_KEY_STORAGE_KEY) ??
+          localStorage.getItem("nexus-e2e-keypair");
+        if (stored) {
+          const parsed = JSON.parse(stored) as {
+            publicKeyBase64?: string;
+            privateKeyBase64?: string;
+          };
+          if (parsed.publicKeyBase64 && parsed.privateKeyBase64) {
+            const localPubTrim =
+              typeof parsed.publicKeyBase64 === "string"
+                ? parsed.publicKeyBase64.trim()
+                : "";
+
+            // Kill switch: server has a registered key and local disagrees — discard local
+            // and fall through to PIN restore / unsynced banner / keygen using `data` above.
+            if (pubRaw && localPubTrim !== pubRaw) {
+              try {
+                localStorage.removeItem(E2E_KEY_STORAGE_KEY);
+                localStorage.removeItem("nexus-e2e-keypair");
+              } catch (wipeErr) {
+                console.error("Failed to wipe mismatched E2E keys from storage", wipeErr);
+              }
+              console.warn(
+                "E2E: local public key does not match server canonical public_key; discarding local storage",
+                { userId: session.user.id }
+              );
+            } else {
+              // No mismatch: either no server key yet (new user) or local matches server — safe to import local pair.
+              const [publicKey, privateKey] = await Promise.all([
+                importPublicKeyFromBase64(parsed.publicKeyBase64),
+                importPrivateKeyFromBase64(parsed.privateKeyBase64),
+              ]);
+              if (cancelled) return;
+              let normalizedPersisted = false;
+              try {
+                localStorage.setItem(
+                  E2E_KEY_STORAGE_KEY,
+                  JSON.stringify({
+                    publicKeyBase64: parsed.publicKeyBase64,
+                    privateKeyBase64: parsed.privateKeyBase64,
+                  })
+                );
+                normalizedPersisted = true;
+              } catch (normErr) {
+                console.error("Failed to normalize E2E keypair in storage", normErr);
+              }
+              if (normalizedPersisted) {
+                setSenderKeys({ publicKey, privateKey });
+                setE2eUnsyncedServerKeyNoBackup(false);
+                if (!cancelled) setE2eKeyBootstrapLoading(false);
+                return;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Failed to restore E2E keypair from storage", error);
+      }
 
       if (encRaw && saltRaw && pubRaw) {
         setE2eUnsyncedServerKeyNoBackup(false);
@@ -1304,14 +1458,11 @@ export default function Home() {
 
         if (
           error &&
-          // PGRST116 = no rows found
-          // In that case we'll create the row via upsert below.
-          // For other errors, just log and stop.
+          // PGRST116 = no rows found — UPDATE below affects 0 rows until a profiles row exists.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (error as any).code !== "PGRST116"
         ) {
           console.error("Failed to read profile for key upload", error);
-          setIsOwnKeySyncing(false);
           return;
         }
 
@@ -1321,24 +1472,48 @@ export default function Home() {
 
         if (dbPublicKey === publicKeyBase64) {
           setHasOwnKeyInDb(true);
-          setIsOwnKeySyncing(false);
           return;
         }
 
-        const { error: upsertError } = await supabase
+        // UPDATE + .select() so PostgREST returns rows: RLS / missing row shows as 0 rows, not a silent "success".
+        const { data: updatedRows, error: updateError } = await supabase
           .from("profiles")
-          .upsert(
-            {
-              id: session.user.id,
-              public_key: publicKeyBase64,
-            },
-            { onConflict: "id" }
-          );
-        if (upsertError) {
-          console.error("Failed to upload public key", upsertError);
-          setIsOwnKeySyncing(false);
+          .update({ public_key: publicKeyBase64 })
+          .eq("id", session.user.id)
+          .select("id");
+
+        console.log("[KITE PUBLISH]", {
+          success: Array.isArray(updatedRows)
+            ? updatedRows.length > 0
+            : Boolean(updatedRows),
+          rows: Array.isArray(updatedRows)
+            ? updatedRows.length
+            : updatedRows
+              ? 1
+              : 0,
+          error: updateError?.message ?? null,
+        });
+
+        if (cancelled) return;
+
+        if (updateError) {
+          console.error("Failed to update public key on profile", updateError);
           return;
         }
+
+        const updatedList = Array.isArray(updatedRows)
+          ? updatedRows
+          : updatedRows
+            ? [updatedRows]
+            : [];
+        if (updatedList.length === 0) {
+          console.error(
+            "Public key update affected 0 rows (missing profile row or RLS denied write). userId:",
+            session.user.id
+          );
+          return;
+        }
+
         setHasOwnKeyInDb(true);
       } catch (err) {
         if (!cancelled) {
@@ -1365,6 +1540,8 @@ export default function Home() {
       return;
     }
 
+    if (!senderKeys?.privateKey) return;
+
     let cancelled = false;
     const viewerId = session.user.id;
     const channel = supabase
@@ -1389,23 +1566,28 @@ export default function Home() {
             if (!row.encrypted_content) return;
 
             if (
-              row.sender_id !== viewerId &&
-              row.receiver_id !== viewerId
+              !isSameUserId(row.sender_id, viewerId) &&
+              !isSameUserId(row.receiver_id, viewerId)
             ) {
               return;
             }
             const dw = decryptWithRetryRef.current;
-            const sk = senderKeysRef.current;
-            if (!dw || !sk?.privateKey) return;
+            if (!dw || !senderKeysRef.current?.privateKey) return;
 
+            const senderCopyRt =
+              typeof row.content_for_sender === "string" ? row.content_for_sender.trim() : "";
             let encryptedForViewer =
-              viewerId && row.sender_id === viewerId && row.content_for_sender
-                ? row.content_for_sender
-                : row.encrypted_content;
+              viewerId &&
+              isSameUserId(row.sender_id, viewerId) &&
+              senderCopyRt.length > 0
+                ? senderCopyRt
+                : typeof row.encrypted_content === "string"
+                  ? row.encrypted_content.trim()
+                  : row.encrypted_content;
 
             if (
               viewerId &&
-              row.sender_id === viewerId &&
+              isSameUserId(row.sender_id, viewerId) &&
               (!row.content_for_sender || row.content_for_sender.trim().length === 0) &&
               row.id !== undefined &&
               row.id !== null
@@ -1416,17 +1598,19 @@ export default function Home() {
                 .eq("id", row.id)
                 .maybeSingle();
 
-              if (
-                fullRow?.sender_id === viewerId &&
-                typeof fullRow.content_for_sender === "string" &&
-                fullRow.content_for_sender.trim().length > 0
-              ) {
-                encryptedForViewer = fullRow.content_for_sender;
-              } else if (
-                typeof fullRow?.encrypted_content === "string" &&
-                fullRow.encrypted_content.trim().length > 0
-              ) {
-                encryptedForViewer = fullRow.encrypted_content;
+              if (fullRow) {
+                if (
+                  isSameUserId(fullRow.sender_id, viewerId) &&
+                  typeof fullRow.content_for_sender === "string" &&
+                  fullRow.content_for_sender.trim().length > 0
+                ) {
+                  encryptedForViewer = fullRow.content_for_sender;
+                } else if (
+                  typeof fullRow.encrypted_content === "string" &&
+                  fullRow.encrypted_content.trim().length > 0
+                ) {
+                  encryptedForViewer = fullRow.encrypted_content;
+                }
               }
             }
 
@@ -1437,8 +1621,17 @@ export default function Home() {
             let fileUrl: string | undefined;
             let fileName: string | undefined;
             let fileMime: string | undefined;
+            const isUsingSenderCopy =
+              Boolean(viewerId) &&
+              isSameUserId(row.sender_id, viewerId) &&
+              senderCopyRt.length > 0;
             try {
-              const decrypted = await dw(encryptedForViewer, sk.privateKey);
+              const privateKey = senderKeysRef.current?.privateKey;
+              if (!privateKey) return;
+              const decrypted = await dw(encryptedForViewer, privateKey, {
+                row,
+                isUsingSenderCopy,
+              });
               const p = parseDecryptedPayload(decrypted);
               text = p.text;
               isImage = p.isImage;
@@ -1456,23 +1649,45 @@ export default function Home() {
                     .eq("id", row.id)
                     .maybeSingle();
 
-                  const fallbackCipher =
-                    viewerId &&
-                    fullRow?.sender_id === viewerId &&
-                    typeof fullRow?.content_for_sender === "string" &&
-                    fullRow.content_for_sender.trim().length > 0
-                      ? fullRow.content_for_sender
-                      : fullRow?.encrypted_content ?? encryptedForViewer;
+                  let fallbackCipher = encryptedForViewer;
+                  if (fullRow) {
+                    fallbackCipher =
+                      viewerId &&
+                      isSameUserId(fullRow.sender_id, viewerId) &&
+                      typeof fullRow.content_for_sender === "string" &&
+                      fullRow.content_for_sender.trim().length > 0
+                        ? fullRow.content_for_sender
+                        : fullRow.encrypted_content ?? encryptedForViewer;
+                  }
 
-                  const raw = await dw(fallbackCipher, sk.privateKey);
-                  const p = parseDecryptedPayload(raw);
-                  text = p.text;
-                  isImage = p.isImage;
-                  imageUrl = p.imageUrl;
-                  isFile = p.isFile;
-                  fileUrl = p.fileUrl;
-                  fileName = p.fileName;
-                  fileMime = p.fileMime;
+                  const isUsingSenderCopyFallback = Boolean(
+                    fullRow &&
+                      viewerId &&
+                      isSameUserId(fullRow.sender_id, viewerId) &&
+                      typeof fullRow.content_for_sender === "string" &&
+                      fullRow.content_for_sender.trim().length > 0 &&
+                      fallbackCipher === fullRow.content_for_sender
+                  );
+
+                  const privateKeyRetry = senderKeysRef.current?.privateKey;
+                  if (!privateKeyRetry) {
+                    text = KEY_MISMATCH_TEXT;
+                    isImage = false;
+                    isFile = false;
+                  } else {
+                    const raw = await dw(fallbackCipher, privateKeyRetry, {
+                      row,
+                      isUsingSenderCopy: isUsingSenderCopyFallback,
+                    });
+                    const p = parseDecryptedPayload(raw);
+                    text = p.text;
+                    isImage = p.isImage;
+                    imageUrl = p.imageUrl;
+                    isFile = p.isFile;
+                    fileUrl = p.fileUrl;
+                    fileName = p.fileName;
+                    fileMime = p.fileMime;
+                  }
                 } catch {
                   text = KEY_MISMATCH_TEXT;
                   isImage = false;
@@ -1481,6 +1696,10 @@ export default function Home() {
               } else {
                 text = KEY_MISMATCH_TEXT;
               }
+            }
+
+            if (text === KEY_MISMATCH_TEXT) {
+              setKeyMismatchWarning(true);
             }
 
             const senderIdForRead = row.sender_id;
@@ -1496,7 +1715,7 @@ export default function Home() {
             if (
               !isLowBandwidthModeRef.current &&
               !pendingRequestThread &&
-              row.receiver_id === viewerId &&
+              isSameUserId(row.receiver_id, viewerId) &&
               row.is_read === false &&
               row.id !== undefined &&
               row.id !== null
@@ -1512,13 +1731,13 @@ export default function Home() {
               row.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
             if (
-              row.receiver_id === viewerId &&
+              isSameUserId(row.receiver_id, viewerId) &&
               row.sender_id &&
-              row.sender_id !== viewerId &&
+              !isSameUserId(row.sender_id, viewerId) &&
               !areNotificationsGloballyDisabled()
             ) {
               const active = activeRecipientIdRef.current;
-              const inFocusChat = active === row.sender_id;
+              const inFocusChat = isSameUserId(active, row.sender_id);
               const vis =
                 typeof document !== "undefined" &&
                 document.visibilityState === "visible";
@@ -1601,6 +1820,9 @@ export default function Home() {
       try {
         const decrypted = await fn(chronological, viewerId);
         if (!cancelled) {
+          if (decrypted.some((m) => m.text === KEY_MISMATCH_TEXT)) {
+            setKeyMismatchWarning(true);
+          }
           setMessages((prev) => {
             const merged = mergeChatMessagesById(prev, decrypted);
             void saveMessagesSnapshot(viewerId, merged);
@@ -1617,7 +1839,7 @@ export default function Home() {
       pendingInitialMessagesRef.current = null;
       supabase.removeChannel(channel);
     };
-  }, [session?.user?.id]);
+  }, [session?.user?.id, senderKeys?.privateKey]);
 
   useEffect(() => {
     if (!senderKeys?.privateKey || !session?.user?.id) return;
@@ -1636,6 +1858,9 @@ export default function Home() {
       try {
         const decrypted = await fn(chronological, viewerId);
         if (!cancelled) {
+          if (decrypted.some((m) => m.text === KEY_MISMATCH_TEXT)) {
+            setKeyMismatchWarning(true);
+          }
           setMessages((prev) => {
             const merged = mergeChatMessagesById(prev, decrypted);
             void saveMessagesSnapshot(viewerId, merged);
@@ -1694,6 +1919,9 @@ export default function Home() {
       try {
         const decrypted = await fn(chronological, myId);
         if (cancelled) return;
+        if (decrypted.some((m) => m.text === KEY_MISMATCH_TEXT)) {
+          setKeyMismatchWarning(true);
+        }
         setMessages((prev) => {
           const merged = mergeChatMessagesById(prev, decrypted);
           void saveMessagesSnapshot(myId, merged);
@@ -1735,6 +1963,7 @@ export default function Home() {
 
     try {
       let keyToUse: CryptoKey | null = null;
+      let recipientPublicKeyB64: string | null = null;
 
       if (receiverId === senderId) {
         keyToUse = senderKeys.publicKey;
@@ -1765,7 +1994,17 @@ export default function Home() {
             return;
           }
 
-          const key = await importPublicKeyFromBase64(profileRow.public_key);
+          const trimmedRecipientPk = profileRow.public_key.trim();
+          if (!trimmedRecipientPk) {
+            const msg = "Waiting for user to initialize secure connection...";
+            setSendError(msg);
+            setSending(false);
+            return;
+          }
+
+          recipientPublicKeyB64 = trimmedRecipientPk;
+
+          const key = await importPublicKeyFromBase64(trimmedRecipientPk);
           setRecipientPublicKey(key);
           setHasRecipientKey(true);
           keyToUse = key;
@@ -1776,6 +2015,32 @@ export default function Home() {
           return;
         }
       }
+
+      if (receiverId === senderId) {
+        if (!senderKeys.publicKey) {
+          throw new Error("Missing local public key for encrypted send.");
+        }
+      } else {
+        if (!recipientPublicKeyB64?.trim()) {
+          throw new Error("Recipient public key is missing; cannot encrypt.");
+        }
+        if (!keyToUse) {
+          throw new Error("Recipient encryption key is missing; cannot encrypt.");
+        }
+      }
+
+      console.log("[KITE SEND]", {
+        recipient_id: receiverId,
+        timestamp: new Date().toISOString(),
+      });
+
+      let _recipientPubUsed = "N/A";
+      try {
+        _recipientPubUsed = await exportPublicKeyToBase64(keyToUse);
+      } catch {}
+      console.log("[KITE ENCRYPT KEY]", {
+        recipient_pub_used: _recipientPubUsed.slice(0, 40),
+      });
 
       const encryptedForRecipient = await encryptMessage(trimmed, keyToUse, senderKeys);
       const encryptedForSender = await encryptMessage(
@@ -2081,6 +2346,7 @@ export default function Home() {
       const senderId = session.user.id;
 
       let keyToUse: CryptoKey | null = null;
+      let recipientPublicKeyB64: string | null = null;
       if (receiverId === senderId) {
         keyToUse = senderKeys.publicKey;
       } else {
@@ -2109,7 +2375,18 @@ export default function Home() {
             return;
           }
 
-          const key = await importPublicKeyFromBase64(profileRow.public_key);
+          const trimmedRecipientPk = profileRow.public_key.trim();
+          if (!trimmedRecipientPk) {
+            const msg = "Waiting for user to initialize secure connection...";
+            setSendError(msg);
+            setUploadingFile(false);
+            event.target.value = "";
+            return;
+          }
+
+          recipientPublicKeyB64 = trimmedRecipientPk;
+
+          const key = await importPublicKeyFromBase64(trimmedRecipientPk);
           setRecipientPublicKey(key);
           setHasRecipientKey(true);
           keyToUse = key;
@@ -2119,6 +2396,19 @@ export default function Home() {
           setUploadingFile(false);
           event.target.value = "";
           return;
+        }
+      }
+
+      if (receiverId === senderId) {
+        if (!senderKeys.publicKey) {
+          throw new Error("Missing local public key for encrypted send.");
+        }
+      } else {
+        if (!recipientPublicKeyB64?.trim()) {
+          throw new Error("Recipient public key is missing; cannot encrypt.");
+        }
+        if (!keyToUse) {
+          throw new Error("Recipient encryption key is missing; cannot encrypt.");
         }
       }
 
@@ -2222,6 +2512,7 @@ export default function Home() {
           const receiverId = activeRecipientId;
 
           let keyToUse: CryptoKey | null = null;
+          let recipientPublicKeyB64: string | null = null;
           if (receiverId === senderId) {
             keyToUse = senderKeys.publicKey;
           } else {
@@ -2248,7 +2539,16 @@ export default function Home() {
                 return;
               }
 
-              const key = await importPublicKeyFromBase64(profileRow.public_key);
+              const trimmedRecipientPk = profileRow.public_key.trim();
+              if (!trimmedRecipientPk) {
+                const msg = "Waiting for user to initialize secure connection...";
+                setSendError(msg);
+                return;
+              }
+
+              recipientPublicKeyB64 = trimmedRecipientPk;
+
+              const key = await importPublicKeyFromBase64(trimmedRecipientPk);
               setRecipientPublicKey(key);
               setHasRecipientKey(true);
               keyToUse = key;
@@ -2256,6 +2556,19 @@ export default function Home() {
               const msg = "Waiting for user to initialize secure connection...";
               setSendError(msg);
               return;
+            }
+          }
+
+          if (receiverId === senderId) {
+            if (!senderKeys.publicKey) {
+              throw new Error("Missing local public key for encrypted send.");
+            }
+          } else {
+            if (!recipientPublicKeyB64?.trim()) {
+              throw new Error("Recipient public key is missing; cannot encrypt.");
+            }
+            if (!keyToUse) {
+              throw new Error("Recipient encryption key is missing; cannot encrypt.");
             }
           }
 
@@ -2615,6 +2928,38 @@ export default function Home() {
                 Network error verifying security. Please check your connection and refresh the
                 page.
               </p>
+            </div>
+          </div>
+        ) : null}
+        {keyMismatchWarning ? (
+          <div
+            className="shrink-0 border-b px-3 py-3 sm:px-4"
+            style={{
+              borderColor: "var(--border)",
+              background: "var(--panel-bg)",
+            }}
+            role="alert"
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle
+                className="mt-0.5 h-4 w-4 shrink-0 text-amber-500"
+                aria-hidden
+              />
+              <p
+                className="min-w-0 flex-1 text-xs sm:text-sm"
+                style={{ color: "var(--text-primary)" }}
+              >
+                The recipient may have updated their keys. New messages will work; older ones in
+                this thread cannot be recovered.
+              </p>
+              <button
+                type="button"
+                onClick={() => setKeyMismatchWarning(false)}
+                className="shrink-0 rounded-lg px-2 py-1 text-xs font-semibold underline-offset-2 hover:underline"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                Dismiss
+              </button>
             </div>
           </div>
         ) : null}

@@ -267,7 +267,12 @@ export async function decryptMessage(
   encrypted: string,
   recipientPrivateKey: CryptoKey
 ): Promise<string> {
-  const payload = JSON.parse(encrypted) as EncryptedPayload;
+  const trimmed =
+    typeof encrypted === "string" ? encrypted.trim() : String(encrypted ?? "");
+  if (!trimmed) {
+    throw new Error("Empty Ciphertext");
+  }
+  const payload = JSON.parse(trimmed) as EncryptedPayload;
   return decrypt(payload, recipientPrivateKey);
 }
 
