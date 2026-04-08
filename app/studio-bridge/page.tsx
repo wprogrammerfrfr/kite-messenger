@@ -59,8 +59,17 @@ const P2P_CONNECTED_NOTE = "P2P Connected.";
 const HIGH_PING_WARN_MS = 150;
 const HIGH_PING_WARN_SAMPLES = 3;
 
-/** Remote listen path: Web Audio boost + compressor to `AudioContext.destination` (see muted `<audio>` + gain-based mute). */
+/** Remote listen path: Web Audio boost to `AudioContext.destination` (muted `<audio>` keep-alive + gain-based mute). */
 const REMOTE_PLAYBACK_GAIN_UNMUTED = 2;
+
+/** Studio playback context: prefer minimum buffering; fall back if options unsupported. */
+function createStudioAudioContext(): AudioContext {
+  try {
+    return new AudioContext({ latencyHint: "interactive" });
+  } catch {
+    return new AudioContext();
+  }
+}
 
 /** Single source of truth for session_id casing and shape (6-char A–Z / 0–9). */
 function normalizeStudioSessionId(raw: string): string {
@@ -362,7 +371,6 @@ export default function StudioBridgePage() {
   const studioAudioContextRef = useRef<AudioContext | null>(null);
   const remotePlaybackSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const remotePlaybackGainRef = useRef<GainNode | null>(null);
-  const remotePlaybackCompressorRef = useRef<DynamicsCompressorNode | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
 
@@ -377,14 +385,8 @@ export default function StudioBridgePage() {
     } catch {
       /* ignore */
     }
-    try {
-      remotePlaybackCompressorRef.current?.disconnect();
-    } catch {
-      /* ignore */
-    }
     remotePlaybackSourceRef.current = null;
     remotePlaybackGainRef.current = null;
-    remotePlaybackCompressorRef.current = null;
   }, []);
 
   const applyRemotePlaybackSpeakerGain = useCallback((muted: boolean) => {
@@ -401,18 +403,10 @@ export default function StudioBridgePage() {
       const source = ctx.createMediaStreamSource(stream);
       const gain = ctx.createGain();
       gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.value = -24;
-      compressor.knee.value = 30;
-      compressor.ratio.value = 3;
-      compressor.attack.value = 0.003;
-      compressor.release.value = 0.25;
       source.connect(gain);
-      gain.connect(compressor);
-      compressor.connect(ctx.destination);
+      gain.connect(ctx.destination);
       remotePlaybackSourceRef.current = source;
       remotePlaybackGainRef.current = gain;
-      remotePlaybackCompressorRef.current = compressor;
     },
     [teardownRemotePlaybackGraph]
   );
@@ -598,7 +592,7 @@ export default function StudioBridgePage() {
       try {
         let ctx = studioAudioContextRef.current;
         if (!ctx) {
-          ctx = new AudioContext();
+          ctx = createStudioAudioContext();
           studioAudioContextRef.current = ctx;
         }
         await ctx.resume().catch(() => {});
