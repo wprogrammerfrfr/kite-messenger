@@ -132,6 +132,38 @@ function playTestTone(): Promise<void> {
 type CheckRowState = "pending" | "done" | "error";
 type KiteSignalState = "checking" | "secure" | "offline" | "error";
 
+const BASELINE_LEVEL_BAR_HEIGHTS = [0.12, 0.12, 0.12, 0.12, 0.12] as const;
+
+function meterBinsFromFrequencyData(buf: Uint8Array): number[] {
+  const step = Math.max(1, Math.floor(buf.length / 5));
+  return [0, 1, 2, 3, 4].map((i) => {
+    let sum = 0;
+    for (let j = 0; j < step; j++) sum += buf[i * step + j] ?? 0;
+    return Math.min(1, (sum / step / 255) * 1.85);
+  });
+}
+
+function ExternalLevelBars({ heights }: { heights: readonly number[] }) {
+  return (
+    <div
+      className="flex h-11 items-end justify-center gap-1.5 rounded-xl border border-stone-800/80 bg-black/25 px-4 py-2"
+      aria-hidden
+    >
+      {heights.map((h, i) => (
+        <div
+          key={i}
+          className="w-1.5 origin-bottom rounded-full bg-gradient-to-t from-orange-600/90 to-emerald-400/90"
+          style={{
+            height: `${Math.max(10, 6 + h * 34)}px`,
+            opacity: 0.4 + h * 0.6,
+            transition: "height 80ms ease-out, opacity 80ms ease-out",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function MicLevelBars({
   stream,
   onLevel,
@@ -139,7 +171,7 @@ function MicLevelBars({
   stream: MediaStream | null;
   onLevel?: (level: number) => void;
 }) {
-  const [heights, setHeights] = useState([0.12, 0.12, 0.12, 0.12, 0.12]);
+  const [heights, setHeights] = useState<number[]>(() => [...BASELINE_LEVEL_BAR_HEIGHTS]);
 
   useEffect(() => {
     if (!stream) return;
@@ -163,12 +195,7 @@ function MicLevelBars({
           an.getByteFrequencyData(buf);
           if (now - lastT > 72) {
             lastT = now;
-            const step = Math.max(1, Math.floor(buf.length / 5));
-            const next = [0, 1, 2, 3, 4].map((i) => {
-              let sum = 0;
-              for (let j = 0; j < step; j++) sum += buf[i * step + j] ?? 0;
-              return Math.min(1, (sum / step / 255) * 1.85);
-            });
+            const next = meterBinsFromFrequencyData(buf);
             setHeights(next);
             const avg = next.reduce((a, b) => a + b, 0) / next.length;
             onLevel?.(avg);
@@ -188,24 +215,7 @@ function MicLevelBars({
     };
   }, [stream, onLevel]);
 
-  return (
-    <div
-      className="flex h-11 items-end justify-center gap-1.5 rounded-xl border border-stone-800/80 bg-black/25 px-4 py-2"
-      aria-hidden
-    >
-      {heights.map((h, i) => (
-        <div
-          key={i}
-          className="w-1.5 origin-bottom rounded-full bg-gradient-to-t from-orange-600/90 to-emerald-400/90"
-          style={{
-            height: `${Math.max(10, 6 + h * 34)}px`,
-            opacity: 0.4 + h * 0.6,
-            transition: "height 80ms ease-out, opacity 80ms ease-out",
-          }}
-        />
-      ))}
-    </div>
-  );
+  return <ExternalLevelBars heights={heights} />;
 }
 
 function PreflightRow({
@@ -328,6 +338,13 @@ export default function StudioBridgePage() {
   const [roomCopyNote, setRoomCopyNote] = useState<string | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [remoteLevel, setRemoteLevel] = useState(0);
+  /** Remote level bars driven by tap on studio playback graph (no third MediaStreamAudioSource). */
+  const [remoteMeterHeights, setRemoteMeterHeights] = useState<number[]>(() => [
+    ...BASELINE_LEVEL_BAR_HEIGHTS,
+  ]);
+  const [remoteMeterTapActive, setRemoteMeterTapActive] = useState(false);
+  /** Bumps on graph teardown/build so the meter rAF effect restarts even if `remoteMeterTapActive` stays true. */
+  const [remoteMeterRafKey, setRemoteMeterRafKey] = useState(0);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
@@ -371,10 +388,17 @@ export default function StudioBridgePage() {
   const studioAudioContextRef = useRef<AudioContext | null>(null);
   const remotePlaybackSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const remotePlaybackGainRef = useRef<GainNode | null>(null);
+  const remotePlaybackAnalyserRef = useRef<AnalyserNode | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
 
   const teardownRemotePlaybackGraph = useCallback(() => {
+    setRemoteMeterTapActive(false);
+    try {
+      remotePlaybackAnalyserRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
     try {
       remotePlaybackSourceRef.current?.disconnect();
     } catch {
@@ -385,8 +409,10 @@ export default function StudioBridgePage() {
     } catch {
       /* ignore */
     }
+    remotePlaybackAnalyserRef.current = null;
     remotePlaybackSourceRef.current = null;
     remotePlaybackGainRef.current = null;
+    setRemoteMeterRafKey((k) => k + 1);
   }, []);
 
   const applyRemotePlaybackSpeakerGain = useCallback((muted: boolean) => {
@@ -405,8 +431,15 @@ export default function StudioBridgePage() {
       gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
       source.connect(gain);
       gain.connect(ctx.destination);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.62;
+      gain.connect(analyser);
       remotePlaybackSourceRef.current = source;
       remotePlaybackGainRef.current = gain;
+      remotePlaybackAnalyserRef.current = analyser;
+      setRemoteMeterTapActive(true);
+      setRemoteMeterRafKey((k) => k + 1);
     },
     [teardownRemotePlaybackGraph]
   );
@@ -445,8 +478,42 @@ export default function StudioBridgePage() {
   }, [isSpeakerMuted, applyRemotePlaybackSpeakerGain]);
 
   useEffect(() => {
-    if (!remoteStream) setRemoteLevel(0);
+    if (!remoteStream) {
+      setRemoteLevel(0);
+      setRemoteMeterHeights([...BASELINE_LEVEL_BAR_HEIGHTS]);
+    }
   }, [remoteStream]);
+
+  useEffect(() => {
+    if (!remoteMeterTapActive) {
+      setRemoteMeterHeights([...BASELINE_LEVEL_BAR_HEIGHTS]);
+      setRemoteLevel(0);
+      return;
+    }
+    const an = remotePlaybackAnalyserRef.current;
+    if (!an) return;
+    let raf = 0;
+    let stopped = false;
+    let lastT = 0;
+    const buf = new Uint8Array(an.frequencyBinCount);
+    const tick = (now: number) => {
+      if (stopped || !mountedRef.current) return;
+      an.getByteFrequencyData(buf);
+      if (now - lastT > 72) {
+        lastT = now;
+        const next = meterBinsFromFrequencyData(buf);
+        setRemoteMeterHeights(next);
+        const avg = next.reduce((a, b) => a + b, 0) / next.length;
+        setRemoteLevel(avg);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [remoteMeterTapActive, remoteMeterRafKey]);
 
   useEffect(() => {
     if (status !== "connected") {
@@ -1769,9 +1836,9 @@ export default function StudioBridgePage() {
                   </div>
                 ) : null}
 
-                {remoteStream ? (
+                {remoteStream && remoteMeterTapActive ? (
                   <div className="mt-4">
-                    <MicLevelBars stream={remoteStream} onLevel={setRemoteLevel} />
+                    <ExternalLevelBars heights={remoteMeterHeights} />
                     <p className="mt-2 text-center text-[10px] font-semibold uppercase tracking-wider text-stone-500">
                       Incoming Remote Level
                     </p>
@@ -1973,9 +2040,9 @@ export default function StudioBridgePage() {
                       </p>
                     </div>
                   ) : null}
-                  {remoteStream ? (
+                  {remoteStream && remoteMeterTapActive ? (
                     <div className="rounded-xl border border-stone-800/90 bg-stone-950/40 px-4 py-3">
-                      <MicLevelBars stream={remoteStream} onLevel={setRemoteLevel} />
+                      <ExternalLevelBars heights={remoteMeterHeights} />
                       <p className="mt-2 text-center text-[10px] font-semibold uppercase tracking-wider text-stone-500">
                         Incoming Remote Level
                       </p>
