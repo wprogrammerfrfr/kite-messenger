@@ -389,11 +389,18 @@ export default function StudioBridgePage() {
   const remotePlaybackSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const remotePlaybackGainRef = useRef<GainNode | null>(null);
   const remotePlaybackAnalyserRef = useRef<AnalyserNode | null>(null);
+  /** Zero-gain sink so the analyser branch is pulled by the audio engine without audible bleed. */
+  const remotePlaybackMeterSinkRef = useRef<GainNode | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
 
   const teardownRemotePlaybackGraph = useCallback(() => {
     setRemoteMeterTapActive(false);
+    try {
+      remotePlaybackMeterSinkRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
     try {
       remotePlaybackAnalyserRef.current?.disconnect();
     } catch {
@@ -409,6 +416,7 @@ export default function StudioBridgePage() {
     } catch {
       /* ignore */
     }
+    remotePlaybackMeterSinkRef.current = null;
     remotePlaybackAnalyserRef.current = null;
     remotePlaybackSourceRef.current = null;
     remotePlaybackGainRef.current = null;
@@ -434,10 +442,15 @@ export default function StudioBridgePage() {
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 128;
       analyser.smoothingTimeConstant = 0.62;
+      const silentGain = ctx.createGain();
+      silentGain.gain.value = 0;
       gain.connect(analyser);
+      analyser.connect(silentGain);
+      silentGain.connect(ctx.destination);
       remotePlaybackSourceRef.current = source;
       remotePlaybackGainRef.current = gain;
       remotePlaybackAnalyserRef.current = analyser;
+      remotePlaybackMeterSinkRef.current = silentGain;
       setRemoteMeterTapActive(true);
       setRemoteMeterRafKey((k) => k + 1);
     },
@@ -496,11 +509,12 @@ export default function StudioBridgePage() {
     let stopped = false;
     let lastT = 0;
     const buf = new Uint8Array(an.frequencyBinCount);
+    const METER_READ_MS = 100;
     const tick = (now: number) => {
       if (stopped || !mountedRef.current) return;
-      an.getByteFrequencyData(buf);
-      if (now - lastT > 72) {
+      if (now - lastT >= METER_READ_MS) {
         lastT = now;
+        an.getByteFrequencyData(buf);
         const next = meterBinsFromFrequencyData(buf);
         setRemoteMeterHeights(next);
         const avg = next.reduce((a, b) => a + b, 0) / next.length;
