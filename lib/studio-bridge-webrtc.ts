@@ -7,7 +7,10 @@ export const STUDIO_ICE_SERVERS_FALLBACK: RTCIceServer[] = [
   { urls: "stun:stun1.l.google.com:19302" },
 ];
 
-/** Adaptive behavior for strict networks + VPN tunnel fallback paths. */
+/**
+ * `iceTransportPolicy: "all"` keeps host and server-reflexive candidates eligible alongside relay.
+ * Restrictive networks or AP client isolation can still force relay-only paths; this does not override that.
+ */
 export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
   iceTransportPolicy: "all",
   bundlePolicy: "max-bundle",
@@ -17,13 +20,32 @@ export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
 
 type RtpReceiverWithJitter = RTCRtpReceiver & { jitterBufferTarget?: number };
 
-/** Minimize inbound audio playout buffering where `jitterBufferTarget` is supported (no-op otherwise). */
-export function applyLowLatencyInboundAudioReceivers(pc: RTCPeerConnection): void {
+export type LowLatencyReceiverOptions = {
+  /** Desktop Safari / WebKit where UA includes Safari but not Chromium-based browsers. */
+  isSafariWebKit?: boolean;
+};
+
+const SAFARI_JITTER_TARGET_MS = 40;
+const DEFAULT_LOW_LATENCY_JITTER_TARGET_MS = 0;
+
+function inboundAudioJitterBufferTargetMs(options?: LowLatencyReceiverOptions): number {
+  return options?.isSafariWebKit ? SAFARI_JITTER_TARGET_MS : DEFAULT_LOW_LATENCY_JITTER_TARGET_MS;
+}
+
+/**
+ * Tune inbound audio playout buffering where `jitterBufferTarget` is supported (no-op otherwise).
+ * Safari/WebKit uses a slightly higher target to reduce playout instability; others minimize buffering.
+ */
+export function applyLowLatencyInboundAudioReceivers(
+  pc: RTCPeerConnection,
+  options?: LowLatencyReceiverOptions
+): void {
+  const targetMs = inboundAudioJitterBufferTargetMs(options);
   for (const receiver of pc.getReceivers()) {
     if (receiver.track?.kind !== "audio") continue;
     if (!("jitterBufferTarget" in receiver)) continue;
     try {
-      (receiver as RtpReceiverWithJitter).jitterBufferTarget = 0;
+      (receiver as RtpReceiverWithJitter).jitterBufferTarget = targetMs;
     } catch {
       // Setting may throw on some builds; ignore.
     }

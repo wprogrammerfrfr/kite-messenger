@@ -59,6 +59,9 @@ const P2P_CONNECTED_NOTE = "P2P Connected.";
 const HIGH_PING_WARN_MS = 150;
 const HIGH_PING_WARN_SAMPLES = 3;
 
+/** Remote listen path: Web Audio boost + compressor to `AudioContext.destination` (see muted `<audio>` + gain-based mute). */
+const REMOTE_PLAYBACK_GAIN_UNMUTED = 2;
+
 /** Single source of truth for session_id casing and shape (6-char A–Z / 0–9). */
 function normalizeStudioSessionId(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6).toUpperCase();
@@ -66,6 +69,15 @@ function normalizeStudioSessionId(raw: string): string {
 
 function randomSessionId(): string {
   return normalizeStudioSessionId(Math.random().toString(36).slice(2, 8));
+}
+
+/** True for Safari/WebKit UAs, false for Chromium-based browsers that also advertise "Safari". */
+function isStudioSafariWebKitEngine(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  if (!/Safari/i.test(ua)) return false;
+  if (/Chrome|Chromium|Edg|OPR|Brave/i.test(ua)) return false;
+  return true;
 }
 
 const MIC_ACCESS_DENIED_COPY =
@@ -348,8 +360,62 @@ export default function StudioBridgePage() {
   const bridgeInitInFlightRef = useRef(false);
   /** Lazily created; resumed on "Enter Studio" so Safari unlocks audio on a user gesture. */
   const studioAudioContextRef = useRef<AudioContext | null>(null);
+  const remotePlaybackSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const remotePlaybackGainRef = useRef<GainNode | null>(null);
+  const remotePlaybackCompressorRef = useRef<DynamicsCompressorNode | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
+
+  const teardownRemotePlaybackGraph = useCallback(() => {
+    try {
+      remotePlaybackSourceRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      remotePlaybackGainRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      remotePlaybackCompressorRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    remotePlaybackSourceRef.current = null;
+    remotePlaybackGainRef.current = null;
+    remotePlaybackCompressorRef.current = null;
+  }, []);
+
+  const applyRemotePlaybackSpeakerGain = useCallback((muted: boolean) => {
+    const gainNode = remotePlaybackGainRef.current;
+    if (!gainNode) return;
+    gainNode.gain.value = muted ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
+  }, []);
+
+  const buildRemotePlaybackGraph = useCallback(
+    (stream: MediaStream) => {
+      const ctx = studioAudioContextRef.current;
+      if (!ctx) return;
+      teardownRemotePlaybackGraph();
+      const source = ctx.createMediaStreamSource(stream);
+      const gain = ctx.createGain();
+      gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = -24;
+      compressor.knee.value = 30;
+      compressor.ratio.value = 3;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
+      source.connect(gain);
+      gain.connect(compressor);
+      compressor.connect(ctx.destination);
+      remotePlaybackSourceRef.current = source;
+      remotePlaybackGainRef.current = gain;
+      remotePlaybackCompressorRef.current = compressor;
+    },
+    [teardownRemotePlaybackGraph]
+  );
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -381,8 +447,8 @@ export default function StudioBridgePage() {
 
   useEffect(() => {
     speakerMutedRef.current = isSpeakerMuted;
-    if (remoteAudioRef.current) remoteAudioRef.current.muted = isSpeakerMuted;
-  }, [isSpeakerMuted]);
+    applyRemotePlaybackSpeakerGain(isSpeakerMuted);
+  }, [isSpeakerMuted, applyRemotePlaybackSpeakerGain]);
 
   useEffect(() => {
     if (!remoteStream) setRemoteLevel(0);
@@ -522,10 +588,10 @@ export default function StudioBridgePage() {
     setIsSpeakerMuted((prev) => {
       const nextMuted = !prev;
       speakerMutedRef.current = nextMuted;
-      if (remoteAudioRef.current) remoteAudioRef.current.muted = !prev;
+      applyRemotePlaybackSpeakerGain(nextMuted);
       return nextMuted;
     });
-  }, []);
+  }, [applyRemotePlaybackSpeakerGain]);
 
   const onEnterStudioClick = useCallback(() => {
     void (async () => {
@@ -536,12 +602,16 @@ export default function StudioBridgePage() {
           studioAudioContextRef.current = ctx;
         }
         await ctx.resume().catch(() => {});
+        const stream = remoteStreamRef.current;
+        if (stream) {
+          buildRemotePlaybackGraph(stream);
+        }
       } catch {
         // Ignore; UI still enters studio.
       }
       setEnteredStudio(true);
     })();
-  }, []);
+  }, [buildRemotePlaybackGraph]);
 
   const returnToLobby = useCallback(() => {
     setConfirmExitOpen(true);
@@ -705,6 +775,7 @@ export default function StudioBridgePage() {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
           }
+          teardownRemotePlaybackGraph();
           if (remoteAudioRef.current) {
             remoteAudioRef.current.srcObject = null;
           }
@@ -1087,6 +1158,9 @@ export default function StudioBridgePage() {
           `Negotiation: ${isHost ? "host initiates (offer first)" : "guest answers"}`
         );
 
+        const isSafariWebKit = isStudioSafariWebKitEngine();
+        const lowLatencyReceiverOpts = { isSafariWebKit };
+
         const iceServers = await fetchTurnCredentials();
         const peerConfig = {
           ...STUDIO_PEER_CONNECTION_CONFIG,
@@ -1097,7 +1171,8 @@ export default function StudioBridgePage() {
           trickle: true,
           stream: mediaStream,
           config: peerConfig,
-          sdpTransform: (sdp: string) => forceMusicModeOpus(sdp)
+          sdpTransform: (sdp: string) =>
+            forceMusicModeOpus(sdp, { isSafariWebKit })
         });
         peerRef.current = peer;
 
@@ -1135,7 +1210,7 @@ export default function StudioBridgePage() {
         if (rawPc) {
           peerConnectionRef.current = rawPc;
           rawPc.addEventListener("track", () => {
-            applyLowLatencyInboundAudioReceivers(rawPc);
+            applyLowLatencyInboundAudioReceivers(rawPc, lowLatencyReceiverOpts);
           });
 
           rawPc.addEventListener("icegatheringstatechange", () => {
@@ -1167,7 +1242,7 @@ export default function StudioBridgePage() {
               setError(null);
               setStatus("connected");
               clearLostCountdown();
-              applyLowLatencyInboundAudioReceivers(rawPc);
+              applyLowLatencyInboundAudioReceivers(rawPc, lowLatencyReceiverOpts);
               rawPc
                 .getStats()
                 .then((stats) => {
@@ -1214,10 +1289,13 @@ export default function StudioBridgePage() {
           const remoteEl = remoteAudioRef.current;
           if (remoteEl) {
             remoteEl.srcObject = remoteStream;
-            remoteEl.muted = speakerMutedRef.current;
+            remoteEl.muted = true;
             void remoteEl.play().catch(() => {
               addLog("Remote audio play() blocked (tap page if silent)");
             });
+          }
+          if (studioAudioContextRef.current) {
+            buildRemotePlaybackGraph(remoteStream);
           }
         });
 
@@ -1415,7 +1493,13 @@ export default function StudioBridgePage() {
       micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
     };
-  }, [beginLostCountdown, clearLostCountdown, retryInitTick]);
+  }, [
+    beginLostCountdown,
+    clearLostCountdown,
+    retryInitTick,
+    teardownRemotePlaybackGraph,
+    buildRemotePlaybackGraph,
+  ]);
 
   const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
