@@ -23,13 +23,22 @@ type RtpReceiverWithJitter = RTCRtpReceiver & { jitterBufferTarget?: number };
 export type LowLatencyReceiverOptions = {
   /** Desktop Safari / WebKit where UA includes Safari but not Chromium-based browsers. */
   isSafariWebKit?: boolean;
+  /** Inbound packet loss percentage (0-100), when available from stats sampling. */
+  packetLossPercent?: number;
 };
 
 const SAFARI_JITTER_TARGET_MS = 40;
 const DEFAULT_LOW_LATENCY_JITTER_TARGET_MS = 0;
 
 function inboundAudioJitterBufferTargetMs(options?: LowLatencyReceiverOptions): number {
-  return options?.isSafariWebKit ? SAFARI_JITTER_TARGET_MS : DEFAULT_LOW_LATENCY_JITTER_TARGET_MS;
+  const isSafariWebKit = Boolean(options?.isSafariWebKit);
+  const packetLossPercent = options?.packetLossPercent;
+
+  if (packetLossPercent !== undefined && packetLossPercent >= 2) {
+    return isSafariWebKit ? 80 : 40;
+  }
+
+  return isSafariWebKit ? SAFARI_JITTER_TARGET_MS : DEFAULT_LOW_LATENCY_JITTER_TARGET_MS;
 }
 
 /**

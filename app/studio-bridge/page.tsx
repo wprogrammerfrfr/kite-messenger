@@ -534,6 +534,7 @@ export default function StudioBridgePage() {
       setInboundPacketLossPercent(null);
       return;
     }
+    const isSafariWebKit = isStudioSafariWebKitEngine();
     const tick = () => {
       const pc = peerConnectionRef.current;
       if (!pc || !mountedRef.current) return;
@@ -546,7 +547,12 @@ export default function StudioBridgePage() {
             setInboundPacketLossPercent(null);
             return;
           }
-          setInboundPacketLossPercent(Math.round(parsed.ratio * 1000) / 10);
+          const packetLossPercent = Math.round(parsed.ratio * 1000) / 10;
+          applyLowLatencyInboundAudioReceivers(pc, {
+            isSafariWebKit,
+            packetLossPercent,
+          });
+          setInboundPacketLossPercent(packetLossPercent);
         })
         .catch(() => {});
     };
