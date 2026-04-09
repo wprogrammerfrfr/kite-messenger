@@ -61,6 +61,11 @@ const HIGH_PING_WARN_SAMPLES = 3;
 
 /** Remote listen path: Web Audio boost to `AudioContext.destination` (muted `<audio>` keep-alive + gain-based mute). */
 const REMOTE_PLAYBACK_GAIN_UNMUTED = 2;
+const REMOTE_COMPRESSOR_THRESHOLD = -24;
+const REMOTE_COMPRESSOR_KNEE      = 10;
+const REMOTE_COMPRESSOR_RATIO     = 4;
+const REMOTE_COMPRESSOR_ATTACK    = 0.003;
+const REMOTE_COMPRESSOR_RELEASE   = 0.15;
 
 /** Studio playback context: prefer minimum buffering; fall back if options unsupported. */
 function createStudioAudioContext(): AudioContext {
@@ -391,6 +396,7 @@ export default function StudioBridgePage() {
   const remotePlaybackAnalyserRef = useRef<AnalyserNode | null>(null);
   /** Zero-gain sink so the analyser branch is pulled by the audio engine without audible bleed. */
   const remotePlaybackMeterSinkRef = useRef<GainNode | null>(null);
+  const remotePlaybackCompressorRef = useRef<DynamicsCompressorNode | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
 
@@ -407,6 +413,11 @@ export default function StudioBridgePage() {
       /* ignore */
     }
     try {
+      remotePlaybackCompressorRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
       remotePlaybackSourceRef.current?.disconnect();
     } catch {
       /* ignore */
@@ -418,6 +429,7 @@ export default function StudioBridgePage() {
     }
     remotePlaybackMeterSinkRef.current = null;
     remotePlaybackAnalyserRef.current = null;
+    remotePlaybackCompressorRef.current = null;
     remotePlaybackSourceRef.current = null;
     remotePlaybackGainRef.current = null;
     setRemoteMeterRafKey((k) => k + 1);
@@ -438,7 +450,15 @@ export default function StudioBridgePage() {
       const gain = ctx.createGain();
       gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
       source.connect(gain);
-      gain.connect(ctx.destination);
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
+      compressor.knee.value      = REMOTE_COMPRESSOR_KNEE;
+      compressor.ratio.value     = REMOTE_COMPRESSOR_RATIO;
+      compressor.attack.value    = REMOTE_COMPRESSOR_ATTACK;
+      compressor.release.value   = REMOTE_COMPRESSOR_RELEASE;
+      gain.connect(compressor);
+      compressor.connect(ctx.destination);
+      remotePlaybackCompressorRef.current = compressor;
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 128;
       analyser.smoothingTimeConstant = 0.62;

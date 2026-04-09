@@ -35,11 +35,15 @@ export function forceMusicModeOpus(
       const existingParams = fmtpMatch[2];
 
       // Replace useinbandfec value directly in the string
-      let updated = existingParams.replace(/useinbandfec=\d/i, "useinbandfec=0");
+      let updated = existingParams.replace(/useinbandfec=\d/i, "useinbandfec=1");
 
       // Add maxaveragebitrate if not present
       if (!/maxaveragebitrate/i.test(updated)) {
         updated += ";maxaveragebitrate=510000";
+      }
+
+      if (!/maxplaybackrate/i.test(updated)) {
+        updated += ";maxplaybackrate=48000";
       }
 
       if (safariStereo) {
@@ -53,7 +57,7 @@ export function forceMusicModeOpus(
     const rtpLine = sdp.match(new RegExp(`a=rtpmap:${id}[^\\r\\n]*\\r?\\n`, "i"))?.[0];
     if (!rtpLine) return sdp;
     let newLine =
-      `a=fmtp:${id} useinbandfec=0;maxaveragebitrate=510000`;
+      `a=fmtp:${id} useinbandfec=1;maxaveragebitrate=510000;maxplaybackrate=48000`;
     if (safariStereo) {
       newLine += ";stereo=0;sprop-stereo=0";
     }
