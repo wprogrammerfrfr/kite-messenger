@@ -7,6 +7,7 @@ import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react"
 import { useRouter } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
+import { TrackRecorder } from "@/lib/track-recorder";
 import {
   acquireStudioMicStream,
   applyLowLatencyInboundAudioReceivers,
@@ -105,6 +106,13 @@ function isMicPermissionDeniedError(err: unknown): boolean {
 
 function addLog(msg: string) {
   console.log(msg);
+}
+
+function formatRecordingTime(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 /** ~1s clean sine tone for speaker check (Web Audio API). */
@@ -352,8 +360,12 @@ export default function StudioBridgePage() {
   const [remoteMeterRafKey, setRemoteMeterRafKey] = useState(0);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTimeMs, setRecordingTimeMs] = useState(0);
+  const [recordedBlobUrl, setRecordedBlobUrl] = useState<string | null>(null);
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [collaboratorLeft, setCollaboratorLeft] = useState(false);
+  const [remoteParticipantName, setRemoteParticipantName] = useState<string | null>(null);
   const [connectionLostCountdown, setConnectionLostCountdown] = useState<number | null>(null);
   const [retryInitTick, setRetryInitTick] = useState(0);
   const [user, setUser] = useState<User | null>(null);
@@ -369,6 +381,8 @@ export default function StudioBridgePage() {
   const speakerMutedRef = useRef(false);
   const localMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const localRecorderRef = useRef<TrackRecorder | null>(null);
+  const recordingIntervalRef = useRef<number | null>(null);
   const pingIntervalRef = useRef<number | null>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const mountedRef = useRef(true);
@@ -694,6 +708,70 @@ export default function StudioBridgePage() {
     });
   }, [applyRemotePlaybackSpeakerGain]);
 
+  const clearRecordingInterval = useCallback(() => {
+    if (recordingIntervalRef.current !== null) {
+      clearInterval(recordingIntervalRef.current);
+      recordingIntervalRef.current = null;
+    }
+  }, []);
+
+  const clearRecordedBlobUrl = useCallback(() => {
+    setRecordedBlobUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
+  }, []);
+
+  const startRecordingTimer = useCallback((recorder: TrackRecorder) => {
+    clearRecordingInterval();
+    setRecordingTimeMs(0);
+    recordingIntervalRef.current = window.setInterval(() => {
+      setRecordingTimeMs(Math.max(0, Math.floor(performance.now() - recorder.getTimestamp())));
+    }, 1000);
+  }, [clearRecordingInterval]);
+
+  const startLocalRecording = useCallback(() => {
+    if (isRecording) return;
+    const localStream = localStreamRef.current ?? localMicStream;
+    if (!localStream) return;
+
+    try {
+      const recorder = new TrackRecorder();
+      recorder.start(localStream);
+      localRecorderRef.current = recorder;
+      clearRecordedBlobUrl();
+      startRecordingTimer(recorder);
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Failed to start local recording:", err);
+      clearRecordingInterval();
+      setIsRecording(false);
+    }
+  }, [
+    clearRecordedBlobUrl,
+    clearRecordingInterval,
+    isRecording,
+    localMicStream,
+    startRecordingTimer,
+  ]);
+
+  const stopLocalRecording = useCallback(async () => {
+    const recorder = localRecorderRef.current;
+    if (!recorder) return;
+    clearRecordingInterval();
+    localRecorderRef.current = null;
+    try {
+      const blob = await recorder.stop();
+      clearRecordedBlobUrl();
+      const url = URL.createObjectURL(blob);
+      setRecordedBlobUrl(url);
+    } catch (err) {
+      console.error("Failed to stop local recording:", err);
+    } finally {
+      setIsRecording(false);
+    }
+  }, [clearRecordedBlobUrl, clearRecordingInterval]);
+
   const onEnterStudioClick = useCallback(() => {
     void (async () => {
       try {
@@ -758,6 +836,36 @@ export default function StudioBridgePage() {
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!isRecording) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [isRecording]);
+
+  useEffect(() => {
+    return () => {
+      clearRecordingInterval();
+      if (recordingIntervalRef.current !== null) {
+        clearInterval(recordingIntervalRef.current);
+        recordingIntervalRef.current = null;
+      }
+      if (localRecorderRef.current) {
+        void localRecorderRef.current.stop().catch(() => {});
+        localRecorderRef.current = null;
+      }
+      if (recordedBlobUrl) {
+        URL.revokeObjectURL(recordedBlobUrl);
+      }
+    };
+  }, [clearRecordingInterval, recordedBlobUrl]);
 
   useEffect(() => {
     if (status !== "connected") return;
@@ -837,6 +945,7 @@ export default function StudioBridgePage() {
     historySavedRef.current = false;
     sessionStartedAtRef.current = Date.now();
     setCollaboratorLeft(false);
+    setRemoteParticipantName(null);
     clearLostCountdown();
     setMicSyncTimedOut(false);
     setMicPermissionHint(null);
@@ -910,6 +1019,19 @@ export default function StudioBridgePage() {
             setIsSpeakerMuted(false);
             speakerMutedRef.current = false;
             setConnectionLostCountdown(null);
+            setRemoteParticipantName(null);
+            setIsRecording(false);
+            setRecordingTimeMs(0);
+            setRecordedBlobUrl((prev) => {
+              if (prev) URL.revokeObjectURL(prev);
+              return null;
+            });
+          }
+
+          clearRecordingInterval();
+          if (localRecorderRef.current) {
+            void localRecorderRef.current.stop().catch(() => {});
+            localRecorderRef.current = null;
           }
 
           if (cleanupSessionRef.current) {
@@ -1209,6 +1331,7 @@ export default function StudioBridgePage() {
             addLog("Collaborator LEAVE received");
             clearLostCountdown();
             setCollaboratorLeft(true);
+            setRemoteParticipantName(null);
             setStatus("failed");
             setStatusNote("Collaborator has left the session.");
           })
@@ -1403,8 +1526,15 @@ export default function StudioBridgePage() {
         peer.on("data", (chunk: unknown) => {
           try {
             const text = decodePeerDataChunk(chunk);
-            const msg = JSON.parse(text) as { t?: string; ts?: number };
-            if (msg.t === "ping" && typeof msg.ts === "number") {
+            const msg = JSON.parse(text) as {
+              t?: string;
+              ts?: number;
+              type?: string;
+              name?: string;
+            };
+            if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
+              if (mountedRef.current) setRemoteParticipantName(msg.name.trim());
+            } else if (msg.t === "ping" && typeof msg.ts === "number") {
               peer.send(JSON.stringify({ t: "pong", ts: msg.ts }));
             } else if (msg.t === "pong" && typeof msg.ts === "number" && mountedRef.current) {
               const latency = Math.round(performance.now() - msg.ts);
@@ -1488,6 +1618,16 @@ export default function StudioBridgePage() {
           setError(null);
           setStatus("connected");
           setStatusNote(P2P_CONNECTED_NOTE);
+          try {
+            peer.send(
+              JSON.stringify({
+                type: "presence",
+                name: isHost ? "Host" : "Guest",
+              })
+            );
+          } catch {
+            // Presence payload is best-effort; keep connect flow unchanged on send failures.
+          }
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
             connectTimeout = null;
@@ -1531,6 +1671,7 @@ export default function StudioBridgePage() {
 
         peer.on("close", () => {
           if (!mountedRef.current) return;
+          setRemoteParticipantName(null);
           if (pingIntervalRef.current !== null) {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
@@ -1992,7 +2133,15 @@ export default function StudioBridgePage() {
             >
               {status === "connected" ? (
                 <>
-                  <div className="flex flex-wrap items-center justify-center gap-4 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
+                  <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
+                    <div className="w-full text-center">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                        Participants: {remoteParticipantName ? "2/2" : "1/2"}
+                      </p>
+                      <p className="mt-1 text-xs font-medium text-stone-300">
+                        Remote: {remoteParticipantName ?? "Waiting..."}
+                      </p>
+                    </div>
                     <div className="font-mono text-sm text-stone-200">
                       Ping:{" "}
                       <span
@@ -2025,30 +2174,38 @@ export default function StudioBridgePage() {
                         {inboundPacketLossPercent === null ? "--" : `${inboundPacketLossPercent}%`}
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={toggleMic}
-                      className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
-                      aria-label={isMicMuted ? "Enable microphone" : "Mute microphone"}
-                      aria-pressed={isMicMuted}
-                    >
-                      <span className={`text-sm font-semibold ${isMicMuted ? "text-rose-500" : "text-emerald-400"}`}>
-                        MIC
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={toggleSpeaker}
-                      className="rounded-lg border border-stone-700 bg-stone-900/50 px-3 py-1 transition-colors hover:bg-stone-800"
-                      aria-label={isSpeakerMuted ? "Enable speaker" : "Mute speaker"}
-                      aria-pressed={isSpeakerMuted}
-                    >
-                      <span
-                        className={`text-sm font-semibold ${isSpeakerMuted ? "text-rose-500" : "text-emerald-400"}`}
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={toggleMic}
+                        disabled={!localMicStream}
+                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
+                          isMicMuted
+                            ? "border-orange-500/35 bg-orange-500/10 text-orange-200/90 hover:bg-orange-500/15"
+                            : "border-stone-700 bg-stone-900/50 text-emerald-300 hover:bg-stone-800"
+                        } ${!localMicStream ? "cursor-not-allowed border-stone-800 text-stone-500 hover:bg-stone-900/50" : ""}`}
+                        aria-label={isMicMuted ? "Enable microphone" : "Mute microphone"}
+                        aria-pressed={isMicMuted}
                       >
-                        SPK
-                      </span>
-                    </button>
+                        {isMicMuted ? <MicOff className="h-3.5 w-3.5" aria-hidden /> : <Mic className="h-3.5 w-3.5" aria-hidden />}
+                        <span>Mic</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={toggleSpeaker}
+                        disabled={!remoteStream}
+                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
+                          isSpeakerMuted
+                            ? "border-stone-700 bg-stone-900/50 text-stone-300 hover:bg-stone-800"
+                            : "border-emerald-500/35 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
+                        } ${!remoteStream ? "cursor-not-allowed border-stone-800 text-stone-500 hover:bg-stone-900/50" : ""}`}
+                        aria-label={isSpeakerMuted ? "Enable speaker" : "Mute speaker"}
+                        aria-pressed={isSpeakerMuted}
+                      >
+                        {isSpeakerMuted ? <VolumeX className="h-3.5 w-3.5" aria-hidden /> : <Volume2 className="h-3.5 w-3.5" aria-hidden />}
+                        <span>Spk</span>
+                      </button>
+                    </div>
                   </div>
                   {highPingTipOpen ? (
                     <motion.div
@@ -2088,6 +2245,55 @@ export default function StudioBridgePage() {
                       </p>
                     </div>
                   ) : null}
+                  <div className="rounded-xl border border-stone-800/90 bg-stone-950/40 px-4 py-3">
+                    <p className="text-center text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                      Local Track Recorder
+                    </p>
+                    {!isRecording && !recordedBlobUrl ? (
+                      <motion.button
+                        type="button"
+                        onClick={startLocalRecording}
+                        disabled={!localMicStream}
+                        whileTap={localMicStream ? { scale: 0.97 } : undefined}
+                        className={`mt-3 w-full rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${
+                          localMicStream
+                            ? "border-orange-500/35 bg-gradient-to-r from-orange-500/12 to-emerald-500/12 text-stone-100 hover:from-orange-500/20 hover:to-emerald-500/20"
+                            : "cursor-not-allowed border-stone-700 bg-stone-900/60 text-stone-500"
+                        }`}
+                      >
+                        Start Recording
+                      </motion.button>
+                    ) : null}
+                    {isRecording ? (
+                      <motion.button
+                        type="button"
+                        onClick={() => void stopLocalRecording()}
+                        whileTap={{ scale: 0.97 }}
+                        className="mt-3 w-full rounded-xl border border-red-500/45 bg-gradient-to-r from-red-600/80 to-orange-600/80 px-4 py-2.5 text-sm font-semibold text-white transition hover:from-red-500 hover:to-orange-500"
+                      >
+                        Stop Recording ({formatRecordingTime(recordingTimeMs)})
+                      </motion.button>
+                    ) : null}
+                    {!isRecording && recordedBlobUrl ? (
+                      <div className="mt-3 flex items-center gap-2">
+                        <a
+                          href={recordedBlobUrl}
+                          download="my-track.webm"
+                          className="flex-1 rounded-xl border border-emerald-500/35 bg-gradient-to-r from-emerald-500/15 to-stone-700/20 px-3 py-2 text-center text-sm font-semibold text-emerald-200 transition hover:from-emerald-500/25 hover:to-stone-700/30"
+                        >
+                          Download Track
+                        </a>
+                        <motion.button
+                          type="button"
+                          onClick={clearRecordedBlobUrl}
+                          whileTap={{ scale: 0.97 }}
+                          className="rounded-xl border border-stone-700 bg-stone-900/50 px-3 py-2 text-sm font-semibold text-stone-200 transition hover:bg-stone-800"
+                        >
+                          Record New Track
+                        </motion.button>
+                      </div>
+                    ) : null}
+                  </div>
                 </>
               ) : null}
 
