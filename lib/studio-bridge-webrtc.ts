@@ -143,6 +143,17 @@ export async function fetchTurnCredentials(): Promise<RTCIceServer[]> {
         )
       ),
     });
+    if (
+      !data.iceServers ||
+      !Array.isArray(data.iceServers) ||
+      data.iceServers.length === 0
+    ) {
+      console.error(
+        "[Kite] TURN response missing or empty iceServers, using fallback:",
+        data
+      );
+      return STUDIO_ICE_SERVERS_FALLBACK;
+    }
     return data.iceServers;
   } catch (err) {
     console.error("[Kite] TURN fetch failed, using STUN only:", err);
