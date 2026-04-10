@@ -366,6 +366,7 @@ export default function StudioBridgePage() {
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [collaboratorLeft, setCollaboratorLeft] = useState(false);
   const [remoteParticipantName, setRemoteParticipantName] = useState<string | null>(null);
+  const [lastDepartedParticipantName, setLastDepartedParticipantName] = useState<string | null>(null);
   const [connectionLostCountdown, setConnectionLostCountdown] = useState<number | null>(null);
   const [retryInitTick, setRetryInitTick] = useState(0);
   const [user, setUser] = useState<User | null>(null);
@@ -946,6 +947,7 @@ export default function StudioBridgePage() {
     sessionStartedAtRef.current = Date.now();
     setCollaboratorLeft(false);
     setRemoteParticipantName(null);
+    setLastDepartedParticipantName(null);
     clearLostCountdown();
     setMicSyncTimedOut(false);
     setMicPermissionHint(null);
@@ -1327,13 +1329,15 @@ export default function StudioBridgePage() {
             if (!msg || msg.type !== "LEAVE") return;
             if (msg.room !== sessionId.toUpperCase()) return;
             if (msg.from === activeRole) return;
+            const departedName = remoteParticipantName || "A participant";
             leaveSignalReceivedRef.current = true;
             addLog("Collaborator LEAVE received");
             clearLostCountdown();
             setCollaboratorLeft(true);
+            setLastDepartedParticipantName(departedName);
             setRemoteParticipantName(null);
             setStatus("failed");
-            setStatusNote("Collaborator has left the session.");
+            setStatusNote(`${departedName} left the session.`);
           })
           .on(
             "postgres_changes",
@@ -1399,6 +1403,7 @@ export default function StudioBridgePage() {
             forceMusicModeOpus(sdp, { isSafariWebKit })
         });
         peerRef.current = peer;
+        let presenceNotified = false;
 
         const scheduleConnectTimeout = (delayMs: number) => {
           if (connectTimeout !== null) {
@@ -1533,7 +1538,14 @@ export default function StudioBridgePage() {
               name?: string;
             };
             if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
-              if (mountedRef.current) setRemoteParticipantName(msg.name.trim());
+              if (mountedRef.current) {
+                const incomingName = msg.name.trim();
+                setRemoteParticipantName(incomingName);
+                if (!presenceNotified) {
+                  setStatusNote(`${incomingName} entered the session.`);
+                  presenceNotified = true;
+                }
+              }
             } else if (msg.t === "ping" && typeof msg.ts === "number") {
               peer.send(JSON.stringify({ t: "pong", ts: msg.ts }));
             } else if (msg.t === "pong" && typeof msg.ts === "number" && mountedRef.current) {
@@ -2326,7 +2338,9 @@ export default function StudioBridgePage() {
               animate={{ opacity: 1, y: 0 }}
               className="mt-6 rounded-xl border border-orange-500/25 bg-stone-900/50 px-4 py-4 text-center"
             >
-              <p className="text-sm font-semibold text-stone-200">Collaborator has left the session.</p>
+              <p className="text-sm font-semibold text-stone-200">
+                {(lastDepartedParticipantName ?? "A participant")} left the session.
+              </p>
               <motion.button
                 type="button"
                 onClick={returnToLobby}
