@@ -154,7 +154,28 @@ export async function fetchTurnCredentials(): Promise<RTCIceServer[]> {
       );
       return STUDIO_ICE_SERVERS_FALLBACK;
     }
-    return data.iceServers;
+    const filteredServers = data.iceServers
+      .map((server: RTCIceServer) => {
+        if (Array.isArray(server.urls)) {
+          return {
+            ...server,
+            urls: server.urls.filter(
+              (url: string) =>
+                !(url.startsWith("turn:") && url.includes("transport=tcp"))
+            ),
+          };
+        }
+        if (
+          typeof server.urls === "string" &&
+          server.urls.startsWith("turn:") &&
+          server.urls.includes("transport=tcp")
+        ) {
+          return null;
+        }
+        return server;
+      })
+      .filter(Boolean) as RTCIceServer[];
+    return filteredServers;
   } catch (err) {
     console.error("[Kite] TURN fetch failed, using STUN only:", err);
     return STUDIO_ICE_SERVERS_FALLBACK;
