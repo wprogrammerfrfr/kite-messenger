@@ -46,6 +46,12 @@ export function forceMusicModeOpus(
         updated += ";maxplaybackrate=48000";
       }
 
+      if (/usedtx=/i.test(updated)) {
+        updated = updated.replace(/usedtx=\d+/i, "usedtx=0");
+      } else {
+        updated += ";usedtx=0";
+      }
+
       if (safariStereo) {
         updated = applySafariOpusStereoOffToFmtpParams(updated);
       }
@@ -57,7 +63,7 @@ export function forceMusicModeOpus(
     const rtpLine = sdp.match(new RegExp(`a=rtpmap:${id}[^\\r\\n]*\\r?\\n`, "i"))?.[0];
     if (!rtpLine) return sdp;
     let newLine =
-      `a=fmtp:${id} useinbandfec=1;maxaveragebitrate=510000;maxplaybackrate=48000`;
+      `a=fmtp:${id} useinbandfec=1;maxaveragebitrate=510000;maxplaybackrate=48000;usedtx=0`;
     if (safariStereo) {
       newLine += ";stereo=0;sprop-stereo=0";
     }
