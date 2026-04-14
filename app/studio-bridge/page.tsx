@@ -1362,6 +1362,7 @@ export default function StudioBridgePage() {
                   appliedRemoteSignalRef.current = true;
                   addLog("Answer received");
                   peer.signal(nextRow.answer);
+                  scheduleConnectTimeout(60000);
                   setStatusNote("Answer received. Negotiating...");
                 }
               } else if (
@@ -1373,6 +1374,7 @@ export default function StudioBridgePage() {
                 appliedRemoteSignalRef.current = true;
                 addLog("Offer received");
                 peer.signal(nextRow.offer);
+                scheduleConnectTimeout(60000);
                 setStatusNote("Offer received. Creating answer...");
               }
 
@@ -1461,7 +1463,7 @@ export default function StudioBridgePage() {
         };
 
         // Start timeout window (with one automatic extension if ICE is still gathering).
-        scheduleConnectTimeout(15000);
+        scheduleConnectTimeout(60000);
 
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {

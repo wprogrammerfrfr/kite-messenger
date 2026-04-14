@@ -130,6 +130,70 @@ export function decodePeerDataChunk(chunk: unknown): string {
   return String(chunk);
 }
 
+/** Lower number = earlier in the candidate URL list (TURN over 443 / TLS first, then TCP relay). */
+function studioIceUrlSortPriority(url: string): number {
+  const lower = url.toLowerCase();
+  const base = lower.split("?")[0].split("#")[0];
+  if (lower.startsWith("turns:") && /:443$/.test(base)) return 0;
+  if (lower.startsWith("turns:")) return 1;
+  if (lower.startsWith("turn:") && lower.includes("transport=tcp")) return 2;
+  return 3;
+}
+
+function sortAndDedupeIceUrls(urls: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const u of urls) {
+    if (typeof u !== "string" || u.length === 0) continue;
+    if (seen.has(u)) continue;
+    seen.add(u);
+    unique.push(u);
+  }
+  unique.sort((a, b) => {
+    const pa = studioIceUrlSortPriority(a);
+    const pb = studioIceUrlSortPriority(b);
+    if (pa !== pb) return pa - pb;
+    return a.localeCompare(b);
+  });
+  return unique;
+}
+
+function normalizeFetchedIceServers(raw: unknown[]): RTCIceServer[] {
+  const out: RTCIceServer[] = [];
+  const seenServerKeys = new Set<string>();
+
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const server = entry as RTCIceServer;
+    const rawUrls = server.urls;
+    let urlList: string[];
+    if (Array.isArray(rawUrls)) {
+      urlList = rawUrls.filter((u): u is string => typeof u === "string");
+    } else if (typeof rawUrls === "string") {
+      urlList = [rawUrls];
+    } else {
+      continue;
+    }
+    const sortedUrls = sortAndDedupeIceUrls(urlList);
+    if (sortedUrls.length === 0) continue;
+
+    const normalized: RTCIceServer = {
+      ...server,
+      urls: sortedUrls.length === 1 ? sortedUrls[0]! : sortedUrls,
+    };
+
+    const urlsKey = JSON.stringify(
+      Array.isArray(normalized.urls) ? normalized.urls : [normalized.urls]
+    );
+    const serverKey = `${urlsKey}|${normalized.username ?? ""}|${normalized.credential ?? ""}`;
+    if (seenServerKeys.has(serverKey)) continue;
+    seenServerKeys.add(serverKey);
+
+    out.push(normalized);
+  }
+  return out;
+}
+
 export async function fetchTurnCredentials(): Promise<RTCIceServer[]> {
   try {
     const res = await fetch("/api/turn-credentials");
@@ -154,28 +218,7 @@ export async function fetchTurnCredentials(): Promise<RTCIceServer[]> {
       );
       return STUDIO_ICE_SERVERS_FALLBACK;
     }
-    const filteredServers = data.iceServers
-      .map((server: RTCIceServer) => {
-        if (Array.isArray(server.urls)) {
-          return {
-            ...server,
-            urls: server.urls.filter(
-              (url: string) =>
-                !(url.startsWith("turn:") && url.includes("transport=tcp"))
-            ),
-          };
-        }
-        if (
-          typeof server.urls === "string" &&
-          server.urls.startsWith("turn:") &&
-          server.urls.includes("transport=tcp")
-        ) {
-          return null;
-        }
-        return server;
-      })
-      .filter(Boolean) as RTCIceServer[];
-    return filteredServers;
+    return normalizeFetchedIceServers(data.iceServers);
   } catch (err) {
     console.error("[Kite] TURN fetch failed, using STUN only:", err);
     return STUDIO_ICE_SERVERS_FALLBACK;
