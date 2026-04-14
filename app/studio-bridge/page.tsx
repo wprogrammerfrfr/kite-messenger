@@ -1399,10 +1399,38 @@ export default function StudioBridgePage() {
           trickle: true,
           stream: mediaStream,
           config: peerConfig,
-          sdpTransform: (sdp: string) =>
-            forceMusicModeOpus(sdp, { isSafariWebKit })
+          sdpTransform: (sdp) => {
+            console.log("[SDP-IN]", sdp);
+            try {
+              const result = forceMusicModeOpus(sdp);
+              console.log("[SDP-OUT]", result);
+              if (!result || typeof result !== "string") {
+                console.error("[SDP-TRANSFORM] returned invalid value:", result);
+              }
+              return result;
+            } catch (err) {
+              console.error("[SDP-TRANSFORM] threw:", err);
+              return sdp;
+            }
+          },
         });
         peerRef.current = peer;
+        peer.on("error", (err) => {
+          console.error("[PEER-ERROR]", err);
+        });
+        // Attach raw RTCPeerConnection diagnostic listeners
+        if ((peer as any)._pc) {
+          const pc = (peer as any)._pc;
+          pc.addEventListener("icegatheringstatechange", () =>
+            console.log("[ICE-GATHER]", pc.iceGatheringState)
+          );
+          pc.addEventListener("iceconnectionstatechange", () =>
+            console.log("[ICE-CONN]", pc.iceConnectionState)
+          );
+          pc.addEventListener("signalingstatechange", () =>
+            console.log("[SIG-STATE]", pc.signalingState)
+          );
+        }
         let presenceNotified = false;
 
         const scheduleConnectTimeout = (delayMs: number) => {
