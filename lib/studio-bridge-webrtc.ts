@@ -224,3 +224,41 @@ export async function fetchTurnCredentials(): Promise<RTCIceServer[]> {
     return STUDIO_ICE_SERVERS_FALLBACK;
   }
 }
+
+export function buildPeerConfig(
+  iceServers: RTCIceServer[],
+  forceRelay: boolean
+): RTCConfiguration {
+  if (forceRelay) {
+    const tlsOnly = iceServers
+      .map((server) => {
+        const urls = (
+          Array.isArray(server.urls) ? server.urls : [server.urls]
+        ).filter((url) => typeof url === 'string' && url.startsWith("turns:"));
+        return urls.length > 0 ? ({ ...server, urls } as RTCIceServer) : null;
+      })
+      .filter((s): s is RTCIceServer => s !== null);
+
+    if (tlsOnly.length === 0) {
+      console.error(
+        "[buildPeerConfig] forceRelay=true but no turns: URLs found. Connection will fail."
+      );
+    }
+
+    return {
+      iceServers: tlsOnly,
+      iceTransportPolicy: "relay",
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
+      iceCandidatePoolSize: 2,
+    };
+  }
+
+  return {
+    iceServers,
+    iceTransportPolicy: "all",
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+    iceCandidatePoolSize: 10,
+  };
+}

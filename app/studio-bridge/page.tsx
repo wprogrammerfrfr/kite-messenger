@@ -13,7 +13,7 @@ import {
   applyLowLatencyInboundAudioReceivers,
   decodePeerDataChunk,
   parseInboundAudioPacketLoss,
-  STUDIO_PEER_CONNECTION_CONFIG,
+  buildPeerConfig,
   fetchTurnCredentials,
 } from "@/lib/studio-bridge-webrtc";
 import { forceMusicModeOpus } from '@/lib/sdp-utils'
@@ -1098,6 +1098,7 @@ export default function StudioBridgePage() {
         if (cancelled || !mountedRef.current) return;
 
         const url = new URL(window.location.href);
+        const forceRelay = url.searchParams.get("relay") === "true";
         // Host only when `room` query is absent. `?room=` (empty) is a guest URL with invalid code.
         const roomParamRaw = url.searchParams.get("room");
         const isHost = roomParamRaw === null;
@@ -1392,10 +1393,7 @@ export default function StudioBridgePage() {
         const lowLatencyReceiverOpts = { isSafariWebKit };
 
         const iceServers = await fetchTurnCredentials();
-        const peerConfig = {
-          ...STUDIO_PEER_CONNECTION_CONFIG,
-          iceServers,
-        };
+        const peerConfig = buildPeerConfig(iceServers, forceRelay);
         const peer = new Peer({
           initiator: isHost,
           trickle: true,

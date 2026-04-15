@@ -27,18 +27,6 @@ const staticCache = new CacheFirst({
   ],
 });
 
-/** Supabase REST, Realtime, Auth — prefer network; fall back when offline. */
-const supabaseNetworkFirst = new NetworkFirst({
-  cacheName: "kite-supabase-network-first",
-  networkTimeoutSeconds: 25,
-  plugins: [
-    new ExpirationPlugin({
-      maxEntries: 80,
-      maxAgeSeconds: 60 * 10,
-    }),
-  ],
-});
-
 const serwist = new Serwist({
   precacheEntries: self.__SW_MANIFEST,
   skipWaiting: true,
@@ -47,10 +35,11 @@ const serwist = new Serwist({
   runtimeCaching: [
     {
       matcher: ({ url }) =>
-        /supabase\.co$/i.test(url.hostname) ||
+        url.hostname.endsWith(".supabase.co") ||
+        url.hostname.endsWith(".supabase.in") ||
         url.pathname.includes("/rest/v1/") ||
         url.pathname.includes("/realtime/"),
-      handler: supabaseNetworkFirst,
+      handler: new NetworkOnly(),
     },
     {
       matcher: ({ url }) => url.pathname.includes("/studio-bridge"),
