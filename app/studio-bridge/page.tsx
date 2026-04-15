@@ -17,6 +17,7 @@ import {
   buildPeerConfig,
   fetchTurnCredentials,
 } from "@/lib/studio-bridge-webrtc";
+import { createMetronomeScheduler, type MetronomeTick } from "@/lib/studio-metronome-schedule";
 import { forceMusicModeOpus } from '@/lib/sdp-utils'
 
 type BridgeStatus = "connecting" | "connected" | "failed";
@@ -225,7 +226,6 @@ function MicLevelBars({
     return () => {
       stopped = true;
       cancelAnimationFrame(raf);
-      void ctx?.close();
     };
   }, [stream, onLevel]);
 
@@ -341,6 +341,9 @@ export default function StudioBridgePage() {
   const [inboundPacketLossPercent, setInboundPacketLossPercent] = useState<number | null>(null);
   /** One-way network latency estimate from ICE RTT (`currentRoundTripTime / 2`). */
   const [calculatedDelayMs, setCalculatedDelayMs] = useState<number | null>(null);
+  const [kiteSyncEnabled, setKiteSyncEnabled] = useState(false);
+  const [metronomeBpm, setMetronomeBpm] = useState(120);
+  const [beatsPerInterval, setBeatsPerInterval] = useState(16);
   const [highPingTipOpen, setHighPingTipOpen] = useState(false);
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [micPermissionDenied, setMicPermissionDenied] = useState(false);
@@ -374,6 +377,7 @@ export default function StudioBridgePage() {
   const [retryInitTick, setRetryInitTick] = useState(0);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [audioContextReady, setAudioContextReady] = useState(false);
 
   const micDeniedThisInitRef = useRef(false);
 
@@ -416,6 +420,9 @@ export default function StudioBridgePage() {
   /** Zero-gain sink so the analyser branch is pulled by the audio engine without audible bleed. */
   const remotePlaybackMeterSinkRef = useRef<GainNode | null>(null);
   const remotePlaybackCompressorRef = useRef<DynamicsCompressorNode | null>(null);
+  const metronomeGainRef = useRef<GainNode | null>(null);
+  const metronomeSchedulerRef = useRef<ReturnType<typeof createMetronomeScheduler> | null>(null);
+  const metronomeIntervalRef = useRef<number | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
   const calculatedDelayMsRef = useRef<number | null>(null);
@@ -449,6 +456,11 @@ export default function StudioBridgePage() {
     }
     try {
       remotePlaybackGainRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      metronomeGainRef.current?.disconnect();
     } catch {
       /* ignore */
     }
@@ -759,6 +771,178 @@ export default function StudioBridgePage() {
     }
   }, []);
 
+  /**
+   * Single long-lived studio context for this page lifecycle.
+   * Keeping creation centralized guarantees future schedulers always reference the same clock.
+   */
+  const ensureStudioAudioContext = useCallback((): AudioContext => {
+    let ctx = studioAudioContextRef.current;
+    if (ctx?.state === "closed") {
+      studioAudioContextRef.current = null;
+      ctx = null;
+      setAudioContextReady(false);
+    }
+    if (!ctx) {
+      ctx = createStudioAudioContext();
+      studioAudioContextRef.current = ctx;
+      if (ctx.state === "running") {
+        setAudioContextReady(true);
+      } else {
+        void ctx
+          .resume()
+          .then(() => setAudioContextReady(true))
+          .catch(() => {});
+      }
+      return ctx;
+    }
+    if (ctx.state === "running") {
+      setAudioContextReady(true);
+    } else {
+      void ctx
+        .resume()
+        .then(() => setAudioContextReady(true))
+        .catch(() => {});
+    }
+    return ctx;
+  }, []);
+
+  /**
+   * Parallel output branch for precision click-track playback.
+   * This path is isolated from remote stream and local recorder chains.
+   */
+  const ensureMetronomeGainNode = useCallback((ctx: AudioContext): GainNode => {
+    let node = metronomeGainRef.current;
+    if (!node) {
+      node = ctx.createGain();
+      // Safety default: no metronome output until Kite Sync is explicitly enabled.
+      node.gain.value = 0;
+      node.connect(ctx.destination);
+      metronomeGainRef.current = node;
+    }
+    console.log("Metronome Gain Node status:", node);
+    return node;
+  }, []);
+
+  const playMetronomeClick = useCallback(
+    (ctx: AudioContext, time: number, tick: MetronomeTick) => {
+      if (!ctx || ctx.state === "closed") return;
+      if (ctx.state === "suspended") void ctx.resume();
+      console.log("🎵 TICK scheduled for:", time, "Downbeat:", tick.isAccent);
+      console.log("DEBUG: Creating Oscillator at time:", time);
+      const startAt = Math.max(time, ctx.currentTime);
+      const osc = ctx.createOscillator();
+      const durationSec = 0.1;
+      const stopAt = startAt + durationSec;
+      osc.type = "sine";
+      const frequency =
+        tick.beatIndex === 0 ? 1760 : tick.beatIndex % 4 === 0 ? 880 : 440;
+      osc.frequency.setValueAtTime(frequency, startAt);
+      osc.connect(ctx.destination);
+      osc.start(startAt);
+      osc.stop(stopAt);
+      osc.addEventListener("ended", () => {
+        try {
+          osc.disconnect();
+        } catch {
+          /* ignore */
+        }
+      });
+    },
+    []
+  );
+
+  useEffect(() => {
+    const gainNode = metronomeGainRef.current;
+    if (!gainNode) return;
+    gainNode.gain.value = kiteSyncEnabled ? 0.8 : 0;
+  }, [kiteSyncEnabled]);
+
+  useEffect(() => {
+    console.log("Metronome Effect running. Enabled:", kiteSyncEnabled, "Context Ready:", audioContextReady);
+    if (!kiteSyncEnabled) {
+      if (metronomeIntervalRef.current !== null) {
+        clearInterval(metronomeIntervalRef.current);
+        metronomeIntervalRef.current = null;
+      }
+      metronomeSchedulerRef.current?.stop();
+      metronomeSchedulerRef.current = null;
+      return;
+    }
+
+    const ctx = studioAudioContextRef.current ?? ensureStudioAudioContext();
+    if (!ctx) return;
+    if (!metronomeGainRef.current) {
+      console.log("Metronome gain ref null, attempting to ensure node...");
+      ensureMetronomeGainNode(ctx);
+    }
+    if (!metronomeGainRef.current) return;
+    if (metronomeIntervalRef.current !== null && metronomeSchedulerRef.current) return;
+
+    const scheduler = createMetronomeScheduler(ctx, {
+      bpm: metronomeBpm,
+      beatsPerInterval,
+      subdivision: 1,
+      lookaheadMs: 25,
+      scheduleAheadSec: 0.12,
+      startAtSec: ctx.currentTime + 0.01,
+    });
+    scheduler.start();
+    metronomeSchedulerRef.current = scheduler;
+    if (metronomeGainRef.current) {
+      metronomeGainRef.current.gain.value = 1.0;
+      console.log("VOLUME FORCED TO 1.0");
+    }
+
+    const pumpScheduler = () => {
+      if (studioAudioContextRef.current?.state === "closed") {
+        console.warn("⚠️ AudioContext was closed. Re-initializing...");
+        ensureStudioAudioContext();
+      }
+      const activeScheduler = metronomeSchedulerRef.current;
+      const activeCtx = studioAudioContextRef.current;
+      if (!activeScheduler || !activeCtx || activeCtx.state !== "running") return;
+      const nowSec = activeCtx.currentTime;
+      console.log(
+        "DEBUG: Scheduler State - NextNoteTime:",
+        (activeScheduler as { getNextNoteTime?: () => number }).getNextNoteTime?.(),
+        "NowSec + Lookahead:",
+        nowSec + 0.12
+      );
+      const ticks = activeScheduler.consumeDueTicks(nowSec);
+      console.log("DEBUG: Ticks Generated:", ticks.length);
+      for (const tick of ticks) {
+        playMetronomeClick(activeCtx, tick.atSec, tick);
+      }
+    };
+
+    pumpScheduler();
+    if (ctx.state !== "running") void ctx.resume();
+    metronomeIntervalRef.current = window.setInterval(
+      pumpScheduler,
+      scheduler.getLookaheadMs()
+    );
+  }, [
+    beatsPerInterval,
+    kiteSyncEnabled,
+    metronomeBpm,
+    ensureStudioAudioContext,
+    ensureMetronomeGainNode,
+    playMetronomeClick,
+    audioContextReady,
+    metronomeGainRef.current,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (metronomeIntervalRef.current !== null) {
+        clearInterval(metronomeIntervalRef.current);
+        metronomeIntervalRef.current = null;
+      }
+      metronomeSchedulerRef.current?.stop();
+      metronomeSchedulerRef.current = null;
+    };
+  }, []);
+
   const clearRecordedBlobUrl = useCallback(() => {
     setRecordedBlobUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
@@ -819,12 +1003,9 @@ export default function StudioBridgePage() {
   const onEnterStudioClick = useCallback(() => {
     void (async () => {
       try {
-        let ctx = studioAudioContextRef.current;
-        if (!ctx) {
-          ctx = createStudioAudioContext();
-          studioAudioContextRef.current = ctx;
-        }
+        const ctx = ensureStudioAudioContext();
         await ctx.resume().catch(() => {});
+        ensureMetronomeGainNode(ctx);
         const stream = remoteStreamRef.current;
         if (stream) {
           buildRemotePlaybackGraph(stream);
@@ -834,7 +1015,7 @@ export default function StudioBridgePage() {
       }
       setEnteredStudio(true);
     })();
-  }, [buildRemotePlaybackGraph]);
+  }, [buildRemotePlaybackGraph, ensureMetronomeGainNode, ensureStudioAudioContext]);
 
   const returnToLobby = useCallback(() => {
     setConfirmExitOpen(true);
@@ -1069,6 +1250,7 @@ export default function StudioBridgePage() {
             setRemoteParticipantName(null);
             setIsRecording(false);
             setRecordingTimeMs(0);
+            setKiteSyncEnabled(false);
             setRecordedBlobUrl((prev) => {
               if (prev) URL.revokeObjectURL(prev);
               return null;
@@ -2274,6 +2456,75 @@ export default function StudioBridgePage() {
                       >
                         {calculatedDelayMs === null ? "-- ms" : `${calculatedDelayMs} ms`}
                       </span>
+                    </div>
+                    <div className="w-full rounded-lg border border-stone-800/80 bg-stone-900/40 px-3 py-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                        Kite Sync
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setKiteSyncEnabled((prev) => {
+                              console.log("Kite Sync Toggle Clicked. New State:", !prev);
+                              return !prev;
+                            })
+                          }
+                          className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                            kiteSyncEnabled
+                              ? "border-emerald-500/40 bg-emerald-500/12 text-emerald-200 hover:bg-emerald-500/18"
+                              : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+                          }`}
+                          aria-pressed={kiteSyncEnabled}
+                        >
+                          {kiteSyncEnabled ? "Enabled" : "Disabled"}
+                        </button>
+                        {studioAudioContextRef.current?.state !== "running" ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void studioAudioContextRef.current
+                                ?.resume()
+                                .then(() => setAudioContextReady(true));
+                            }}
+                            className="rounded-md border border-orange-500/35 bg-orange-500/12 px-2.5 py-1 text-[11px] font-semibold text-orange-200 transition-colors hover:bg-orange-500/18"
+                          >
+                            🔊 Resume Audio
+                          </button>
+                        ) : null}
+                        <label className="flex items-center gap-1 text-[11px] text-stone-300">
+                          <span className="uppercase tracking-wider text-stone-500">BPM</span>
+                          <input
+                            type="number"
+                            min={40}
+                            max={240}
+                            value={metronomeBpm}
+                            onChange={(e) => {
+                              const next = Number(e.target.value);
+                              if (!Number.isFinite(next)) return;
+                              setMetronomeBpm(Math.max(40, Math.min(240, Math.round(next))));
+                            }}
+                            className="w-16 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="flex items-center gap-1 text-[11px] text-stone-300">
+                          <span className="uppercase tracking-wider text-stone-500">BPI</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={64}
+                            value={beatsPerInterval}
+                            onChange={(e) => {
+                              const next = Number(e.target.value);
+                              if (!Number.isFinite(next)) return;
+                              setBeatsPerInterval(Math.max(1, Math.min(64, Math.round(next))));
+                            }}
+                            className="w-14 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
+                            inputMode="numeric"
+                          />
+                        </label>
+                      </div>
                     </div>
                     <div className="ml-auto flex items-center gap-1.5">
                       <button
