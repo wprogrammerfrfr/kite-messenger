@@ -12,6 +12,7 @@ import {
   acquireStudioMicStream,
   applyLowLatencyInboundAudioReceivers,
   decodePeerDataChunk,
+  parseSelectedCandidatePairRttMs,
   parseInboundAudioPacketLoss,
   buildPeerConfig,
   fetchTurnCredentials,
@@ -338,6 +339,8 @@ export default function StudioBridgePage() {
   const [pingMs, setPingMs] = useState<number | null>(null);
   /** Inbound audio loss ratio as 0–100 for display (`getStats` while connected). */
   const [inboundPacketLossPercent, setInboundPacketLossPercent] = useState<number | null>(null);
+  /** One-way network latency estimate from ICE RTT (`currentRoundTripTime / 2`). */
+  const [calculatedDelayMs, setCalculatedDelayMs] = useState<number | null>(null);
   const [highPingTipOpen, setHighPingTipOpen] = useState(false);
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [micPermissionDenied, setMicPermissionDenied] = useState(false);
@@ -407,6 +410,7 @@ export default function StudioBridgePage() {
   /** Lazily created; resumed on "Enter Studio" so Safari unlocks audio on a user gesture. */
   const studioAudioContextRef = useRef<AudioContext | null>(null);
   const remotePlaybackSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const remotePlaybackDelayRef = useRef<DelayNode | null>(null);
   const remotePlaybackGainRef = useRef<GainNode | null>(null);
   const remotePlaybackAnalyserRef = useRef<AnalyserNode | null>(null);
   /** Zero-gain sink so the analyser branch is pulled by the audio engine without audible bleed. */
@@ -414,6 +418,7 @@ export default function StudioBridgePage() {
   const remotePlaybackCompressorRef = useRef<DynamicsCompressorNode | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
+  const calculatedDelayMsRef = useRef<number | null>(null);
 
   const teardownRemotePlaybackGraph = useCallback(() => {
     setRemoteMeterTapActive(false);
@@ -424,6 +429,11 @@ export default function StudioBridgePage() {
     }
     try {
       remotePlaybackAnalyserRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      remotePlaybackDelayRef.current?.disconnect();
     } catch {
       /* ignore */
     }
@@ -446,6 +456,7 @@ export default function StudioBridgePage() {
     remotePlaybackAnalyserRef.current = null;
     remotePlaybackCompressorRef.current = null;
     remotePlaybackSourceRef.current = null;
+    remotePlaybackDelayRef.current = null;
     remotePlaybackGainRef.current = null;
     setRemoteMeterRafKey((k) => k + 1);
   }, []);
@@ -462,9 +473,12 @@ export default function StudioBridgePage() {
       if (!ctx) return;
       teardownRemotePlaybackGraph();
       const source = ctx.createMediaStreamSource(stream);
+      const delayNode = ctx.createDelay(5);
+      delayNode.delayTime.value = 0; // MUST remain 0 for real-time jamming
       const gain = ctx.createGain();
       gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
-      source.connect(gain);
+      source.connect(delayNode);
+      delayNode.connect(gain);
       const compressor = ctx.createDynamicsCompressor();
       compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
       compressor.knee.value      = REMOTE_COMPRESSOR_KNEE;
@@ -483,6 +497,7 @@ export default function StudioBridgePage() {
       analyser.connect(silentGain);
       silentGain.connect(ctx.destination);
       remotePlaybackSourceRef.current = source;
+      remotePlaybackDelayRef.current = delayNode;
       remotePlaybackGainRef.current = gain;
       remotePlaybackAnalyserRef.current = analyser;
       remotePlaybackMeterSinkRef.current = silentGain;
@@ -567,6 +582,8 @@ export default function StudioBridgePage() {
   useEffect(() => {
     if (status !== "connected") {
       setInboundPacketLossPercent(null);
+      setCalculatedDelayMs(null);
+      calculatedDelayMsRef.current = null;
       return;
     }
     const isSafariWebKit = isStudioSafariWebKitEngine();
@@ -577,6 +594,32 @@ export default function StudioBridgePage() {
         .getStats()
         .then((stats) => {
           if (!mountedRef.current) return;
+          const parsedRtt = parseSelectedCandidatePairRttMs(stats);
+          if (parsedRtt === null) {
+            setCalculatedDelayMs(null);
+            calculatedDelayMsRef.current = null;
+          } else {
+            // One-way transport delay estimate for alignment/compensation engines.
+            const oneWayDelayMs = Math.max(
+              0,
+              Math.min(2000, Math.round((parsedRtt.rttMs / 2) * 10) / 10)
+            );
+            setCalculatedDelayMs(oneWayDelayMs);
+            calculatedDelayMsRef.current = oneWayDelayMs;
+            const delayNode = remotePlaybackDelayRef.current;
+            const ctx = studioAudioContextRef.current;
+            if (delayNode && ctx) {
+              const nextDelaySeconds = Math.max(
+                0,
+                Math.min(5, oneWayDelayMs / 1000)
+              );
+              delayNode.delayTime.setTargetAtTime(
+                nextDelaySeconds,
+                ctx.currentTime,
+                0.08
+              );
+            }
+          }
           const parsed = parseInboundAudioPacketLoss(stats);
           if (parsed === null) {
             setInboundPacketLossPercent(null);
@@ -973,6 +1016,8 @@ export default function StudioBridgePage() {
         try {
           setPingMs(null);
           setInboundPacketLossPercent(null);
+          setCalculatedDelayMs(null);
+          calculatedDelayMsRef.current = null;
           setHighPingTipOpen(false);
           clearLostCountdown();
           if (connectTimeout !== null) {
@@ -2212,6 +2257,22 @@ export default function StudioBridgePage() {
                         }`}
                       >
                         {inboundPacketLossPercent === null ? "--" : `${inboundPacketLossPercent}%`}
+                      </span>
+                    </div>
+                    <div className="font-mono text-sm text-stone-200">
+                      Delay:{" "}
+                      <span
+                        className={`font-mono ${
+                          calculatedDelayMs === null
+                            ? "text-gray-400"
+                            : calculatedDelayMs < 20
+                              ? "text-emerald-400"
+                              : calculatedDelayMs < 50
+                                ? "text-orange-400"
+                                : "text-red-500"
+                        }`}
+                      >
+                        {calculatedDelayMs === null ? "-- ms" : `${calculatedDelayMs} ms`}
                       </span>
                     </div>
                     <div className="ml-auto flex items-center gap-1.5">

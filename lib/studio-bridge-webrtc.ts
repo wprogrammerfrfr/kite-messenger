@@ -69,6 +69,11 @@ export type InboundAudioPacketLoss = {
   packetsReceived: number;
 };
 
+/** RTT in milliseconds from the currently selected/succeeded ICE candidate pair. */
+export type CandidatePairRtt = {
+  rttMs: number;
+};
+
 /**
  * Extract packet loss for the inbound audio RTP stream, if present.
  * Ignores video; first matching `inbound-rtp` wins (typical for one audio m-line).
@@ -89,6 +94,41 @@ export function parseInboundAudioPacketLoss(
     result = { ratio, packetsLost: lost, packetsReceived: recv };
   });
   return result;
+}
+
+/**
+ * Extract ICE RTT from `candidate-pair.currentRoundTripTime` (seconds -> milliseconds).
+ * Prefers selected pairs and otherwise falls back to any succeeded/nominated pair.
+ */
+export function parseSelectedCandidatePairRttMs(
+  stats: RTCStatsReport
+): CandidatePairRtt | null {
+  let preferred: number | null = null;
+  let fallback: number | null = null;
+  stats.forEach((r) => {
+    if (r.type !== "candidate-pair") return;
+    const pair = r as RTCIceCandidatePairStats & {
+      selected?: boolean;
+      currentRoundTripTime?: number;
+      state?: RTCStatsIceCandidatePairState;
+      nominated?: boolean;
+    };
+    const roundTripSeconds = Number(pair.currentRoundTripTime);
+    if (!Number.isFinite(roundTripSeconds) || roundTripSeconds < 0) return;
+    const roundTripMs = roundTripSeconds * 1000;
+    if (pair.selected === true) {
+      preferred = roundTripMs;
+      return;
+    }
+    if (
+      fallback === null &&
+      (pair.state === "succeeded" || pair.nominated === true)
+    ) {
+      fallback = roundTripMs;
+    }
+  });
+  const rttMs = preferred ?? fallback;
+  return rttMs === null ? null : { rttMs };
 }
 
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
