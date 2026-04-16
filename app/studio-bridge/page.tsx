@@ -1929,8 +1929,12 @@ export default function StudioBridgePage() {
         addLog("Phase 3: Realtime subscribe + peer");
         setStatusNote("Starting peer connection...");
 
+        const roomId = `session_id:${sessionId.toUpperCase()}`;
         const channel = supabase
-          .channel(`session_id:${sessionId.toUpperCase()}`)
+          .channel(
+            roomId,
+            { config: { realtime: { heartbeatIntervalMs: 3000 } } } as any
+          )
           .on("broadcast", { event: "session-control" }, (payload) => {
             const msg = payload.payload as SessionControlMessage | undefined;
             if (!msg || msg.type !== "LEAVE") return;
@@ -1991,6 +1995,9 @@ export default function StudioBridgePage() {
           )
           .subscribe((status, err) => {
             console.log('[SUPABASE-CHANNEL-STATUS]', status, err);
+            if (status === 'SUBSCRIBED') {
+              console.log('[Kite] Signaling Bridge Restored');
+            }
           });
         channelRef.current = channel;
 
