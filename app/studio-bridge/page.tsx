@@ -973,6 +973,7 @@ export default function StudioBridgePage() {
       lookaheadMs: 25,
       scheduleAheadSec: 0.12,
       startAtSec,
+      isExternalSync: role !=="host",
     });
     scheduler.start();
     metronomeSchedulerRef.current = scheduler;
