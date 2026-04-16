@@ -22,12 +22,22 @@ import { forceMusicModeOpus } from '@/lib/sdp-utils'
 
 type BridgeStatus = "connecting" | "connected" | "failed";
 type Role = "host" | "peer";
-type SessionControlMessage = {
+type SessionLeaveMessage = {
   type: "LEAVE";
   from: Role;
   room: string;
   at: string;
 };
+type KiteSyncMessage = {
+  type: "KITE_SYNC";
+  hostTime: number;
+  bpm: number;
+  bpi: number;
+  enabled: boolean;
+  serverTimestamp: number;
+  sequenceNumber: number;
+};
+type SessionControlMessage = SessionLeaveMessage | KiteSyncMessage;
 
 type IceCandidateRow = {
   id: string;
@@ -426,6 +436,11 @@ export default function StudioBridgePage() {
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
   const calculatedDelayMsRef = useRef<number | null>(null);
+  const kiteSyncSequenceRef = useRef(0);
+  const pendingKiteSyncRef = useRef<KiteSyncMessage | null>(null);
+  const lastAcceptedKiteSyncSeqRef = useRef(0);
+  const lastAppliedGuestStartSecRef = useRef<number | null>(null);
+  const lastSyncApplyAtMsRef = useRef<number | null>(null);
 
   const teardownRemotePlaybackGraph = useCallback(() => {
     setRemoteMeterTapActive(false);
@@ -806,6 +821,62 @@ export default function StudioBridgePage() {
     return ctx;
   }, []);
 
+  const buildKiteSyncPacket = useCallback((overrides?: {
+    kiteSyncEnabled?: boolean;
+    bpm?: number;
+    bpi?: number;
+  }): KiteSyncMessage | null => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx) return null;
+    const nextEnabled = overrides?.kiteSyncEnabled ?? kiteSyncEnabled;
+    const nextBpm = overrides?.bpm ?? metronomeBpm;
+    const nextBpi = overrides?.bpi ?? beatsPerInterval;
+    kiteSyncSequenceRef.current += 1;
+    console.log("Broadcasting KITE_SYNC packet...", {
+      bpm: nextBpm,
+      bpi: nextBpi,
+    });
+    return {
+      type: "KITE_SYNC",
+      hostTime: ctx.currentTime,
+      bpm: nextBpm,
+      bpi: nextBpi,
+      enabled: nextEnabled,
+      serverTimestamp: Date.now(),
+      sequenceNumber: kiteSyncSequenceRef.current,
+    };
+  }, [beatsPerInterval, kiteSyncEnabled, metronomeBpm]);
+
+  const sendOrQueueKiteSyncPacket = useCallback((packet: KiteSyncMessage): void => {
+    const peer = peerRef.current;
+    if (!peer || peer.destroyed || peer.connected !== true) {
+      pendingKiteSyncRef.current = packet;
+      return;
+    }
+    try {
+      peer.send(JSON.stringify(packet));
+      pendingKiteSyncRef.current = null;
+    } catch {
+      // Coalesce to latest sync packet while channel is recovering.
+      pendingKiteSyncRef.current = packet;
+    }
+  }, []);
+
+  const broadcastKiteSyncFromHost = useCallback((overrides?: {
+    kiteSyncEnabled?: boolean;
+    bpm?: number;
+    bpi?: number;
+  }): void => {
+    if (role !== "host") return;
+    const packet = buildKiteSyncPacket({
+      kiteSyncEnabled: overrides?.kiteSyncEnabled,
+      bpm: overrides?.bpm,
+      bpi: overrides?.bpi,
+    });
+    if (!packet) return;
+    sendOrQueueKiteSyncPacket(packet);
+  }, [buildKiteSyncPacket, kiteSyncEnabled, role, sendOrQueueKiteSyncPacket]);
+
   /**
    * Parallel output branch for precision click-track playback.
    * This path is isolated from remote stream and local recorder chains.
@@ -878,13 +949,30 @@ export default function StudioBridgePage() {
     if (!metronomeGainRef.current) return;
     if (metronomeIntervalRef.current !== null && metronomeSchedulerRef.current) return;
 
+    const localStartAtSec = ctx.currentTime + 0.01;
+    let startAtSec = localStartAtSec;
+    if (role !== "host") {
+      const target = lastAppliedGuestStartSecRef.current;
+      if (typeof target === "number" && Number.isFinite(target)) {
+        const barLenSec = (60 / metronomeBpm) * beatsPerInterval;
+        if (Number.isFinite(barLenSec) && barLenSec > 0 && target < ctx.currentTime) {
+          const snappedStart =
+            target + Math.ceil((ctx.currentTime - target) / barLenSec) * barLenSec;
+          startAtSec = snappedStart;
+        } else {
+          startAtSec = target;
+        }
+        console.log("Guest Scheduler Starting at:", startAtSec, "Snapped:", startAtSec !== target);
+      }
+    }
+
     const scheduler = createMetronomeScheduler(ctx, {
       bpm: metronomeBpm,
       beatsPerInterval,
       subdivision: 1,
       lookaheadMs: 25,
       scheduleAheadSec: 0.12,
-      startAtSec: ctx.currentTime + 0.01,
+      startAtSec,
     });
     scheduler.start();
     metronomeSchedulerRef.current = scheduler;
@@ -925,6 +1013,7 @@ export default function StudioBridgePage() {
     beatsPerInterval,
     kiteSyncEnabled,
     metronomeBpm,
+    role,
     ensureStudioAudioContext,
     ensureMetronomeGainNode,
     playMetronomeClick,
@@ -1791,6 +1880,12 @@ export default function StudioBridgePage() {
               ts?: number;
               type?: string;
               name?: string;
+              bpm?: number;
+              bpi?: number;
+              hostTime?: number;
+              enabled?: boolean;
+              serverTimestamp?: number;
+              sequenceNumber?: number;
             };
             if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
               if (mountedRef.current) {
@@ -1806,6 +1901,30 @@ export default function StudioBridgePage() {
             } else if (msg.t === "pong" && typeof msg.ts === "number" && mountedRef.current) {
               const latency = Math.round(performance.now() - msg.ts);
               setPingMs(latency);
+            } else if (
+              msg.type === "KITE_SYNC" &&
+              typeof msg.sequenceNumber === "number" &&
+              typeof msg.hostTime === "number" &&
+              typeof msg.serverTimestamp === "number" &&
+              typeof msg.bpm === "number" &&
+              typeof msg.bpi === "number" &&
+              typeof msg.enabled === "boolean"
+            ) {
+              if (msg.sequenceNumber <= lastAcceptedKiteSyncSeqRef.current) return;
+              lastAcceptedKiteSyncSeqRef.current = msg.sequenceNumber;
+              setKiteSyncEnabled(msg.enabled);
+              if (!msg.enabled) return;
+
+              const receivedAtMs = Date.now();
+              const rttDelaySec = (calculatedDelayMsRef.current || 0) / 1000;
+              const offsetSec = (receivedAtMs - msg.serverTimestamp) / 1000;
+              const guestTargetSec = msg.hostTime + offsetSec + rttDelaySec;
+
+              lastAppliedGuestStartSecRef.current = guestTargetSec;
+              lastSyncApplyAtMsRef.current = receivedAtMs;
+              setMetronomeBpm(msg.bpm);
+              setBeatsPerInterval(msg.bpi);
+              console.log("KITE_SYNC received! Guest Target Start:", guestTargetSec);
             }
           } catch {
             // Ignore non-JSON or malformed ping payloads.
@@ -1894,6 +2013,14 @@ export default function StudioBridgePage() {
             );
           } catch {
             // Presence payload is best-effort; keep connect flow unchanged on send failures.
+          }
+          if (isHost && kiteSyncEnabled && pendingKiteSyncRef.current) {
+            try {
+              peer.send(JSON.stringify(pendingKiteSyncRef.current));
+              pendingKiteSyncRef.current = null;
+            } catch {
+              // Keep queued packet for next successful send checkpoint.
+            }
           }
           if (connectTimeout !== null) {
             clearTimeout(connectTimeout);
@@ -2466,8 +2593,10 @@ export default function StudioBridgePage() {
                           type="button"
                           onClick={() =>
                             setKiteSyncEnabled((prev) => {
-                              console.log("Kite Sync Toggle Clicked. New State:", !prev);
-                              return !prev;
+                              const next = !prev;
+                              console.log("Kite Sync Toggle Clicked. New State:", next);
+                              broadcastKiteSyncFromHost({ kiteSyncEnabled: next });
+                              return next;
                             })
                           }
                           className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
@@ -2502,7 +2631,12 @@ export default function StudioBridgePage() {
                             onChange={(e) => {
                               const next = Number(e.target.value);
                               if (!Number.isFinite(next)) return;
-                              setMetronomeBpm(Math.max(40, Math.min(240, Math.round(next))));
+                              setMetronomeBpm((prev) => {
+                                const normalized = Math.max(40, Math.min(240, Math.round(next)));
+                                if (normalized === prev) return prev;
+                                broadcastKiteSyncFromHost({ bpm: normalized });
+                                return normalized;
+                              });
                             }}
                             className="w-16 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
                             inputMode="numeric"
@@ -2518,7 +2652,12 @@ export default function StudioBridgePage() {
                             onChange={(e) => {
                               const next = Number(e.target.value);
                               if (!Number.isFinite(next)) return;
-                              setBeatsPerInterval(Math.max(1, Math.min(64, Math.round(next))));
+                              setBeatsPerInterval((prev) => {
+                                const normalized = Math.max(1, Math.min(64, Math.round(next)));
+                                if (normalized === prev) return prev;
+                                broadcastKiteSyncFromHost({ bpi: normalized });
+                                return normalized;
+                              });
                             }}
                             className="w-14 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
                             inputMode="numeric"

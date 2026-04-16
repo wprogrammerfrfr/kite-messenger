@@ -7,6 +7,7 @@ export type MetronomeScheduleConfig = {
   lookaheadMs?: number;
   scheduleAheadSec?: number;
   startAtSec?: number;
+  isExternalSync?: boolean;
 };
 
 export type MetronomeTick = {
@@ -57,6 +58,7 @@ function sanitizeConfig(config: MetronomeScheduleConfig): Required<MetronomeSche
     lookaheadMs,
     scheduleAheadSec,
     startAtSec: config.startAtSec ?? 0,
+    isExternalSync: config.isExternalSync ?? false,
   };
 }
 
@@ -143,6 +145,9 @@ export function createMetronomeScheduler(
   const alignStart = (startAtSec?: number): number => {
     const now = audioContext.currentTime;
     if (typeof startAtSec === "number" && Number.isFinite(startAtSec)) {
+      if (config.isExternalSync) {
+        return startAtSec;
+      }
       return Math.max(now, startAtSec);
     }
     return now;
