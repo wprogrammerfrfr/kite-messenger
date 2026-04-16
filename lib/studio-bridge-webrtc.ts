@@ -61,6 +61,16 @@ export function applyLowLatencyInboundAudioReceivers(
   }
 }
 
+/**
+ * Detect whether this `AudioContext` can use the high-performance AudioWorklet path.
+ * Returns false when the API surface is absent or the context is not in a usable state.
+ */
+export async function checkAudioWorkletSupport(ctx: AudioContext): Promise<boolean> {
+  if (typeof AudioWorkletNode === "undefined") return false;
+  if (!ctx || ctx.state === "closed") return false;
+  return typeof ctx.audioWorklet?.addModule === "function";
+}
+
 /** Parsed from `getStats()` for inbound remote audio (single-stream P2P). */
 export type InboundAudioPacketLoss = {
   /** `packetsLost / (packetsLost + packetsReceived)`, range [0, 1]. */
@@ -133,10 +143,12 @@ export function parseSelectedCandidatePairRttMs(
 
 /** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
 // WARNING: Echo cancellation is disabled. Headphones are MANDATORY to prevent feedback loops.
-export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
+export function getStudioAudioConstraints(
+  echoSafetyMode = false
+): boolean | MediaTrackConstraints {
   return {
-    echoCancellation: false,
-    noiseSuppression: false,
+    echoCancellation: echoSafetyMode,
+    noiseSuppression: echoSafetyMode,
     autoGainControl: false,
     ...({ latency: { ideal: 0.05 } } as unknown as MediaTrackConstraints),
     channelCount: 2,
@@ -147,12 +159,15 @@ export function getStudioAudioConstraints(): boolean | MediaTrackConstraints {
 // SDP munging (e.g. Opus reorder) was removed after it caused negotiation failures;
 // reintroduce via simple-peer `sdpTransform` only with careful browser testing.
 
-export async function acquireStudioMicStream(): Promise<MediaStream> {
+export async function acquireStudioMicStream(options?: {
+  echoSafetyMode?: boolean;
+}): Promise<MediaStream> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
     throw new Error("getUserMedia is not available.");
   }
+  const echoSafetyMode = Boolean(options?.echoSafetyMode);
   return navigator.mediaDevices.getUserMedia({
-    audio: getStudioAudioConstraints(),
+    audio: getStudioAudioConstraints(echoSafetyMode),
     video: false,
   });
 }

@@ -11,6 +11,7 @@ import { TrackRecorder } from "@/lib/track-recorder";
 import {
   acquireStudioMicStream,
   applyLowLatencyInboundAudioReceivers,
+  checkAudioWorkletSupport,
   decodePeerDataChunk,
   parseSelectedCandidatePairRttMs,
   parseInboundAudioPacketLoss,
@@ -362,8 +363,17 @@ export default function StudioBridgePage() {
   const [audioTestDone, setAudioTestDone] = useState(false);
   const [audioTestPlaying, setAudioTestPlaying] = useState(false);
   const [audioTestFailed, setAudioTestFailed] = useState(false);
+  const [echoSafetyMode, setEchoSafetyMode] = useState(false);
   const [kiteSignal, setKiteSignal] = useState<KiteSignalState>("checking");
   const [enteredStudio, setEnteredStudio] = useState(false);
+  const [isBufferingEnabled, setIsBufferingEnabled] = useState(false);
+  const [isWorkletLoaded, setIsWorkletLoaded] = useState(false);
+  const [bufferDepthFrames, setBufferDepthFrames] = useState(0);
+  const [targetLeadFrames, setTargetLeadFrames] = useState(4800);
+  const [isBufferPrimed, setIsBufferPrimed] = useState(false);
+  const [lastCorrectionEvent, setLastCorrectionEvent] = useState<"drop" | "dupe" | "none">(
+    "none"
+  );
   const [roomCopyNote, setRoomCopyNote] = useState<string | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [remoteLevel, setRemoteLevel] = useState(0);
@@ -423,7 +433,12 @@ export default function StudioBridgePage() {
   const bridgeInitInFlightRef = useRef(false);
   /** Lazily created; resumed on "Enter Studio" so Safari unlocks audio on a user gesture. */
   const studioAudioContextRef = useRef<AudioContext | null>(null);
+  const workletLoadPromiseRef = useRef<Promise<boolean> | null>(null);
+  const workletLoadedContextRef = useRef<AudioContext | null>(null);
+  const lastWorkletTelemetryAtMsRef = useRef(0);
+  const targetLeadFramesDebounceRef = useRef<number | null>(null);
   const remotePlaybackSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const remoteBufferNodeRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
   const remotePlaybackDelayRef = useRef<DelayNode | null>(null);
   const remotePlaybackGainRef = useRef<GainNode | null>(null);
   const remotePlaybackAnalyserRef = useRef<AnalyserNode | null>(null);
@@ -441,6 +456,27 @@ export default function StudioBridgePage() {
   const lastAcceptedKiteSyncSeqRef = useRef(0);
   const lastAppliedGuestStartSecRef = useRef<number | null>(null);
   const lastSyncApplyAtMsRef = useRef<number | null>(null);
+  const echoModeApplyingRef = useRef(false);
+  const isMicMutedRef = useRef(isMicMuted);
+  const isBufferingEnabledRef = useRef(isBufferingEnabled);
+  const isWorkletLoadedRef = useRef(isWorkletLoaded);
+  const targetLeadFramesRef = useRef(targetLeadFrames);
+
+  useEffect(() => {
+    isMicMutedRef.current = isMicMuted;
+  }, [isMicMuted]);
+
+  useEffect(() => {
+    isBufferingEnabledRef.current = isBufferingEnabled;
+  }, [isBufferingEnabled]);
+
+  useEffect(() => {
+    isWorkletLoadedRef.current = isWorkletLoaded;
+  }, [isWorkletLoaded]);
+
+  useEffect(() => {
+    targetLeadFramesRef.current = targetLeadFrames;
+  }, [targetLeadFrames]);
 
   const teardownRemotePlaybackGraph = useCallback(() => {
     setRemoteMeterTapActive(false);
@@ -470,6 +506,11 @@ export default function StudioBridgePage() {
       /* ignore */
     }
     try {
+      remoteBufferNodeRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
       remotePlaybackGainRef.current?.disconnect();
     } catch {
       /* ignore */
@@ -483,8 +524,12 @@ export default function StudioBridgePage() {
     remotePlaybackAnalyserRef.current = null;
     remotePlaybackCompressorRef.current = null;
     remotePlaybackSourceRef.current = null;
+    remoteBufferNodeRef.current = null;
     remotePlaybackDelayRef.current = null;
     remotePlaybackGainRef.current = null;
+    setBufferDepthFrames(0);
+    setIsBufferPrimed(false);
+    setLastCorrectionEvent("none");
     setRemoteMeterRafKey((k) => k + 1);
   }, []);
 
@@ -494,45 +539,194 @@ export default function StudioBridgePage() {
     gainNode.gain.value = muted ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
   }, []);
 
-  const buildRemotePlaybackGraph = useCallback(
-    (stream: MediaStream) => {
-      const ctx = studioAudioContextRef.current;
-      if (!ctx) return;
-      teardownRemotePlaybackGraph();
-      const source = ctx.createMediaStreamSource(stream);
-      const delayNode = ctx.createDelay(5);
-      delayNode.delayTime.value = 0; // MUST remain 0 for real-time jamming
-      const gain = ctx.createGain();
-      gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
-      source.connect(delayNode);
-      delayNode.connect(gain);
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
-      compressor.knee.value      = REMOTE_COMPRESSOR_KNEE;
-      compressor.ratio.value     = REMOTE_COMPRESSOR_RATIO;
-      compressor.attack.value    = REMOTE_COMPRESSOR_ATTACK;
-      compressor.release.value   = REMOTE_COMPRESSOR_RELEASE;
-      gain.connect(compressor);
-      compressor.connect(ctx.destination);
-      remotePlaybackCompressorRef.current = compressor;
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 128;
-      analyser.smoothingTimeConstant = 0.62;
-      const silentGain = ctx.createGain();
-      silentGain.gain.value = 0;
-      gain.connect(analyser);
-      analyser.connect(silentGain);
-      silentGain.connect(ctx.destination);
-      remotePlaybackSourceRef.current = source;
-      remotePlaybackDelayRef.current = delayNode;
-      remotePlaybackGainRef.current = gain;
-      remotePlaybackAnalyserRef.current = analyser;
-      remotePlaybackMeterSinkRef.current = silentGain;
-      setRemoteMeterTapActive(true);
-      setRemoteMeterRafKey((k) => k + 1);
+  const replacePeerAudioTrack = useCallback(
+    (
+      oldTrack: MediaStreamTrack | null,
+      newTrack: MediaStreamTrack,
+      oldStream: MediaStream | null,
+      newStream: MediaStream
+    ) => {
+      const peer = peerRef.current as (Peer.Instance & {
+        replaceTrack?: (
+          oldTrack: MediaStreamTrack,
+          newTrack: MediaStreamTrack,
+          stream: MediaStream
+        ) => void;
+      }) | null;
+      if (!peer || typeof peer.replaceTrack !== "function") return;
+      if (!oldTrack) return;
+      try {
+        peer.replaceTrack(oldTrack, newTrack, oldStream ?? newStream);
+      } catch (err) {
+        console.error("Failed to replace local audio track:", err);
+      }
     },
-    [teardownRemotePlaybackGraph]
+    []
   );
+
+  const flushAndSetRemoteGridTarget = useCallback((targetTimeSec: number | null) => {
+    const bufferNode = remoteBufferNodeRef.current;
+    if (!bufferNode || !("port" in bufferNode)) return;
+    bufferNode.port.postMessage({ type: "FLUSH_BUFFER" });
+    if (typeof targetTimeSec === "number" && Number.isFinite(targetTimeSec)) {
+      bufferNode.port.postMessage({
+        type: "SET_GRID_TARGET",
+        targetTimeSec,
+      });
+    }
+  }, []);
+
+  const ensureKiteBufferWorkletLoaded = useCallback(
+    async (ctx: AudioContext): Promise<boolean> => {
+      if (!isBufferingEnabledRef.current) return false;
+      if (workletLoadedContextRef.current === ctx && isWorkletLoadedRef.current) {
+        return true;
+      }
+      if (workletLoadPromiseRef.current) {
+        return workletLoadPromiseRef.current;
+      }
+      const loadPromise = (async () => {
+        const supported = await checkAudioWorkletSupport(ctx).catch(() => false);
+        if (!supported) {
+          if (mountedRef.current) setIsWorkletLoaded(false);
+          return false;
+        }
+        try {
+          await ctx.audioWorklet.addModule("/worklets/kite-buffer-processor.js");
+          workletLoadedContextRef.current = ctx;
+          if (mountedRef.current) setIsWorkletLoaded(true);
+          return true;
+        } catch {
+          if (mountedRef.current) setIsWorkletLoaded(false);
+          return false;
+        } finally {
+          workletLoadPromiseRef.current = null;
+        }
+      })();
+      workletLoadPromiseRef.current = loadPromise;
+      return loadPromise;
+    },
+    []
+  );
+
+  const buildRemotePlaybackGraph = useCallback((stream: MediaStream) => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx) return;
+    teardownRemotePlaybackGraph();
+    const source = ctx.createMediaStreamSource(stream);
+    const delayNode = ctx.createDelay(5);
+    delayNode.delayTime.value = 0; // MUST remain 0 for real-time jamming
+    const gain = ctx.createGain();
+    gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
+    remoteBufferNodeRef.current = null;
+    if (isBufferingEnabledRef.current) {
+      if (
+        workletLoadedContextRef.current === ctx &&
+        isWorkletLoadedRef.current
+      ) {
+        const bufferNode = new AudioWorkletNode(ctx, "kite-buffer-processor");
+        bufferNode.port.onmessage = (event: MessageEvent) => {
+          const data = event?.data as
+            | {
+                type?: string;
+                bufferDepthFrames?: number;
+                targetLeadFrames?: number;
+                isPrimed?: boolean;
+                driftCorrectionEvent?: "drop" | "dupe" | "none";
+              }
+            | undefined;
+          if (!data || data.type !== "BUFFER_DEPTH") return;
+          const nowMs = performance.now();
+          if (nowMs - lastWorkletTelemetryAtMsRef.current < 250) return;
+          lastWorkletTelemetryAtMsRef.current = nowMs;
+          if (typeof data.bufferDepthFrames === "number") {
+            setBufferDepthFrames(Math.max(0, Math.round(data.bufferDepthFrames)));
+          }
+          if (typeof data.targetLeadFrames === "number") {
+            setTargetLeadFrames(Math.max(0, Math.round(data.targetLeadFrames)));
+          }
+          setIsBufferPrimed(Boolean(data.isPrimed));
+          if (
+            data.driftCorrectionEvent === "drop" ||
+            data.driftCorrectionEvent === "dupe" ||
+            data.driftCorrectionEvent === "none"
+          ) {
+            setLastCorrectionEvent(data.driftCorrectionEvent);
+          }
+        };
+        bufferNode.port.postMessage({
+          type: "SET_TARGET_LEAD_FRAMES",
+          value: targetLeadFramesRef.current,
+        });
+        source.connect(bufferNode);
+        bufferNode.connect(delayNode);
+        remoteBufferNodeRef.current = bufferNode;
+      } else {
+        source.connect(delayNode);
+      }
+    } else {
+      source.connect(delayNode);
+    }
+    delayNode.connect(gain);
+    const compressor = ctx.createDynamicsCompressor();
+    compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
+    compressor.knee.value      = REMOTE_COMPRESSOR_KNEE;
+    compressor.ratio.value     = REMOTE_COMPRESSOR_RATIO;
+    compressor.attack.value    = REMOTE_COMPRESSOR_ATTACK;
+    compressor.release.value   = REMOTE_COMPRESSOR_RELEASE;
+    gain.connect(compressor);
+    compressor.connect(ctx.destination);
+    remotePlaybackCompressorRef.current = compressor;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 128;
+    analyser.smoothingTimeConstant = 0.62;
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+    gain.connect(analyser);
+    analyser.connect(silentGain);
+    silentGain.connect(ctx.destination);
+    remotePlaybackSourceRef.current = source;
+    remotePlaybackDelayRef.current = delayNode;
+    remotePlaybackGainRef.current = gain;
+    remotePlaybackAnalyserRef.current = analyser;
+    remotePlaybackMeterSinkRef.current = silentGain;
+    setRemoteMeterTapActive(true);
+    setRemoteMeterRafKey((k) => k + 1);
+  }, []);
+
+  const rebuildRemoteGraphWithoutTeardown = useCallback(() => {
+    const ctx = studioAudioContextRef.current;
+    const stream = remoteStreamRef.current;
+    if (!ctx || !stream) return;
+    const currentGain = remotePlaybackGainRef.current;
+    if (currentGain) {
+      try {
+        currentGain.gain.cancelScheduledValues(ctx.currentTime);
+        currentGain.gain.setValueAtTime(currentGain.gain.value, ctx.currentTime);
+        currentGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.05);
+      } catch {
+        /* ignore */
+      }
+    }
+    window.setTimeout(() => {
+      if (!mountedRef.current) return;
+      buildRemotePlaybackGraph(stream);
+      const rebuiltGain = remotePlaybackGainRef.current;
+      const rebuiltCtx = studioAudioContextRef.current;
+      if (!rebuiltGain || !rebuiltCtx) return;
+      const targetGain = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
+      try {
+        rebuiltGain.gain.cancelScheduledValues(rebuiltCtx.currentTime);
+        rebuiltGain.gain.setValueAtTime(0, rebuiltCtx.currentTime);
+        rebuiltGain.gain.linearRampToValueAtTime(
+          targetGain,
+          rebuiltCtx.currentTime + 0.05
+        );
+      } catch {
+        /* ignore */
+      }
+    }, 60);
+  }, [buildRemotePlaybackGraph]);
 
   const micRowState: CheckRowState = micPermissionDenied
     ? "error"
@@ -794,12 +988,18 @@ export default function StudioBridgePage() {
     let ctx = studioAudioContextRef.current;
     if (ctx?.state === "closed") {
       studioAudioContextRef.current = null;
+      workletLoadedContextRef.current = null;
+      workletLoadPromiseRef.current = null;
       ctx = null;
       setAudioContextReady(false);
+      setIsWorkletLoaded(false);
     }
     if (!ctx) {
       ctx = createStudioAudioContext();
       studioAudioContextRef.current = ctx;
+      workletLoadedContextRef.current = null;
+      workletLoadPromiseRef.current = null;
+      setIsWorkletLoaded(false);
       if (ctx.state === "running") {
         setAudioContextReady(true);
       } else {
@@ -808,6 +1008,7 @@ export default function StudioBridgePage() {
           .then(() => setAudioContextReady(true))
           .catch(() => {});
       }
+      void ensureKiteBufferWorkletLoaded(ctx);
       return ctx;
     }
     if (ctx.state === "running") {
@@ -818,8 +1019,93 @@ export default function StudioBridgePage() {
         .then(() => setAudioContextReady(true))
         .catch(() => {});
     }
+    void ensureKiteBufferWorkletLoaded(ctx);
     return ctx;
-  }, []);
+  }, [ensureKiteBufferWorkletLoaded]);
+
+  useEffect(() => {
+    if (!enteredStudio) return;
+    if (!remoteStreamRef.current) return;
+    rebuildRemoteGraphWithoutTeardown();
+  }, [enteredStudio, isBufferingEnabled, rebuildRemoteGraphWithoutTeardown]);
+
+  useEffect(() => {
+    if (!enteredStudio || !isBufferingEnabled || !isWorkletLoaded) return;
+    if (!remoteStreamRef.current) return;
+    rebuildRemoteGraphWithoutTeardown();
+  }, [enteredStudio, isBufferingEnabled, isWorkletLoaded, rebuildRemoteGraphWithoutTeardown]);
+
+  useEffect(() => {
+    if (kiteSyncEnabled) return;
+    const bufferNode = remoteBufferNodeRef.current;
+    if (!bufferNode || !("port" in bufferNode)) return;
+    bufferNode.port.postMessage({ type: "FLUSH_BUFFER" });
+  }, [kiteSyncEnabled]);
+
+  useEffect(() => {
+    if (!enteredStudio) return;
+    const currentStream = localStreamRef.current;
+    if (!currentStream || echoModeApplyingRef.current) return;
+    echoModeApplyingRef.current = true;
+
+    void (async () => {
+      try {
+        const nextStream = await acquireStudioMicStream({ echoSafetyMode });
+        if (!mountedRef.current) {
+          nextStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        const nextTrack = nextStream.getAudioTracks()[0] ?? null;
+        if (!nextTrack) {
+          nextStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        const prevStream = localStreamRef.current;
+        const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
+        replacePeerAudioTrack(prevTrack, nextTrack, prevStream ?? null, nextStream);
+
+        nextTrack.enabled = !isMicMutedRef.current;
+        localStreamRef.current = nextStream;
+        setLocalMicStream(nextStream);
+
+        const localEl = localMonitorAudioRef.current;
+        if (localEl) {
+          localEl.srcObject = nextStream;
+          localEl.muted = true;
+          await localEl.play().catch(() => {});
+        }
+
+        if (prevStream && prevStream !== nextStream) {
+          prevStream.getTracks().forEach((track) => track.stop());
+        }
+      } catch (err) {
+        console.error("Failed to re-acquire microphone for echo safety mode:", err);
+      } finally {
+        echoModeApplyingRef.current = false;
+      }
+    })();
+  }, [echoSafetyMode, enteredStudio, replacePeerAudioTrack]);
+
+  useEffect(() => {
+    if (targetLeadFramesDebounceRef.current !== null) {
+      clearTimeout(targetLeadFramesDebounceRef.current);
+    }
+    targetLeadFramesDebounceRef.current = window.setTimeout(() => {
+      const bufferNode = remoteBufferNodeRef.current;
+      if (!bufferNode || !("port" in bufferNode)) return;
+      bufferNode.port.postMessage({
+        type: "SET_TARGET_LEAD_FRAMES",
+        value: targetLeadFramesRef.current,
+      });
+      targetLeadFramesDebounceRef.current = null;
+    }, 150);
+    return () => {
+      if (targetLeadFramesDebounceRef.current !== null) {
+        clearTimeout(targetLeadFramesDebounceRef.current);
+        targetLeadFramesDebounceRef.current = null;
+      }
+    };
+  }, [targetLeadFrames]);
 
   const buildKiteSyncPacket = useCallback((overrides?: {
     kiteSyncEnabled?: boolean;
@@ -1322,10 +1608,13 @@ export default function StudioBridgePage() {
           }
           peerRef.current = null;
 
-          const toStop = micStream ?? localStreamRef.current;
-          toStop?.getTracks().forEach((track) => track.stop());
-          micStream = null;
-          localStreamRef.current = null;
+          const localStreamToStop = localStreamRef.current;
+          try {
+            localStreamToStop?.getTracks().forEach((track) => track.stop());
+          } finally {
+            micStream = null;
+            localStreamRef.current = null;
+          }
 
           if (mountedRef.current) {
             setLocalMicStream(null);
@@ -1474,7 +1763,7 @@ export default function StudioBridgePage() {
 
         addLog("Phase 1: getUserMedia (audio only)");
         try {
-          mediaStream = await acquireStudioMicStream();
+          mediaStream = await acquireStudioMicStream({ echoSafetyMode });
         } catch (micErr) {
           console.error(micErr);
           addLog("Microphone blocked or unavailable");
@@ -1925,6 +2214,21 @@ export default function StudioBridgePage() {
               lastSyncApplyAtMsRef.current = receivedAtMs;
               setMetronomeBpm(msg.bpm);
               setBeatsPerInterval(msg.bpi);
+              const ctx = studioAudioContextRef.current;
+              if (ctx) {
+                const sixteenthSec = 60 / msg.bpm / 4;
+                let nextGridSec = guestTargetSec;
+                if (
+                  Number.isFinite(sixteenthSec) &&
+                  sixteenthSec > 0 &&
+                  guestTargetSec < ctx.currentTime
+                ) {
+                  nextGridSec =
+                    guestTargetSec +
+                    Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) * sixteenthSec;
+                }
+                flushAndSetRemoteGridTarget(nextGridSec);
+              }
               console.log("KITE_SYNC received! Guest Target Start:", guestTargetSec);
             }
           } catch {
@@ -2130,13 +2434,7 @@ export default function StudioBridgePage() {
       micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
     };
-  }, [
-    beginLostCountdown,
-    clearLostCountdown,
-    retryInitTick,
-    teardownRemotePlaybackGraph,
-    buildRemotePlaybackGraph,
-  ]);
+  }, [beginLostCountdown, clearLostCountdown, retryInitTick]);
 
   const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
@@ -2596,6 +2894,12 @@ export default function StudioBridgePage() {
                             setKiteSyncEnabled((prev) => {
                               const next = !prev;
                               console.log("Kite Sync Toggle Clicked. New State:", next);
+                              if (next) {
+                                const ctx = studioAudioContextRef.current;
+                                if (ctx) {
+                                  flushAndSetRemoteGridTarget(ctx.currentTime + 0.01);
+                                }
+                              }
                               broadcastKiteSyncFromHost({ kiteSyncEnabled: next });
                               return next;
                             })
@@ -2609,6 +2913,33 @@ export default function StudioBridgePage() {
                         >
                           {kiteSyncEnabled ? "Enabled" : "Disabled"}
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsBufferingEnabled((prev) => !prev)}
+                          className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                            isBufferingEnabled
+                              ? "border-blue-500/40 bg-blue-500/12 text-blue-200 hover:bg-blue-500/18"
+                              : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+                          }`}
+                          aria-pressed={isBufferingEnabled}
+                        >
+                          Buffer {isBufferingEnabled ? "On" : "Off"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEchoSafetyMode((prev) => !prev)}
+                          className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                            echoSafetyMode
+                              ? "border-yellow-500/40 bg-yellow-500/15 text-yellow-100 hover:bg-yellow-500/22"
+                              : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+                          }`}
+                          aria-pressed={echoSafetyMode}
+                        >
+                          Echo Safety {echoSafetyMode ? "On" : "Off"}
+                        </button>
+                        <span className="rounded-md border border-yellow-500/35 bg-yellow-500/10 px-2 py-1 text-[10px] font-semibold text-yellow-200">
+                          ⚠️ Headphones Required for Sync Buffer. If using speakers, enable Echo Safety.
+                        </span>
                         {studioAudioContextRef.current?.state !== "running" ? (
                           <button
                             type="button"
@@ -2661,6 +2992,67 @@ export default function StudioBridgePage() {
                               });
                             }}
                             className="w-14 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
+                            inputMode="numeric"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                    <div className="w-full rounded-lg border border-stone-800/80 bg-stone-900/40 px-3 py-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                        Sync Buffer
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-stone-300">
+                        <div>
+                          Status:{" "}
+                          <span
+                            className={`font-semibold ${
+                              isBufferPrimed ? "text-emerald-400" : "text-yellow-300"
+                            }`}
+                          >
+                            {isBufferPrimed ? "Primed" : "Filling"}
+                          </span>
+                        </div>
+                        <div>
+                          Depth:{" "}
+                          <span className="font-mono text-stone-100">
+                            {Math.round(bufferDepthFrames / 48)} ms
+                          </span>
+                        </div>
+                        <div>
+                          Correction:{" "}
+                          <span className="font-mono uppercase text-stone-100">
+                            {lastCorrectionEvent}
+                          </span>
+                        </div>
+                        <label className="ml-auto flex items-center gap-2">
+                          <span className="uppercase tracking-wider text-stone-500">
+                            Safety
+                          </span>
+                          <input
+                            type="range"
+                            min={480}
+                            max={19200}
+                            step={120}
+                            value={targetLeadFrames}
+                            onChange={(e) => {
+                              const next = Number(e.target.value);
+                              if (!Number.isFinite(next)) return;
+                              setTargetLeadFrames(Math.max(0, Math.round(next)));
+                            }}
+                            className="w-28 accent-orange-400"
+                          />
+                          <input
+                            type="number"
+                            min={480}
+                            max={19200}
+                            step={120}
+                            value={targetLeadFrames}
+                            onChange={(e) => {
+                              const next = Number(e.target.value);
+                              if (!Number.isFinite(next)) return;
+                              setTargetLeadFrames(Math.max(0, Math.round(next)));
+                            }}
+                            className="w-20 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
                             inputMode="numeric"
                           />
                         </label>
