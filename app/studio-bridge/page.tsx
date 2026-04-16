@@ -1955,6 +1955,7 @@ export default function StudioBridgePage() {
               filter: `session_id=eq.${sessionId.toUpperCase()}`,
             },
             (payload) => {
+              console.log('[SUPABASE-POSTGRES-CHANGE] Payload received:', payload);
               const nextRow = payload.new as StudioSessionRow;
               if (!nextRow || typeof nextRow !== "object") return;
               const peer = peerRef.current;
@@ -1988,7 +1989,9 @@ export default function StudioBridgePage() {
               applyRemoteIce(nextRow.ice_candidates, activeRole);
             }
           )
-          .subscribe();
+          .subscribe((status, err) => {
+            console.log('[SUPABASE-CHANNEL-STATUS]', status, err);
+          });
         channelRef.current = channel;
 
         addLog(
