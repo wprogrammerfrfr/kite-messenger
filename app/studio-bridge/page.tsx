@@ -2319,6 +2319,11 @@ export default function StudioBridgePage() {
           setError(null);
           setStatus("connected");
           setStatusNote(P2P_CONNECTED_NOTE);
+          void channel.unsubscribe();
+          if (channelRef.current === channel) {
+            channelRef.current = null;
+          }
+          console.log('[Kite] Handshake complete. Signaling bridge closed to reduce jitter.');
           try {
             peer.send(
               JSON.stringify({
