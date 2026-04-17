@@ -439,6 +439,8 @@ export default function StudioBridgePage() {
   const bridgeTeardownRef = useRef<(() => void) | null>(null);
   const leaveSignalSentRef = useRef(false);
   const leaveSignalReceivedRef = useRef(false);
+  /** Mirrors `activeRole` from bridge init so `performTeardown` can send `{ type, from }` over the data channel. */
+  const bridgeActiveRoleRef = useRef<Role | null>(null);
   const lostCountdownIntervalRef = useRef<number | null>(null);
   const sessionStartedAtRef = useRef<number | null>(null);
   const historySavedRef = useRef(false);
@@ -1597,6 +1599,7 @@ export default function StudioBridgePage() {
     let sessionUserId: string | null = null;
     leaveSignalSentRef.current = false;
     leaveSignalReceivedRef.current = false;
+    bridgeActiveRoleRef.current = null;
     historySavedRef.current = false;
     sessionStartedAtRef.current = Date.now();
     setCollaboratorLeft(false);
@@ -1623,6 +1626,18 @@ export default function StudioBridgePage() {
       peerConnectionRef.current = null;
       highPingStreakRef.current = 0;
       highPingTipDismissedRef.current = false;
+      try {
+        if (peerRef.current && p2pConnectSucceededRef.current) {
+          const activeRole = bridgeActiveRoleRef.current;
+          if (activeRole) {
+            peerRef.current.send(
+              JSON.stringify({ type: "LEAVE", from: activeRole })
+            );
+          }
+        }
+      } catch {
+        /* ignore */
+      }
       void (async () => {
         try {
           setPingMs(null);
@@ -1896,6 +1911,7 @@ export default function StudioBridgePage() {
 
         // —— Phase 2: database (after mic is live) ——
         const activeRole: Role = isHost ? "host" : "peer";
+        bridgeActiveRoleRef.current = activeRole;
         setRole(activeRole);
         const { data: authData } = await supabase.auth.getUser();
         sessionUserId = authData.user?.id ?? null;
@@ -2254,7 +2270,20 @@ export default function StudioBridgePage() {
               enabled?: boolean;
               serverTimestamp?: number;
               sequenceNumber?: number;
+              from?: Role;
             };
+            if (msg.type === "LEAVE") {
+              if (msg.from === activeRole) return;
+              const departedName = remoteParticipantName || "A participant";
+              leaveSignalReceivedRef.current = true;
+              clearLostCountdown();
+              setCollaboratorLeft(true);
+              setLastDepartedParticipantName(departedName);
+              setRemoteParticipantName(null);
+              setStatus("failed");
+              setStatusNote(`${departedName} left the session.`);
+              return;
+            }
             if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
               if (mountedRef.current) {
                 const incomingName = msg.name.trim();
