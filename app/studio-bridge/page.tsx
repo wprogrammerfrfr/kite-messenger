@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ReactNode,
+} from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Peer, { type SignalData } from "simple-peer";
 import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
@@ -74,12 +81,14 @@ const HIGH_PING_WARN_MS = 150;
 const HIGH_PING_WARN_SAMPLES = 3;
 
 /** Remote listen path: Web Audio boost to `AudioContext.destination` (muted `<audio>` keep-alive + gain-based mute). */
-const REMOTE_PLAYBACK_GAIN_UNMUTED = 2;
-const REMOTE_COMPRESSOR_THRESHOLD = -24;
-const REMOTE_COMPRESSOR_KNEE      = 10;
-const REMOTE_COMPRESSOR_RATIO     = 4;
+const REMOTE_PLAYBACK_VOLUME_MIN = 0.5;
+const REMOTE_PLAYBACK_VOLUME_MAX = 4;
+const DEFAULT_REMOTE_PLAYBACK_VOLUME = 2;
+const REMOTE_COMPRESSOR_THRESHOLD = -12;
+const REMOTE_COMPRESSOR_KNEE      = 6;
+const REMOTE_COMPRESSOR_RATIO     = 3;
 const REMOTE_COMPRESSOR_ATTACK    = 0.003;
-const REMOTE_COMPRESSOR_RELEASE   = 0.15;
+const REMOTE_COMPRESSOR_RELEASE   = 0.1;
 
 /** Studio playback context: prefer minimum buffering; fall back if options unsupported. */
 function createStudioAudioContext(): AudioContext {
@@ -386,6 +395,9 @@ export default function StudioBridgePage() {
   const [remoteMeterRafKey, setRemoteMeterRafKey] = useState(0);
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const [remotePlaybackVolume, setRemotePlaybackVolume] = useState(
+    DEFAULT_REMOTE_PLAYBACK_VOLUME
+  );
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTimeMs, setRecordingTimeMs] = useState(0);
   const [recordedBlobUrl, setRecordedBlobUrl] = useState<string | null>(null);
@@ -407,6 +419,7 @@ export default function StudioBridgePage() {
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const speakerMutedRef = useRef(false);
+  const remotePlaybackVolumeRef = useRef(DEFAULT_REMOTE_PLAYBACK_VOLUME);
   const localMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const localRecorderRef = useRef<TrackRecorder | null>(null);
@@ -534,9 +547,21 @@ export default function StudioBridgePage() {
   }, []);
 
   const applyRemotePlaybackSpeakerGain = useCallback((muted: boolean) => {
+    const ctx = studioAudioContextRef.current;
     const gainNode = remotePlaybackGainRef.current;
-    if (!gainNode) return;
-    gainNode.gain.value = muted ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
+    if (!ctx || !gainNode || ctx.state === "closed") return;
+    const target = muted
+      ? 0
+      : Math.min(
+          Math.max(remotePlaybackVolumeRef.current, REMOTE_PLAYBACK_VOLUME_MIN),
+          REMOTE_PLAYBACK_VOLUME_MAX
+        );
+    try {
+      gainNode.gain.cancelScheduledValues(ctx.currentTime);
+      gainNode.gain.setTargetAtTime(target, ctx.currentTime, 0.01);
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   const replacePeerAudioTrack = useCallback(
@@ -617,7 +642,12 @@ export default function StudioBridgePage() {
     const delayNode = ctx.createDelay(5);
     delayNode.delayTime.value = 0; // MUST remain 0 for real-time jamming
     const gain = ctx.createGain();
-    gain.gain.value = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
+    gain.gain.value = speakerMutedRef.current
+      ? 0
+      : Math.min(
+          Math.max(remotePlaybackVolumeRef.current, REMOTE_PLAYBACK_VOLUME_MIN),
+          REMOTE_PLAYBACK_VOLUME_MAX
+        );
     remoteBufferNodeRef.current = null;
     if (isBufferingEnabledRef.current) {
       if (
@@ -714,7 +744,12 @@ export default function StudioBridgePage() {
       const rebuiltGain = remotePlaybackGainRef.current;
       const rebuiltCtx = studioAudioContextRef.current;
       if (!rebuiltGain || !rebuiltCtx) return;
-      const targetGain = speakerMutedRef.current ? 0 : REMOTE_PLAYBACK_GAIN_UNMUTED;
+      const targetGain = speakerMutedRef.current
+        ? 0
+        : Math.min(
+            Math.max(remotePlaybackVolumeRef.current, REMOTE_PLAYBACK_VOLUME_MIN),
+            REMOTE_PLAYBACK_VOLUME_MAX
+          );
       try {
         rebuiltGain.gain.cancelScheduledValues(rebuiltCtx.currentTime);
         rebuiltGain.gain.setValueAtTime(0, rebuiltCtx.currentTime);
@@ -760,6 +795,10 @@ export default function StudioBridgePage() {
     speakerMutedRef.current = isSpeakerMuted;
     applyRemotePlaybackSpeakerGain(isSpeakerMuted);
   }, [isSpeakerMuted, applyRemotePlaybackSpeakerGain]);
+
+  useEffect(() => {
+    remotePlaybackVolumeRef.current = remotePlaybackVolume;
+  }, [remotePlaybackVolume]);
 
   useEffect(() => {
     if (!remoteStream) {
@@ -972,6 +1011,21 @@ export default function StudioBridgePage() {
       return nextMuted;
     });
   }, [applyRemotePlaybackSpeakerGain]);
+
+  const onRemotePlaybackVolumeChange = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const next = Number(e.target.value);
+      if (!Number.isFinite(next)) return;
+      const clamped = Math.min(
+        Math.max(next, REMOTE_PLAYBACK_VOLUME_MIN),
+        REMOTE_PLAYBACK_VOLUME_MAX
+      );
+      remotePlaybackVolumeRef.current = clamped;
+      setRemotePlaybackVolume(clamped);
+      applyRemotePlaybackSpeakerGain(isSpeakerMuted);
+    },
+    [applyRemotePlaybackSpeakerGain, isSpeakerMuted]
+  );
 
   const clearRecordingInterval = useCallback(() => {
     if (recordingIntervalRef.current !== null) {
@@ -1590,6 +1644,18 @@ export default function StudioBridgePage() {
             pingIntervalRef.current = null;
           }
           teardownRemotePlaybackGraph();
+          const ctx = studioAudioContextRef.current;
+          if (ctx && ctx.state !== "closed") {
+            await ctx.close().catch(() => {});
+          }
+          studioAudioContextRef.current = null;
+          metronomeGainRef.current = null;
+          workletLoadedContextRef.current = null;
+          workletLoadPromiseRef.current = null;
+          if (mountedRef.current) {
+            setIsWorkletLoaded(false);
+            setAudioContextReady(false);
+          }
           if (remoteAudioRef.current) {
             remoteAudioRef.current.srcObject = null;
           }
@@ -1625,6 +1691,8 @@ export default function StudioBridgePage() {
             setIsMicMuted(false);
             setIsSpeakerMuted(false);
             speakerMutedRef.current = false;
+            setRemotePlaybackVolume(DEFAULT_REMOTE_PLAYBACK_VOLUME);
+            remotePlaybackVolumeRef.current = DEFAULT_REMOTE_PLAYBACK_VOLUME;
             setConnectionLostCountdown(null);
             setRemoteParticipantName(null);
             setIsRecording(false);
@@ -2563,7 +2631,7 @@ export default function StudioBridgePage() {
       </AnimatePresence>
 
       <audio ref={localMonitorAudioRef} className="sr-only" playsInline muted />
-      <audio ref={remoteAudioRef} className="sr-only" playsInline />
+      <audio ref={remoteAudioRef} className="sr-only" playsInline muted />
 
       <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-16 pb-28 sm:px-6 lg:pb-16">
         <motion.button
@@ -2761,31 +2829,44 @@ export default function StudioBridgePage() {
                     <span className="text-[11px]">{isMicMuted ? "Muted" : "Mic"}</span>
                   </motion.button>
 
-                  <motion.button
-                    type="button"
-                    disabled={!remoteStream}
-                    onClick={toggleSpeaker}
-                    whileTap={{ scale: 0.97 }}
-                    className={`flex flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
-                      isSpeakerMuted
-                        ? "border-stone-800/70 text-stone-200/90"
-                        : "border-emerald-500/35 text-emerald-200/90"
-                    }`}
-                    style={
-                      isSpeakerMuted
-                        ? undefined
-                        : {
-                            boxShadow: `0 0 26px -10px ${EMERALD}cc`,
-                          }
-                    }
-                  >
-                    {isSpeakerMuted ? (
-                      <VolumeX className="h-4 w-4" aria-hidden />
-                    ) : (
-                      <Volume2 className="h-4 w-4" aria-hidden />
-                    )}
-                    <span className="text-[11px]">{isSpeakerMuted ? "Muted" : "Speaker"}</span>
-                  </motion.button>
+                  <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                    <motion.button
+                      type="button"
+                      disabled={!remoteStream}
+                      onClick={toggleSpeaker}
+                      whileTap={{ scale: 0.97 }}
+                      className={`flex w-full flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
+                        isSpeakerMuted
+                          ? "border-stone-800/70 text-stone-200/90"
+                          : "border-emerald-500/35 text-emerald-200/90"
+                      }`}
+                      style={
+                        isSpeakerMuted
+                          ? undefined
+                          : {
+                              boxShadow: `0 0 26px -10px ${EMERALD}cc`,
+                            }
+                      }
+                    >
+                      {isSpeakerMuted ? (
+                        <VolumeX className="h-4 w-4" aria-hidden />
+                      ) : (
+                        <Volume2 className="h-4 w-4" aria-hidden />
+                      )}
+                      <span className="text-[11px]">{isSpeakerMuted ? "Muted" : "Speaker"}</span>
+                    </motion.button>
+                    <input
+                      type="range"
+                      min={REMOTE_PLAYBACK_VOLUME_MIN}
+                      max={REMOTE_PLAYBACK_VOLUME_MAX}
+                      step={0.1}
+                      value={remotePlaybackVolume}
+                      onChange={onRemotePlaybackVolumeChange}
+                      disabled={!remoteStream}
+                      aria-label="Remote playback volume"
+                      className="h-2 w-full min-w-0 accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
+                    />
+                  </div>
 
                   <motion.button
                     type="button"
@@ -3104,6 +3185,17 @@ export default function StudioBridgePage() {
                         {isSpeakerMuted ? <VolumeX className="h-3.5 w-3.5" aria-hidden /> : <Volume2 className="h-3.5 w-3.5" aria-hidden />}
                         <span>Spk</span>
                       </button>
+                      <input
+                        type="range"
+                        min={REMOTE_PLAYBACK_VOLUME_MIN}
+                        max={REMOTE_PLAYBACK_VOLUME_MAX}
+                        step={0.1}
+                        value={remotePlaybackVolume}
+                        onChange={onRemotePlaybackVolumeChange}
+                        disabled={!remoteStream}
+                        aria-label="Remote playback volume"
+                        className="h-2 w-24 shrink-0 accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
+                      />
                     </div>
                   </div>
                   {highPingTipOpen ? (
