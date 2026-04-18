@@ -951,11 +951,13 @@ export default function StudioBridgePage() {
                 0,
                 Math.min(5, oneWayDelayMs / 1000)
               );
-              delayNode.delayTime.setTargetAtTime(
-                nextDelaySeconds,
-                ctx.currentTime,
-                0.08
-              );
+              if (Math.abs(delayNode.delayTime.value - nextDelaySeconds) > 0.01) {
+                delayNode.delayTime.setTargetAtTime(
+                  nextDelaySeconds,
+                  ctx.currentTime,
+                  0.08
+                );
+              }
             }
           }
           let jitterSec = 0;
@@ -974,15 +976,18 @@ export default function StudioBridgePage() {
             const rttSec = (parsedRtt.rttMs / 2) / 1000;
             let autoTarget = Math.round((rttSec + jitterSec + 0.02) * 48000);
             autoTarget = Math.max(480, Math.min(19200, autoTarget));
-            const bufferNode = remoteBufferNodeRef.current;
-            if (bufferNode && "port" in bufferNode) {
-              bufferNode.port.postMessage({
-                type: "SET_TARGET_LEAD_FRAMES",
-                value: autoTarget,
-              });
+            const currentTarget = targetLeadFramesRef.current;
+            if (Math.abs(autoTarget - currentTarget) >= 480) {
+              const bufferNode = remoteBufferNodeRef.current;
+              if (bufferNode && "port" in bufferNode) {
+                bufferNode.port.postMessage({
+                  type: "SET_TARGET_LEAD_FRAMES",
+                  value: autoTarget,
+                });
+              }
+              targetLeadFramesRef.current = autoTarget;
+              setTargetLeadFrames(autoTarget);
             }
-            targetLeadFramesRef.current = autoTarget;
-            setTargetLeadFrames(autoTarget);
           }
           if (parsed === null) {
             setInboundPacketLossPercent(null);
@@ -1549,11 +1554,11 @@ export default function StudioBridgePage() {
     if (role !== "host") {
       const target = lastAppliedGuestStartSecRef.current;
       if (typeof target === "number" && Number.isFinite(target)) {
-        const barLenSec = (60 / metronomeBpm) * beatsPerInterval;
-        if (Number.isFinite(barLenSec) && barLenSec > 0 && target < ctx.currentTime) {
-          const snappedStart =
-            target + Math.ceil((ctx.currentTime - target) / barLenSec) * barLenSec;
-          startAtSec = snappedStart;
+        const sixteenthSec = (60 / metronomeBpm) / 4;
+        if (Number.isFinite(sixteenthSec) && sixteenthSec > 0 && target < ctx.currentTime) {
+          startAtSec =
+            target +
+            Math.ceil((ctx.currentTime - target) / sixteenthSec) * sixteenthSec;
         } else {
           startAtSec = target;
         }
@@ -2442,7 +2447,9 @@ export default function StudioBridgePage() {
             const receivedAtMs = Date.now();
             const rttDelaySec = (calculatedDelayMsRef.current || 0) / 1000;
             const offsetSec = (receivedAtMs - msg.serverTimestamp) / 1000;
-            const guestTargetSec = msg.hostTime + offsetSec + rttDelaySec;
+            const bufferDelaySec = targetLeadFramesRef.current / 48000;
+            const guestTargetSec =
+              msg.hostTime + offsetSec + rttDelaySec + bufferDelaySec;
 
             lastAppliedGuestStartSecRef.current = guestTargetSec;
             lastSyncApplyAtMsRef.current = receivedAtMs;
