@@ -425,6 +425,7 @@ export default function StudioBridgePage() {
   const localRecorderRef = useRef<TrackRecorder | null>(null);
   const recordingIntervalRef = useRef<number | null>(null);
   const pingIntervalRef = useRef<number | null>(null);
+  const handshakeFallbackIntervalRef = useRef<number | null>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const mountedRef = useRef(true);
   const statusRef = useRef<BridgeStatus>("connecting");
@@ -1658,6 +1659,10 @@ export default function StudioBridgePage() {
             clearInterval(pingIntervalRef.current);
             pingIntervalRef.current = null;
           }
+          if (handshakeFallbackIntervalRef.current) {
+            window.clearInterval(handshakeFallbackIntervalRef.current);
+            handshakeFallbackIntervalRef.current = null;
+          }
           teardownRemotePlaybackGraph();
           const ctx = studioAudioContextRef.current;
           if (ctx && ctx.state !== "closed") {
@@ -2162,6 +2167,50 @@ export default function StudioBridgePage() {
 
         // Start timeout window (with one automatic extension if ICE is still gathering).
         scheduleConnectTimeout(60000);
+
+        // Phase 4.1.1: backup poll if Realtime misses postgres_changes during handshake.
+        handshakeFallbackIntervalRef.current = window.setInterval(async () => {
+          if (p2pConnectSucceededRef.current || statusRef.current !== "connecting" || !mountedRef.current) {
+            if (handshakeFallbackIntervalRef.current) {
+              window.clearInterval(handshakeFallbackIntervalRef.current);
+              handshakeFallbackIntervalRef.current = null;
+            }
+            return;
+          }
+
+          try {
+            const { data } = await supabase
+              .from("studio_sessions")
+              .select("offer, answer, ice_candidates")
+              .eq("session_id", sessionId.toUpperCase())
+              .single<StudioSessionRow>();
+
+            if (!data) return;
+            const currentPeer = peerRef.current;
+            if (!currentPeer) return;
+
+            if (activeRole === "host") {
+              if (!appliedRemoteSignalRef.current && data.answer && typeof data.answer === "object") {
+                appliedRemoteSignalRef.current = true;
+                addLog("Answer received (via Poller)");
+                currentPeer.signal(data.answer);
+                scheduleConnectTimeout(60000);
+                setStatusNote("Answer received. Negotiating...");
+              }
+            } else {
+              if (!appliedRemoteSignalRef.current && data.offer && typeof data.offer === "object") {
+                appliedRemoteSignalRef.current = true;
+                addLog("Offer received (via Poller)");
+                currentPeer.signal(data.offer);
+                scheduleConnectTimeout(60000);
+                setStatusNote("Offer received. Creating answer...");
+              }
+            }
+            applyRemoteIce(data.ice_candidates, activeRole);
+          } catch {
+            /* ignore network errors during polling */
+          }
+        }, 4000);
 
         const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
         if (rawPc) {
