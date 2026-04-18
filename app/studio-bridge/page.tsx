@@ -385,6 +385,7 @@ export default function StudioBridgePage() {
   const [isWorkletLoaded, setIsWorkletLoaded] = useState(false);
   const [bufferDepthFrames, setBufferDepthFrames] = useState(0);
   const [targetLeadFrames, setTargetLeadFrames] = useState(4800);
+  const [isAutoBuffer, setIsAutoBuffer] = useState(true);
   const [isBufferPrimed, setIsBufferPrimed] = useState(false);
   const [lastCorrectionEvent, setLastCorrectionEvent] = useState<"drop" | "dupe" | "none">(
     "none"
@@ -501,6 +502,7 @@ export default function StudioBridgePage() {
   const isBufferingEnabledRef = useRef(isBufferingEnabled);
   const isWorkletLoadedRef = useRef(isWorkletLoaded);
   const targetLeadFramesRef = useRef(targetLeadFrames);
+  const isAutoBufferRef = useRef(true);
 
   useEffect(() => {
     isMicMutedRef.current = isMicMuted;
@@ -517,6 +519,10 @@ export default function StudioBridgePage() {
   useEffect(() => {
     targetLeadFramesRef.current = targetLeadFrames;
   }, [targetLeadFrames]);
+
+  useEffect(() => {
+    isAutoBufferRef.current = isAutoBuffer;
+  }, [isAutoBuffer]);
 
   const teardownRemotePlaybackGraph = useCallback(() => {
     setRemoteMeterTapActive(false);
@@ -952,7 +958,32 @@ export default function StudioBridgePage() {
               );
             }
           }
+          let jitterSec = 0;
+          stats.forEach((stat) => {
+            if (
+              stat.type === "inbound-rtp" &&
+              stat.kind === "audio" &&
+              typeof (stat as RTCInboundRtpStreamStats).jitter === "number"
+            ) {
+              const j = (stat as RTCInboundRtpStreamStats).jitter;
+              if (typeof j === "number") jitterSec = j;
+            }
+          });
           const parsed = parseInboundAudioPacketLoss(stats);
+          if (isAutoBufferRef.current && parsedRtt !== null) {
+            const rttSec = (parsedRtt.rttMs / 2) / 1000;
+            let autoTarget = Math.round((rttSec + jitterSec + 0.02) * 48000);
+            autoTarget = Math.max(480, Math.min(19200, autoTarget));
+            const bufferNode = remoteBufferNodeRef.current;
+            if (bufferNode && "port" in bufferNode) {
+              bufferNode.port.postMessage({
+                type: "SET_TARGET_LEAD_FRAMES",
+                value: autoTarget,
+              });
+            }
+            targetLeadFramesRef.current = autoTarget;
+            setTargetLeadFrames(autoTarget);
+          }
           if (parsed === null) {
             setInboundPacketLossPercent(null);
             applyKiteSyncLossGuardRef.current(null);
@@ -1260,6 +1291,7 @@ export default function StudioBridgePage() {
   }, [echoSafetyMode, enteredStudio, replacePeerAudioTrack]);
 
   useEffect(() => {
+    if (isAutoBufferRef.current) return;
     if (targetLeadFramesDebounceRef.current !== null) {
       clearTimeout(targetLeadFramesDebounceRef.current);
     }
@@ -1278,7 +1310,7 @@ export default function StudioBridgePage() {
         targetLeadFramesDebounceRef.current = null;
       }
     };
-  }, [targetLeadFrames]);
+  }, [targetLeadFrames, isAutoBuffer]);
 
   const buildKiteSyncPacket = useCallback((overrides?: {
     kiteSyncEnabled?: boolean;
@@ -1865,6 +1897,10 @@ export default function StudioBridgePage() {
     let connectTimeout: number | null = null;
     let localIceCandidateSeen = false;
     let timeoutExtendedForIce = false;
+    let transportSessionId = "";
+    let transportActiveRole: Role = "host";
+    let transportIsHost = true;
+    let transportForceRelay = false;
     let sessionUserId: string | null = null;
     leaveSignalSentRef.current = false;
     leaveSignalReceivedRef.current = false;
@@ -2045,6 +2081,623 @@ export default function StudioBridgePage() {
         seenIceRef.current.add(item.id);
         peerRef.current.signal(item.candidate);
       }
+    };
+
+    let reconnectTransport: () => Promise<void> = async () => {};
+
+    const buildTransport = async (localStream: MediaStream, ctx: AudioContext) => {
+      p2pConnectSucceededRef.current = false;
+      appliedRemoteSignalRef.current = false;
+      seenIceRef.current = new Set();
+      setStatus("connecting");
+      addLog("Phase 3: Realtime subscribe + peer");
+      setStatusNote("Starting peer connection...");
+
+      const roomId = `session_id:${transportSessionId.toUpperCase()}`;
+      const channel = supabase
+        .channel(
+          roomId,
+          { config: { realtime: { heartbeatIntervalMs: 3000 } } } as any
+        )
+        .on("broadcast", { event: "session-control" }, (payload) => {
+          const msg = payload.payload as SessionControlMessage | undefined;
+          if (!msg || msg.type !== "LEAVE") return;
+          if (msg.room !== transportSessionId.toUpperCase()) return;
+          if (msg.from === transportActiveRole) return;
+          const departedName = remoteParticipantName || "A participant";
+          leaveSignalReceivedRef.current = true;
+          setKiteSyncEnabled(false);
+          stopKiteMetronome();
+          addLog("Collaborator LEAVE received");
+          clearLostCountdown();
+          setCollaboratorLeft(true);
+          setLastDepartedParticipantName(departedName);
+          setRemoteParticipantName(null);
+          setStatus("failed");
+          setStatusNote(`${departedName} left the session.`);
+        })
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "studio_sessions",
+            filter: `session_id=eq.${transportSessionId.toUpperCase()}`,
+          },
+          (payload) => {
+            console.log('[SUPABASE-POSTGRES-CHANGE] Payload received:', payload);
+            const nextRow = payload.new as StudioSessionRow;
+            if (!nextRow || typeof nextRow !== "object") return;
+            const peer = peerRef.current;
+
+            if (transportActiveRole === "host") {
+              if (
+                peer &&
+                !appliedRemoteSignalRef.current &&
+                nextRow.answer &&
+                typeof nextRow.answer === "object"
+              ) {
+                appliedRemoteSignalRef.current = true;
+                addLog("Answer received");
+                peer.signal(nextRow.answer);
+                scheduleConnectTimeout(60000);
+                setStatusNote("Answer received. Negotiating...");
+              }
+            } else if (
+              peer &&
+              !appliedRemoteSignalRef.current &&
+              nextRow.offer &&
+              typeof nextRow.offer === "object"
+            ) {
+              appliedRemoteSignalRef.current = true;
+              addLog("Offer received");
+              peer.signal(nextRow.offer);
+              scheduleConnectTimeout(60000);
+              setStatusNote("Offer received. Creating answer...");
+            }
+
+            applyRemoteIce(nextRow.ice_candidates, transportActiveRole);
+          }
+        )
+        .subscribe((status, err) => {
+          console.log('[SUPABASE-CHANNEL-STATUS]', status, err);
+          if (status === 'SUBSCRIBED') {
+            console.log('[Kite] Signaling Bridge Restored');
+          }
+        });
+      channelRef.current = channel;
+
+      addLog(
+        `Negotiation: ${transportIsHost ? "host initiates (offer first)" : "guest answers"}`
+      );
+
+      const isSafariWebKit = isStudioSafariWebKitEngine();
+      const lowLatencyReceiverOpts = { isSafariWebKit };
+
+      const iceServers = await fetchTurnCredentials();
+      const peerConfig = buildPeerConfig(iceServers, transportForceRelay);
+      const peer = new Peer({
+        initiator: transportIsHost,
+        trickle: true,
+        stream: localStream,
+        config: peerConfig,
+        sdpTransform: (sdp) => {
+          console.log("[SDP-IN]", sdp);
+          try {
+            const result = forceMusicModeOpus(sdp);
+            console.log("[SDP-OUT]", result);
+            if (!result || typeof result !== "string") {
+              console.error("[SDP-TRANSFORM] returned invalid value:", result);
+            }
+            return result;
+          } catch (err) {
+            console.error("[SDP-TRANSFORM] threw:", err);
+            return sdp;
+          }
+        },
+      });
+      peerRef.current = peer;
+      peer.on("error", (err) => {
+        console.error("[PEER-ERROR]", err);
+      });
+      // Attach raw RTCPeerConnection diagnostic listeners
+      if ((peer as any)._pc) {
+        const pc = (peer as any)._pc;
+        pc.addEventListener("icegatheringstatechange", () =>
+          console.log("[ICE-GATHER]", pc.iceGatheringState)
+        );
+        pc.addEventListener("iceconnectionstatechange", () =>
+          console.log("[ICE-CONN]", pc.iceConnectionState)
+        );
+        pc.addEventListener("signalingstatechange", () =>
+          console.log("[SIG-STATE]", pc.signalingState)
+        );
+      }
+      let presenceNotified = false;
+
+      const scheduleConnectTimeout = (delayMs: number) => {
+        if (connectTimeout !== null) {
+          clearTimeout(connectTimeout);
+        }
+        connectTimeout = window.setTimeout(() => {
+          if (!mountedRef.current || cancelled || statusRef.current !== "connecting") return;
+
+          // On strict networks, ICE gathering can be slower; allow one grace extension.
+          if (!localIceCandidateSeen && !timeoutExtendedForIce) {
+            timeoutExtendedForIce = true;
+            addLog("No local ICE yet after 15s; extending timeout window.");
+            setStatusNote("Gathering network routes...");
+            scheduleConnectTimeout(10000);
+            return;
+          }
+
+          console.error("WebRTC timeout before connect", {
+            iceServers: "Fetched dynamically",
+            localIceCandidateSeen,
+          });
+          setStatus("failed");
+          setStatusNote(
+            "Network Restricted. This can happen on some restricted Wi-Fi networks. Try switching to Mobile Data."
+          );
+        }, delayMs);
+      };
+
+      // Start timeout window (with one automatic extension if ICE is still gathering).
+      scheduleConnectTimeout(60000);
+
+      // Phase 4.1.1: backup poll if Realtime misses postgres_changes during handshake.
+      handshakeFallbackIntervalRef.current = window.setInterval(async () => {
+        if (p2pConnectSucceededRef.current || statusRef.current !== "connecting" || !mountedRef.current) {
+          if (handshakeFallbackIntervalRef.current) {
+            window.clearInterval(handshakeFallbackIntervalRef.current);
+            handshakeFallbackIntervalRef.current = null;
+          }
+          return;
+        }
+
+        try {
+          const { data } = await supabase
+            .from("studio_sessions")
+            .select("offer, answer, ice_candidates")
+            .eq("session_id", transportSessionId.toUpperCase())
+            .single<StudioSessionRow>();
+
+          if (!data) return;
+          const currentPeer = peerRef.current;
+          if (!currentPeer) return;
+
+          if (transportActiveRole === "host") {
+            if (!appliedRemoteSignalRef.current && data.answer && typeof data.answer === "object") {
+              appliedRemoteSignalRef.current = true;
+              addLog("Answer received (via Poller)");
+              currentPeer.signal(data.answer);
+              scheduleConnectTimeout(60000);
+              setStatusNote("Answer received. Negotiating...");
+            }
+          } else {
+            if (!appliedRemoteSignalRef.current && data.offer && typeof data.offer === "object") {
+              appliedRemoteSignalRef.current = true;
+              addLog("Offer received (via Poller)");
+              currentPeer.signal(data.offer);
+              scheduleConnectTimeout(60000);
+              setStatusNote("Offer received. Creating answer...");
+            }
+          }
+          applyRemoteIce(data.ice_candidates, transportActiveRole);
+        } catch {
+          /* ignore network errors during polling */
+        }
+      }, 4000);
+
+      const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
+      if (rawPc) {
+        peerConnectionRef.current = rawPc;
+        rawPc.addEventListener("track", () => {
+          applyLowLatencyInboundAudioReceivers(rawPc, lowLatencyReceiverOpts);
+        });
+
+        rawPc.addEventListener("icegatheringstatechange", () => {
+          // no-op
+        });
+
+        rawPc.addEventListener("icecandidate", (_event) => {
+          // no-op
+        });
+
+        rawPc.addEventListener(
+          "icecandidateerror",
+          (event: RTCPeerConnectionIceErrorEvent) => {
+            console.error("ICE candidate error detail:", {
+              errorCode: event.errorCode,
+              errorText: event.errorText,
+              url: event.url,
+            });
+          }
+        );
+
+        rawPc.addEventListener("iceconnectionstatechange", () => {
+          const iceState = rawPc.iceConnectionState;
+          addLog(`iceConnectionState=${iceState}`);
+
+          if (leaveSignalReceivedRef.current) return;
+          if (iceState === "connected" || iceState === "completed") {
+            p2pConnectSucceededRef.current = true;
+            setError(null);
+            setStatus("connected");
+            clearLostCountdown();
+            applyLowLatencyInboundAudioReceivers(rawPc, lowLatencyReceiverOpts);
+            rawPc
+              .getStats()
+              .then((stats) => {
+                stats.forEach((report) => {
+                  if (report.type === "candidate-pair" && report.state === "succeeded") {
+                    addLog(
+                      `SELECTED PAIR — local: ${report.localCandidateId} remote: ${report.remoteCandidateId}`
+                    );
+                  }
+                  if (report.type === "local-candidate") {
+                    addLog(
+                      `LOCAL candidate type: ${report.candidateType} protocol: ${report.protocol}`
+                    );
+                  }
+                  if (report.type === "remote-candidate") {
+                    addLog(
+                      `REMOTE candidate type: ${report.candidateType} protocol: ${report.protocol}`
+                    );
+                  }
+                });
+              })
+              .catch(() => {
+                // Stats may not be available in all environments; ignore errors.
+              });
+            return;
+          }
+          if (iceState === "disconnected") {
+            void reconnectTransport();
+            return;
+          }
+          if (iceState === "failed") {
+            void reconnectTransport();
+          }
+        });
+      }
+
+      peer.on("stream", (remoteStream: MediaStream) => {
+        if (!mountedRef.current) return;
+        addLog("Remote audio stream received");
+        remoteStreamRef.current = remoteStream;
+        setRemoteStream(remoteStream);
+        setRemoteLevel(0);
+        const remoteEl = remoteAudioRef.current;
+        if (remoteEl) {
+          remoteEl.srcObject = remoteStream;
+          remoteEl.muted = true;
+          void remoteEl.play().catch(() => {
+            addLog("Remote audio play() blocked (tap page if silent)");
+          });
+        }
+        if (studioAudioContextRef.current) {
+          buildRemotePlaybackGraph(remoteStream);
+        }
+      });
+
+      peer.on("data", (chunk: unknown) => {
+        try {
+          const text = decodePeerDataChunk(chunk);
+          const msg = JSON.parse(text) as {
+            t?: string;
+            ts?: number;
+            type?: string;
+            name?: string;
+            bpm?: number;
+            bpi?: number;
+            hostTime?: number;
+            enabled?: boolean;
+            serverTimestamp?: number;
+            sequenceNumber?: number;
+            from?: Role;
+          };
+          if (msg.type === "LEAVE") {
+            if (msg.from === transportActiveRole) return;
+            const departedName = remoteParticipantName || "A participant";
+            leaveSignalReceivedRef.current = true;
+            setKiteSyncEnabled(false);
+            stopKiteMetronome();
+            clearLostCountdown();
+            setCollaboratorLeft(true);
+            setLastDepartedParticipantName(departedName);
+            setRemoteParticipantName(null);
+            setStatus("failed");
+            setStatusNote(`${departedName} left the session.`);
+            return;
+          }
+          if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
+            if (mountedRef.current) {
+              const incomingName = msg.name.trim();
+              setRemoteParticipantName(incomingName);
+              if (!presenceNotified) {
+                setStatusNote(`${incomingName} entered the session.`);
+                presenceNotified = true;
+              }
+            }
+          } else if (msg.t === "ping" && typeof msg.ts === "number") {
+            peer.send(JSON.stringify({ t: "pong", ts: msg.ts }));
+          } else if (msg.t === "pong" && typeof msg.ts === "number" && mountedRef.current) {
+            const latency = Math.round(performance.now() - msg.ts);
+            setPingMs(latency);
+          } else if (
+            msg.type === "KITE_SYNC" &&
+            typeof msg.sequenceNumber === "number" &&
+            typeof msg.hostTime === "number" &&
+            typeof msg.serverTimestamp === "number" &&
+            typeof msg.bpm === "number" &&
+            typeof msg.bpi === "number" &&
+            typeof msg.enabled === "boolean"
+          ) {
+            if (msg.sequenceNumber <= lastAcceptedKiteSyncSeqRef.current) return;
+            lastAcceptedKiteSyncSeqRef.current = msg.sequenceNumber;
+            setKiteSyncEnabled(msg.enabled);
+            if (!msg.enabled) return;
+
+            const receivedAtMs = Date.now();
+            const rttDelaySec = (calculatedDelayMsRef.current || 0) / 1000;
+            const offsetSec = (receivedAtMs - msg.serverTimestamp) / 1000;
+            const guestTargetSec = msg.hostTime + offsetSec + rttDelaySec;
+
+            lastAppliedGuestStartSecRef.current = guestTargetSec;
+            lastSyncApplyAtMsRef.current = receivedAtMs;
+            setMetronomeBpm(msg.bpm);
+            setBeatsPerInterval(msg.bpi);
+            const ctx = studioAudioContextRef.current;
+            if (ctx) {
+              const sixteenthSec = 60 / msg.bpm / 4;
+              let nextGridSec = guestTargetSec;
+              if (
+                Number.isFinite(sixteenthSec) &&
+                sixteenthSec > 0 &&
+                guestTargetSec < ctx.currentTime
+              ) {
+                nextGridSec =
+                  guestTargetSec +
+                  Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) * sixteenthSec;
+              }
+              flushAndSetRemoteGridTarget(nextGridSec);
+              const countInTwoBeatsSec = (60 / msg.bpm) * 2;
+              if (Number.isFinite(countInTwoBeatsSec) && countInTwoBeatsSec > 0) {
+                kiteSyncCountInEndAtContextSecRef.current =
+                  ctx.currentTime + countInTwoBeatsSec;
+                if (metronomeGainRef.current) metronomeGainRef.current.gain.value = 0;
+                setKiteSyncCountInActive(true);
+              }
+            }
+            console.log("KITE_SYNC received! Guest Target Start:", guestTargetSec);
+          }
+        } catch {
+          // Ignore non-JSON or malformed ping payloads.
+        }
+      });
+
+      const enqueueIceAppend = (nextCandidate: IceCandidateRow) => {
+        iceAppendQueueRef.current = iceAppendQueueRef.current
+          .then(async () => {
+            await appendIceCandidate(transportSessionId, nextCandidate);
+            addLog("ICE candidate sent");
+          })
+          .catch((err) => {
+            console.error("ICE append failed", err);
+            addLog("ICE send failed");
+          });
+        void iceAppendQueueRef.current;
+      };
+
+      peer.on("signal", (signalData: SignalData) => {
+        try {
+          const candidateLike = (signalData as { candidate?: unknown }).candidate;
+          const typeLike = (signalData as { type?: unknown }).type;
+
+          if (candidateLike) {
+            localIceCandidateSeen = true;
+            const candidateRecord: IceCandidateRow = {
+              id: `${transportActiveRole}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              from: transportActiveRole,
+              candidate: signalData,
+            };
+            enqueueIceAppend(candidateRecord);
+            return;
+          }
+
+          if (typeLike === "offer") {
+            addLog("Offer sent");
+            void (async () => {
+              const { error } = await supabase
+                .from("studio_sessions")
+                .update({ offer: signalData })
+                .eq("session_id", transportSessionId.toUpperCase());
+              if (error) throw error;
+              setStatusNote("Offer published. Waiting for peer answer...");
+            })().catch((err) => {
+              console.error("Offer publish failed", err);
+              setStatus("failed");
+              setStatusNote("Offer publish failed.");
+            });
+            return;
+          }
+
+          if (typeLike === "answer") {
+            addLog("Answer sent");
+            void (async () => {
+              const { error } = await supabase
+                .from("studio_sessions")
+                .update({ answer: signalData })
+                .eq("session_id", transportSessionId.toUpperCase());
+              if (error) throw error;
+              setStatusNote("Answer sent. Finalizing connection...");
+            })().catch((err) => {
+              console.error("Answer publish failed", err);
+              setStatus("failed");
+              setStatusNote("Answer publish failed.");
+            });
+            return;
+          }
+        } catch {
+          setStatus("failed");
+          setStatusNote("Signaling update failed.");
+        }
+      });
+
+      peer.on("connect", () => {
+        p2pConnectSucceededRef.current = true;
+        setError(null);
+        setStatus("connected");
+        setStatusNote(P2P_CONNECTED_NOTE);
+        void channel.unsubscribe();
+        if (channelRef.current === channel) {
+          channelRef.current = null;
+        }
+        console.log('[Kite] Handshake complete. Signaling bridge closed to reduce jitter.');
+        try {
+          peer.send(
+            JSON.stringify({
+              type: "presence",
+              name: transportIsHost ? "Host" : "Guest",
+            })
+          );
+        } catch {
+          // Presence payload is best-effort; keep connect flow unchanged on send failures.
+        }
+        if (transportIsHost && kiteSyncEnabled && pendingKiteSyncRef.current) {
+          try {
+            peer.send(JSON.stringify(pendingKiteSyncRef.current));
+            pendingKiteSyncRef.current = null;
+          } catch {
+            // Keep queued packet for next successful send checkpoint.
+          }
+        }
+        if (connectTimeout !== null) {
+          clearTimeout(connectTimeout);
+          connectTimeout = null;
+        }
+        if (pingIntervalRef.current !== null) {
+          clearInterval(pingIntervalRef.current);
+        }
+        pingIntervalRef.current = window.setInterval(() => {
+          if (!mountedRef.current) return;
+          try {
+            peer.send(JSON.stringify({ t: "ping", ts: performance.now() }));
+          } catch {
+            console.warn("[Kite] Ping failed, peer likely closed");
+          }
+        }, 2000);
+      });
+
+      peer.on("error", (err: unknown) => {
+        if (!mountedRef.current) return;
+        if (pingIntervalRef.current !== null) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
+        const msg =
+          err instanceof Error
+            ? err.message
+            : typeof err === "object" && err !== null && "message" in err
+              ? String((err as { message: unknown }).message)
+              : String(err);
+        const code =
+          typeof err === "object" && err !== null && "code" in err
+            ? String((err as { code: unknown }).code)
+            : "";
+        addLog(`Peer error: ${msg}${code ? ` code=${code}` : ""}`);
+        console.error("WebRTC peer error detail", {
+          message: msg,
+          code,
+          iceServers: peerConfig?.iceServers ?? "fetched-at-runtime",
+        });
+      });
+
+      peer.on("close", () => {
+        if (!mountedRef.current) return;
+        setRemoteParticipantName(null);
+        if (pingIntervalRef.current !== null) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
+        if (connectTimeout !== null) {
+          clearTimeout(connectTimeout);
+          connectTimeout = null;
+        }
+        if (!leaveSignalReceivedRef.current && statusRef.current !== "connected") {
+          addLog("Peer closed");
+          beginLostCountdown();
+          setStatusNote("Connection lost, attempting to recover...");
+        }
+      });
+
+      if (!transportIsHost) {
+        const initial = existingRowRef.current;
+        if (initial?.offer && typeof initial.offer === "object") {
+          appliedRemoteSignalRef.current = true;
+          addLog("Initial offer applied");
+          peer.signal(initial.offer);
+          setStatusNote("Creating answer...");
+        }
+        if (initial?.ice_candidates) {
+          applyRemoteIce(initial.ice_candidates, transportActiveRole);
+        }
+      } else {
+        const { data: current } = await supabase
+          .from("studio_sessions")
+          .select("answer, ice_candidates")
+          .eq("session_id", transportSessionId.toUpperCase())
+          .single<Pick<StudioSessionRow, "answer" | "ice_candidates">>();
+        if (current?.answer && typeof current.answer === "object") {
+          appliedRemoteSignalRef.current = true;
+          addLog("Initial answer applied");
+          peer.signal(current.answer);
+        }
+        if (current?.ice_candidates) {
+          applyRemoteIce(current.ice_candidates, transportActiveRole);
+        }
+      }
+    };
+
+    reconnectTransport = async () => {
+      if (!localStreamRef.current || !studioAudioContextRef.current) return;
+      addLog("Initiating ICE Soft Reboot...");
+      setStatus("connecting");
+      setStatusNote("Connection dropped. Reconnecting...");
+
+      if (handshakeFallbackIntervalRef.current) {
+        window.clearInterval(handshakeFallbackIntervalRef.current);
+        handshakeFallbackIntervalRef.current = null;
+      }
+      if (connectTimeout !== null) {
+        clearTimeout(connectTimeout);
+        connectTimeout = null;
+      }
+      if (pingIntervalRef.current !== null) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
+      }
+      channelRef.current?.unsubscribe();
+      channelRef.current = null;
+      peerRef.current?.destroy();
+      peerRef.current = null;
+      peerConnectionRef.current = null;
+      teardownRemotePlaybackGraph();
+
+      if (transportIsHost) {
+        await supabase
+          .from("studio_sessions")
+          .update({ offer: null, answer: null, ice_candidates: [] })
+          .eq("session_id", transportSessionId.toUpperCase());
+      } else {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      }
+
+      await buildTransport(
+        localStreamRef.current,
+        studioAudioContextRef.current as AudioContext
+      );
     };
 
     const init = async () => {
@@ -2283,576 +2936,15 @@ export default function StudioBridgePage() {
         }
 
         // —— Phase 3: Realtime + WebRTC ——
+        transportSessionId = sessionId;
+        transportActiveRole = activeRole;
+        transportIsHost = isHost;
+        transportForceRelay = forceRelay;
         if (!mediaStream) return;
-        addLog("Phase 3: Realtime subscribe + peer");
-        setStatusNote("Starting peer connection...");
-
-        const roomId = `session_id:${sessionId.toUpperCase()}`;
-        const channel = supabase
-          .channel(
-            roomId,
-            { config: { realtime: { heartbeatIntervalMs: 3000 } } } as any
-          )
-          .on("broadcast", { event: "session-control" }, (payload) => {
-            const msg = payload.payload as SessionControlMessage | undefined;
-            if (!msg || msg.type !== "LEAVE") return;
-            if (msg.room !== sessionId.toUpperCase()) return;
-            if (msg.from === activeRole) return;
-            const departedName = remoteParticipantName || "A participant";
-            leaveSignalReceivedRef.current = true;
-            setKiteSyncEnabled(false);
-            stopKiteMetronome();
-            addLog("Collaborator LEAVE received");
-            clearLostCountdown();
-            setCollaboratorLeft(true);
-            setLastDepartedParticipantName(departedName);
-            setRemoteParticipantName(null);
-            setStatus("failed");
-            setStatusNote(`${departedName} left the session.`);
-          })
-          .on(
-            "postgres_changes",
-            {
-              event: "UPDATE",
-              schema: "public",
-              table: "studio_sessions",
-              filter: `session_id=eq.${sessionId.toUpperCase()}`,
-            },
-            (payload) => {
-              console.log('[SUPABASE-POSTGRES-CHANGE] Payload received:', payload);
-              const nextRow = payload.new as StudioSessionRow;
-              if (!nextRow || typeof nextRow !== "object") return;
-              const peer = peerRef.current;
-
-              if (activeRole === "host") {
-                if (
-                  peer &&
-                  !appliedRemoteSignalRef.current &&
-                  nextRow.answer &&
-                  typeof nextRow.answer === "object"
-                ) {
-                  appliedRemoteSignalRef.current = true;
-                  addLog("Answer received");
-                  peer.signal(nextRow.answer);
-                  scheduleConnectTimeout(60000);
-                  setStatusNote("Answer received. Negotiating...");
-                }
-              } else if (
-                peer &&
-                !appliedRemoteSignalRef.current &&
-                nextRow.offer &&
-                typeof nextRow.offer === "object"
-              ) {
-                appliedRemoteSignalRef.current = true;
-                addLog("Offer received");
-                peer.signal(nextRow.offer);
-                scheduleConnectTimeout(60000);
-                setStatusNote("Offer received. Creating answer...");
-              }
-
-              applyRemoteIce(nextRow.ice_candidates, activeRole);
-            }
-          )
-          .subscribe((status, err) => {
-            console.log('[SUPABASE-CHANNEL-STATUS]', status, err);
-            if (status === 'SUBSCRIBED') {
-              console.log('[Kite] Signaling Bridge Restored');
-            }
-          });
-        channelRef.current = channel;
-
-        addLog(
-          `Negotiation: ${isHost ? "host initiates (offer first)" : "guest answers"}`
+        await buildTransport(
+          localStreamRef.current!,
+          studioAudioContextRef.current as AudioContext
         );
-
-        const isSafariWebKit = isStudioSafariWebKitEngine();
-        const lowLatencyReceiverOpts = { isSafariWebKit };
-
-        const iceServers = await fetchTurnCredentials();
-        const peerConfig = buildPeerConfig(iceServers, forceRelay);
-        const peer = new Peer({
-          initiator: isHost,
-          trickle: true,
-          stream: mediaStream,
-          config: peerConfig,
-          sdpTransform: (sdp) => {
-            console.log("[SDP-IN]", sdp);
-            try {
-              const result = forceMusicModeOpus(sdp);
-              console.log("[SDP-OUT]", result);
-              if (!result || typeof result !== "string") {
-                console.error("[SDP-TRANSFORM] returned invalid value:", result);
-              }
-              return result;
-            } catch (err) {
-              console.error("[SDP-TRANSFORM] threw:", err);
-              return sdp;
-            }
-          },
-        });
-        peerRef.current = peer;
-        peer.on("error", (err) => {
-          console.error("[PEER-ERROR]", err);
-        });
-        // Attach raw RTCPeerConnection diagnostic listeners
-        if ((peer as any)._pc) {
-          const pc = (peer as any)._pc;
-          pc.addEventListener("icegatheringstatechange", () =>
-            console.log("[ICE-GATHER]", pc.iceGatheringState)
-          );
-          pc.addEventListener("iceconnectionstatechange", () =>
-            console.log("[ICE-CONN]", pc.iceConnectionState)
-          );
-          pc.addEventListener("signalingstatechange", () =>
-            console.log("[SIG-STATE]", pc.signalingState)
-          );
-        }
-        let presenceNotified = false;
-
-        const scheduleConnectTimeout = (delayMs: number) => {
-          if (connectTimeout !== null) {
-            clearTimeout(connectTimeout);
-          }
-          connectTimeout = window.setTimeout(() => {
-            if (!mountedRef.current || cancelled || statusRef.current !== "connecting") return;
-
-            // On strict networks, ICE gathering can be slower; allow one grace extension.
-            if (!localIceCandidateSeen && !timeoutExtendedForIce) {
-              timeoutExtendedForIce = true;
-              addLog("No local ICE yet after 15s; extending timeout window.");
-              setStatusNote("Gathering network routes...");
-              scheduleConnectTimeout(10000);
-              return;
-            }
-
-            console.error("WebRTC timeout before connect", {
-              iceServers: "Fetched dynamically",
-              localIceCandidateSeen,
-            });
-            setStatus("failed");
-            setStatusNote(
-              "Network Restricted. This can happen on some restricted Wi-Fi networks. Try switching to Mobile Data."
-            );
-          }, delayMs);
-        };
-
-        // Start timeout window (with one automatic extension if ICE is still gathering).
-        scheduleConnectTimeout(60000);
-
-        // Phase 4.1.1: backup poll if Realtime misses postgres_changes during handshake.
-        handshakeFallbackIntervalRef.current = window.setInterval(async () => {
-          if (p2pConnectSucceededRef.current || statusRef.current !== "connecting" || !mountedRef.current) {
-            if (handshakeFallbackIntervalRef.current) {
-              window.clearInterval(handshakeFallbackIntervalRef.current);
-              handshakeFallbackIntervalRef.current = null;
-            }
-            return;
-          }
-
-          try {
-            const { data } = await supabase
-              .from("studio_sessions")
-              .select("offer, answer, ice_candidates")
-              .eq("session_id", sessionId.toUpperCase())
-              .single<StudioSessionRow>();
-
-            if (!data) return;
-            const currentPeer = peerRef.current;
-            if (!currentPeer) return;
-
-            if (activeRole === "host") {
-              if (!appliedRemoteSignalRef.current && data.answer && typeof data.answer === "object") {
-                appliedRemoteSignalRef.current = true;
-                addLog("Answer received (via Poller)");
-                currentPeer.signal(data.answer);
-                scheduleConnectTimeout(60000);
-                setStatusNote("Answer received. Negotiating...");
-              }
-            } else {
-              if (!appliedRemoteSignalRef.current && data.offer && typeof data.offer === "object") {
-                appliedRemoteSignalRef.current = true;
-                addLog("Offer received (via Poller)");
-                currentPeer.signal(data.offer);
-                scheduleConnectTimeout(60000);
-                setStatusNote("Offer received. Creating answer...");
-              }
-            }
-            applyRemoteIce(data.ice_candidates, activeRole);
-          } catch {
-            /* ignore network errors during polling */
-          }
-        }, 4000);
-
-        const rawPc = (peer as unknown as { _pc?: RTCPeerConnection })._pc;
-        if (rawPc) {
-          peerConnectionRef.current = rawPc;
-          rawPc.addEventListener("track", () => {
-            applyLowLatencyInboundAudioReceivers(rawPc, lowLatencyReceiverOpts);
-          });
-
-          rawPc.addEventListener("icegatheringstatechange", () => {
-            // no-op
-          });
-
-          rawPc.addEventListener("icecandidate", (_event) => {
-            // no-op
-          });
-
-          rawPc.addEventListener(
-            "icecandidateerror",
-            (event: RTCPeerConnectionIceErrorEvent) => {
-              console.error("ICE candidate error detail:", {
-                errorCode: event.errorCode,
-                errorText: event.errorText,
-                url: event.url,
-              });
-            }
-          );
-
-          rawPc.addEventListener("iceconnectionstatechange", () => {
-            const iceState = rawPc.iceConnectionState;
-            addLog(`iceConnectionState=${iceState}`);
-
-            if (leaveSignalReceivedRef.current) return;
-            if (iceState === "connected" || iceState === "completed") {
-              p2pConnectSucceededRef.current = true;
-              setError(null);
-              setStatus("connected");
-              clearLostCountdown();
-              applyLowLatencyInboundAudioReceivers(rawPc, lowLatencyReceiverOpts);
-              rawPc
-                .getStats()
-                .then((stats) => {
-                  stats.forEach((report) => {
-                    if (report.type === "candidate-pair" && report.state === "succeeded") {
-                      addLog(
-                        `SELECTED PAIR — local: ${report.localCandidateId} remote: ${report.remoteCandidateId}`
-                      );
-                    }
-                    if (report.type === "local-candidate") {
-                      addLog(
-                        `LOCAL candidate type: ${report.candidateType} protocol: ${report.protocol}`
-                      );
-                    }
-                    if (report.type === "remote-candidate") {
-                      addLog(
-                        `REMOTE candidate type: ${report.candidateType} protocol: ${report.protocol}`
-                      );
-                    }
-                  });
-                })
-                .catch(() => {
-                  // Stats may not be available in all environments; ignore errors.
-                });
-              return;
-            }
-            if (iceState === "disconnected") {
-              beginLostCountdown();
-              return;
-            }
-            if (iceState === "failed") {
-              beginLostCountdown();
-              setStatusNote("Connection unstable, attempting to recover...");
-            }
-          });
-        }
-
-        peer.on("stream", (remoteStream: MediaStream) => {
-          if (!mountedRef.current) return;
-          addLog("Remote audio stream received");
-          remoteStreamRef.current = remoteStream;
-          setRemoteStream(remoteStream);
-          setRemoteLevel(0);
-          const remoteEl = remoteAudioRef.current;
-          if (remoteEl) {
-            remoteEl.srcObject = remoteStream;
-            remoteEl.muted = true;
-            void remoteEl.play().catch(() => {
-              addLog("Remote audio play() blocked (tap page if silent)");
-            });
-          }
-          if (studioAudioContextRef.current) {
-            buildRemotePlaybackGraph(remoteStream);
-          }
-        });
-
-        peer.on("data", (chunk: unknown) => {
-          try {
-            const text = decodePeerDataChunk(chunk);
-            const msg = JSON.parse(text) as {
-              t?: string;
-              ts?: number;
-              type?: string;
-              name?: string;
-              bpm?: number;
-              bpi?: number;
-              hostTime?: number;
-              enabled?: boolean;
-              serverTimestamp?: number;
-              sequenceNumber?: number;
-              from?: Role;
-            };
-            if (msg.type === "LEAVE") {
-              if (msg.from === activeRole) return;
-              const departedName = remoteParticipantName || "A participant";
-              leaveSignalReceivedRef.current = true;
-              setKiteSyncEnabled(false);
-              stopKiteMetronome();
-              clearLostCountdown();
-              setCollaboratorLeft(true);
-              setLastDepartedParticipantName(departedName);
-              setRemoteParticipantName(null);
-              setStatus("failed");
-              setStatusNote(`${departedName} left the session.`);
-              return;
-            }
-            if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
-              if (mountedRef.current) {
-                const incomingName = msg.name.trim();
-                setRemoteParticipantName(incomingName);
-                if (!presenceNotified) {
-                  setStatusNote(`${incomingName} entered the session.`);
-                  presenceNotified = true;
-                }
-              }
-            } else if (msg.t === "ping" && typeof msg.ts === "number") {
-              peer.send(JSON.stringify({ t: "pong", ts: msg.ts }));
-            } else if (msg.t === "pong" && typeof msg.ts === "number" && mountedRef.current) {
-              const latency = Math.round(performance.now() - msg.ts);
-              setPingMs(latency);
-            } else if (
-              msg.type === "KITE_SYNC" &&
-              typeof msg.sequenceNumber === "number" &&
-              typeof msg.hostTime === "number" &&
-              typeof msg.serverTimestamp === "number" &&
-              typeof msg.bpm === "number" &&
-              typeof msg.bpi === "number" &&
-              typeof msg.enabled === "boolean"
-            ) {
-              if (msg.sequenceNumber <= lastAcceptedKiteSyncSeqRef.current) return;
-              lastAcceptedKiteSyncSeqRef.current = msg.sequenceNumber;
-              setKiteSyncEnabled(msg.enabled);
-              if (!msg.enabled) return;
-
-              const receivedAtMs = Date.now();
-              const rttDelaySec = (calculatedDelayMsRef.current || 0) / 1000;
-              const offsetSec = (receivedAtMs - msg.serverTimestamp) / 1000;
-              const guestTargetSec = msg.hostTime + offsetSec + rttDelaySec;
-
-              lastAppliedGuestStartSecRef.current = guestTargetSec;
-              lastSyncApplyAtMsRef.current = receivedAtMs;
-              setMetronomeBpm(msg.bpm);
-              setBeatsPerInterval(msg.bpi);
-              const ctx = studioAudioContextRef.current;
-              if (ctx) {
-                const sixteenthSec = 60 / msg.bpm / 4;
-                let nextGridSec = guestTargetSec;
-                if (
-                  Number.isFinite(sixteenthSec) &&
-                  sixteenthSec > 0 &&
-                  guestTargetSec < ctx.currentTime
-                ) {
-                  nextGridSec =
-                    guestTargetSec +
-                    Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) * sixteenthSec;
-                }
-                flushAndSetRemoteGridTarget(nextGridSec);
-                const countInTwoBeatsSec = (60 / msg.bpm) * 2;
-                if (Number.isFinite(countInTwoBeatsSec) && countInTwoBeatsSec > 0) {
-                  kiteSyncCountInEndAtContextSecRef.current =
-                    ctx.currentTime + countInTwoBeatsSec;
-                  if (metronomeGainRef.current) metronomeGainRef.current.gain.value = 0;
-                  setKiteSyncCountInActive(true);
-                }
-              }
-              console.log("KITE_SYNC received! Guest Target Start:", guestTargetSec);
-            }
-          } catch {
-            // Ignore non-JSON or malformed ping payloads.
-          }
-        });
-
-        const enqueueIceAppend = (nextCandidate: IceCandidateRow) => {
-          iceAppendQueueRef.current = iceAppendQueueRef.current
-            .then(async () => {
-              await appendIceCandidate(sessionId, nextCandidate);
-              addLog("ICE candidate sent");
-            })
-            .catch((err) => {
-              console.error("ICE append failed", err);
-              addLog("ICE send failed");
-            });
-          void iceAppendQueueRef.current;
-        };
-
-        peer.on("signal", (signalData: SignalData) => {
-          try {
-            const candidateLike = (signalData as { candidate?: unknown }).candidate;
-            const typeLike = (signalData as { type?: unknown }).type;
-
-            if (candidateLike) {
-              localIceCandidateSeen = true;
-              const candidateRecord: IceCandidateRow = {
-                id: `${activeRole}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                from: activeRole,
-                candidate: signalData,
-              };
-              enqueueIceAppend(candidateRecord);
-              return;
-            }
-
-            if (typeLike === "offer") {
-              addLog("Offer sent");
-              void (async () => {
-                const { error } = await supabase
-                  .from("studio_sessions")
-                  .update({ offer: signalData })
-                  .eq("session_id", sessionId.toUpperCase());
-                if (error) throw error;
-                setStatusNote("Offer published. Waiting for peer answer...");
-              })().catch((err) => {
-                console.error("Offer publish failed", err);
-                setStatus("failed");
-                setStatusNote("Offer publish failed.");
-              });
-              return;
-            }
-
-            if (typeLike === "answer") {
-              addLog("Answer sent");
-              void (async () => {
-                const { error } = await supabase
-                  .from("studio_sessions")
-                  .update({ answer: signalData })
-                  .eq("session_id", sessionId.toUpperCase());
-                if (error) throw error;
-                setStatusNote("Answer sent. Finalizing connection...");
-              })().catch((err) => {
-                console.error("Answer publish failed", err);
-                setStatus("failed");
-                setStatusNote("Answer publish failed.");
-              });
-              return;
-            }
-          } catch {
-            setStatus("failed");
-            setStatusNote("Signaling update failed.");
-          }
-        });
-
-        peer.on("connect", () => {
-          p2pConnectSucceededRef.current = true;
-          setError(null);
-          setStatus("connected");
-          setStatusNote(P2P_CONNECTED_NOTE);
-          void channel.unsubscribe();
-          if (channelRef.current === channel) {
-            channelRef.current = null;
-          }
-          console.log('[Kite] Handshake complete. Signaling bridge closed to reduce jitter.');
-          try {
-            peer.send(
-              JSON.stringify({
-                type: "presence",
-                name: isHost ? "Host" : "Guest",
-              })
-            );
-          } catch {
-            // Presence payload is best-effort; keep connect flow unchanged on send failures.
-          }
-          if (isHost && kiteSyncEnabled && pendingKiteSyncRef.current) {
-            try {
-              peer.send(JSON.stringify(pendingKiteSyncRef.current));
-              pendingKiteSyncRef.current = null;
-            } catch {
-              // Keep queued packet for next successful send checkpoint.
-            }
-          }
-          if (connectTimeout !== null) {
-            clearTimeout(connectTimeout);
-            connectTimeout = null;
-          }
-          if (pingIntervalRef.current !== null) {
-            clearInterval(pingIntervalRef.current);
-          }
-          pingIntervalRef.current = window.setInterval(() => {
-            if (!mountedRef.current) return;
-            try {
-              peer.send(JSON.stringify({ t: "ping", ts: performance.now() }));
-            } catch {
-              console.warn("[Kite] Ping failed, peer likely closed");
-            }
-          }, 2000);
-        });
-
-        peer.on("error", (err: unknown) => {
-          if (!mountedRef.current) return;
-          if (pingIntervalRef.current !== null) {
-            clearInterval(pingIntervalRef.current);
-            pingIntervalRef.current = null;
-          }
-          const msg =
-            err instanceof Error
-              ? err.message
-              : typeof err === "object" && err !== null && "message" in err
-                ? String((err as { message: unknown }).message)
-                : String(err);
-          const code =
-            typeof err === "object" && err !== null && "code" in err
-              ? String((err as { code: unknown }).code)
-              : "";
-          addLog(`Peer error: ${msg}${code ? ` code=${code}` : ""}`);
-          console.error("WebRTC peer error detail", {
-            message: msg,
-            code,
-            iceServers: peerConfig?.iceServers ?? "fetched-at-runtime",
-          });
-        });
-
-        peer.on("close", () => {
-          if (!mountedRef.current) return;
-          setRemoteParticipantName(null);
-          if (pingIntervalRef.current !== null) {
-            clearInterval(pingIntervalRef.current);
-            pingIntervalRef.current = null;
-          }
-          if (connectTimeout !== null) {
-            clearTimeout(connectTimeout);
-            connectTimeout = null;
-          }
-          if (!leaveSignalReceivedRef.current && statusRef.current !== "connected") {
-            addLog("Peer closed");
-            beginLostCountdown();
-            setStatusNote("Connection lost, attempting to recover...");
-          }
-        });
-
-        if (!isHost) {
-          const initial = existingRowRef.current;
-          if (initial?.offer && typeof initial.offer === "object") {
-            appliedRemoteSignalRef.current = true;
-            addLog("Initial offer applied");
-            peer.signal(initial.offer);
-            setStatusNote("Creating answer...");
-          }
-          if (initial?.ice_candidates) {
-            applyRemoteIce(initial.ice_candidates, activeRole);
-          }
-        } else {
-          const { data: current } = await supabase
-            .from("studio_sessions")
-            .select("answer, ice_candidates")
-            .eq("session_id", sessionId.toUpperCase())
-            .single<Pick<StudioSessionRow, "answer" | "ice_candidates">>();
-          if (current?.answer && typeof current.answer === "object") {
-            appliedRemoteSignalRef.current = true;
-            addLog("Initial answer applied");
-            peer.signal(current.answer);
-          }
-          if (current?.ice_candidates) {
-            applyRemoteIce(current.ice_candidates, activeRole);
-          }
-        }
       } catch (error) {
         if (cancelled || !mountedRef.current) return;
         console.error("CRITICAL BRIDGE ERROR:", error);
@@ -3528,8 +3620,19 @@ export default function StudioBridgePage() {
                           </span>
                         </div>
                         <label className="ml-auto flex items-center gap-2">
-                          <span className="uppercase tracking-wider text-stone-500">
+                          <span className="flex items-center uppercase tracking-wider text-stone-500">
                             Safety
+                            <button
+                              type="button"
+                              onClick={() => setIsAutoBuffer(!isAutoBuffer)}
+                              className={`ml-2 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${
+                                isAutoBuffer
+                                  ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-400"
+                                  : "border-stone-700 bg-stone-800 text-stone-500"
+                              }`}
+                            >
+                              {isAutoBuffer ? "Auto" : "Manual"}
+                            </button>
                           </span>
                           <input
                             type="range"
@@ -3540,9 +3643,10 @@ export default function StudioBridgePage() {
                             onChange={(e) => {
                               const next = Number(e.target.value);
                               if (!Number.isFinite(next)) return;
+                              setIsAutoBuffer(false);
                               setTargetLeadFrames(Math.max(0, Math.round(next)));
                             }}
-                            className="w-28 accent-orange-400"
+                            className={`w-28 accent-orange-400 ${isAutoBuffer ? "opacity-60" : ""}`}
                           />
                           <input
                             type="number"
@@ -3553,9 +3657,10 @@ export default function StudioBridgePage() {
                             onChange={(e) => {
                               const next = Number(e.target.value);
                               if (!Number.isFinite(next)) return;
+                              setIsAutoBuffer(false);
                               setTargetLeadFrames(Math.max(0, Math.round(next)));
                             }}
-                            className="w-20 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
+                            className={`w-20 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100 ${isAutoBuffer ? "opacity-60" : ""}`}
                             inputMode="numeric"
                           />
                         </label>
