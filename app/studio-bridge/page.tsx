@@ -80,6 +80,12 @@ const P2P_CONNECTED_NOTE = "P2P Connected.";
 const HIGH_PING_WARN_MS = 150;
 const HIGH_PING_WARN_SAMPLES = 3;
 
+/** Pause Kite metronome when inbound loss exceeds this; resume only after hysteresis (see below). */
+const KITE_SYNC_LOSS_PAUSE_PCT = 5;
+const KITE_SYNC_LOSS_RESUME_PCT = 3;
+/** With 2s `getStats` cadence, 4s ≈ two consecutive samples below resume threshold. */
+const KITE_SYNC_LOSS_STABLE_MS = 4000;
+
 /** Remote listen path: Web Audio boost to `AudioContext.destination` (muted `<audio>` keep-alive + gain-based mute). */
 const REMOTE_PLAYBACK_VOLUME_MIN = 0.5;
 const REMOTE_PLAYBACK_VOLUME_MAX = 4;
@@ -410,6 +416,13 @@ export default function StudioBridgePage() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [audioContextReady, setAudioContextReady] = useState(false);
+  /** One-bar count-in after Kite Sync enables; blocks unmute and playback level changes until the grid stabilizes. */
+  const [kiteSyncCountInActive, setKiteSyncCountInActive] = useState(false);
+  /** Bumps when resuming metronome after network-loss pause (forces scheduler re-init). */
+  const [kiteSyncMetronomeResumeNonce, setKiteSyncMetronomeResumeNonce] = useState(0);
+  /** True while metronome is stopped due to inbound loss hysteresis (UX hint). */
+  const [kiteSyncNetworkMetronomePaused, setKiteSyncNetworkMetronomePaused] = useState(false);
+  const [metronomeVolume, setMetronomeVolume] = useState(1);
 
   const micDeniedThisInitRef = useRef(false);
 
@@ -462,8 +475,12 @@ export default function StudioBridgePage() {
   const remotePlaybackMeterSinkRef = useRef<GainNode | null>(null);
   const remotePlaybackCompressorRef = useRef<DynamicsCompressorNode | null>(null);
   const metronomeGainRef = useRef<GainNode | null>(null);
+  const metronomeVolumeRef = useRef(1);
   const metronomeSchedulerRef = useRef<ReturnType<typeof createMetronomeScheduler> | null>(null);
   const metronomeIntervalRef = useRef<number | null>(null);
+  const metronomeBlinkQueueRef = useRef<{ startAt: number; isAccent: boolean }[]>([]);
+  const metronomeBlinkRafIdRef = useRef<number | null>(null);
+  const metronomeBlinkElementRef = useRef<HTMLDivElement | null>(null);
   const highPingStreakRef = useRef(0);
   const highPingTipDismissedRef = useRef(false);
   const calculatedDelayMsRef = useRef<number | null>(null);
@@ -472,6 +489,13 @@ export default function StudioBridgePage() {
   const lastAcceptedKiteSyncSeqRef = useRef(0);
   const lastAppliedGuestStartSecRef = useRef<number | null>(null);
   const lastSyncApplyAtMsRef = useRef<number | null>(null);
+  const kiteSyncCountInEndAtContextSecRef = useRef(0);
+  const kiteSyncCountInRafIdRef = useRef<number | null>(null);
+  const kiteSyncLossPauseActiveRef = useRef(false);
+  const kiteSyncLossRecoverySinceMsRef = useRef<number | null>(null);
+  const applyKiteSyncLossGuardRef = useRef<(packetLossPercent: number | null) => void>(
+    () => {}
+  );
   const echoModeApplyingRef = useRef(false);
   const isMicMutedRef = useRef(isMicMuted);
   const isBufferingEnabledRef = useRef(isBufferingEnabled);
@@ -528,11 +552,6 @@ export default function StudioBridgePage() {
     }
     try {
       remotePlaybackGainRef.current?.disconnect();
-    } catch {
-      /* ignore */
-    }
-    try {
-      metronomeGainRef.current?.disconnect();
     } catch {
       /* ignore */
     }
@@ -793,6 +812,53 @@ export default function StudioBridgePage() {
     Boolean(localMicStream) && audioTestDone && kiteSignalSecure;
 
   const remoteIsLive = remoteLevel > 0.07;
+  const syncCountInBlocksLive = kiteSyncCountInActive && kiteSyncEnabled;
+
+  useEffect(() => {
+    if (!kiteSyncEnabled) {
+      setKiteSyncCountInActive(false);
+    }
+  }, [kiteSyncEnabled]);
+
+  useEffect(() => {
+    if (!kiteSyncCountInActive || !kiteSyncEnabled) {
+      if (kiteSyncCountInRafIdRef.current !== null) {
+        cancelAnimationFrame(kiteSyncCountInRafIdRef.current);
+        kiteSyncCountInRafIdRef.current = null;
+      }
+      return;
+    }
+
+    const tick = () => {
+      if (!mountedRef.current) {
+        kiteSyncCountInRafIdRef.current = null;
+        return;
+      }
+      const ctx = studioAudioContextRef.current;
+      if (!ctx || ctx.state === "closed") {
+        kiteSyncCountInRafIdRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      const endAt = kiteSyncCountInEndAtContextSecRef.current;
+      if (Number.isFinite(endAt) && ctx.currentTime >= endAt) {
+        setKiteSyncCountInActive(false);
+        if (metronomeGainRef.current) {
+          metronomeGainRef.current.gain.value = metronomeVolumeRef.current;
+        }
+        kiteSyncCountInRafIdRef.current = null;
+        return;
+      }
+      kiteSyncCountInRafIdRef.current = requestAnimationFrame(tick);
+    };
+
+    kiteSyncCountInRafIdRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (kiteSyncCountInRafIdRef.current !== null) {
+        cancelAnimationFrame(kiteSyncCountInRafIdRef.current);
+        kiteSyncCountInRafIdRef.current = null;
+      }
+    };
+  }, [kiteSyncCountInActive, kiteSyncEnabled]);
 
   useEffect(() => {
     speakerMutedRef.current = isSpeakerMuted;
@@ -847,6 +913,9 @@ export default function StudioBridgePage() {
       setInboundPacketLossPercent(null);
       setCalculatedDelayMs(null);
       calculatedDelayMsRef.current = null;
+      kiteSyncLossRecoverySinceMsRef.current = null;
+      kiteSyncLossPauseActiveRef.current = false;
+      setKiteSyncNetworkMetronomePaused(false);
       return;
     }
     const isSafariWebKit = isStudioSafariWebKitEngine();
@@ -886,6 +955,7 @@ export default function StudioBridgePage() {
           const parsed = parseInboundAudioPacketLoss(stats);
           if (parsed === null) {
             setInboundPacketLossPercent(null);
+            applyKiteSyncLossGuardRef.current(null);
             return;
           }
           const packetLossPercent = Math.round(parsed.ratio * 1000) / 10;
@@ -894,6 +964,7 @@ export default function StudioBridgePage() {
             packetLossPercent,
           });
           setInboundPacketLossPercent(packetLossPercent);
+          applyKiteSyncLossGuardRef.current(packetLossPercent);
         })
         .catch(() => {});
     };
@@ -996,6 +1067,18 @@ export default function StudioBridgePage() {
   }, [sessionId, role]);
 
   const toggleMic = useCallback(() => {
+    if (kiteSyncCountInActive && kiteSyncEnabled) {
+      setIsMicMuted((prev) => {
+        if (!prev) {
+          localStreamRef.current?.getAudioTracks().forEach((track) => {
+            track.enabled = false;
+          });
+          return true;
+        }
+        return prev;
+      });
+      return;
+    }
     setIsMicMuted((prev) => {
       const nextMuted = !prev;
       const enabled = !nextMuted;
@@ -1004,19 +1087,31 @@ export default function StudioBridgePage() {
       });
       return nextMuted;
     });
-  }, []);
+  }, [kiteSyncCountInActive, kiteSyncEnabled]);
 
   const toggleSpeaker = useCallback(() => {
+    if (kiteSyncCountInActive && kiteSyncEnabled) {
+      setIsSpeakerMuted((prev) => {
+        if (!prev) {
+          speakerMutedRef.current = true;
+          applyRemotePlaybackSpeakerGain(true);
+          return true;
+        }
+        return prev;
+      });
+      return;
+    }
     setIsSpeakerMuted((prev) => {
       const nextMuted = !prev;
       speakerMutedRef.current = nextMuted;
       applyRemotePlaybackSpeakerGain(nextMuted);
       return nextMuted;
     });
-  }, [applyRemotePlaybackSpeakerGain]);
+  }, [applyRemotePlaybackSpeakerGain, kiteSyncCountInActive, kiteSyncEnabled]);
 
   const onRemotePlaybackVolumeChange = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
+      if (kiteSyncCountInActive && kiteSyncEnabled) return;
       const next = Number(e.target.value);
       if (!Number.isFinite(next)) return;
       const clamped = Math.min(
@@ -1027,7 +1122,28 @@ export default function StudioBridgePage() {
       setRemotePlaybackVolume(clamped);
       applyRemotePlaybackSpeakerGain(isSpeakerMuted);
     },
-    [applyRemotePlaybackSpeakerGain, isSpeakerMuted]
+    [applyRemotePlaybackSpeakerGain, isSpeakerMuted, kiteSyncCountInActive, kiteSyncEnabled]
+  );
+
+  const onMetronomeVolumeChange = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const next = Number(e.target.value);
+      if (!Number.isFinite(next)) return;
+      const clamped = Math.min(2, Math.max(0, next));
+      metronomeVolumeRef.current = clamped;
+      setMetronomeVolume(clamped);
+      const ctx = studioAudioContextRef.current;
+      const gainNode = metronomeGainRef.current;
+      if (ctx && gainNode && ctx.state !== "closed" && !kiteSyncCountInActive) {
+        try {
+          gainNode.gain.cancelScheduledValues(ctx.currentTime);
+          gainNode.gain.setTargetAtTime(clamped, ctx.currentTime, 0.01);
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [kiteSyncCountInActive]
   );
 
   const clearRecordingInterval = useCallback(() => {
@@ -1238,7 +1354,12 @@ export default function StudioBridgePage() {
   }, []);
 
   const playMetronomeClick = useCallback(
-    (ctx: AudioContext, time: number, tick: MetronomeTick) => {
+    (
+      ctx: AudioContext,
+      time: number,
+      tick: MetronomeTick,
+      masterGainNode?: GainNode | null
+    ) => {
       if (!ctx || ctx.state === "closed") return;
       if (ctx.state === "suspended") void ctx.resume();
       console.log("🎵 TICK scheduled for:", time, "Downbeat:", tick.isAccent);
@@ -1251,8 +1372,11 @@ export default function StudioBridgePage() {
       const frequency =
         tick.beatIndex === 0 ? 1760 : tick.beatIndex % 4 === 0 ? 880 : 440;
       osc.frequency.setValueAtTime(frequency, startAt);
-      osc.connect(ctx.destination);
+      const targetNode = masterGainNode || ctx.destination;
+      osc.connect(targetNode);
       osc.start(startAt);
+      metronomeBlinkQueueRef.current.push({ startAt, isAccent: tick.isAccent });
+      if (metronomeBlinkQueueRef.current.length > 20) metronomeBlinkQueueRef.current.shift();
       osc.stop(stopAt);
       osc.addEventListener("ended", () => {
         try {
@@ -1265,21 +1389,117 @@ export default function StudioBridgePage() {
     []
   );
 
+  const resetKiteSyncSessionRefs = useCallback(() => {
+    pendingKiteSyncRef.current = null;
+    lastAcceptedKiteSyncSeqRef.current = 0;
+    kiteSyncSequenceRef.current = 0;
+    lastAppliedGuestStartSecRef.current = null;
+    lastSyncApplyAtMsRef.current = null;
+  }, []);
+
+  const stopKiteMetronome = useCallback(() => {
+    if (metronomeBlinkRafIdRef.current !== null) {
+      cancelAnimationFrame(metronomeBlinkRafIdRef.current);
+    }
+    metronomeBlinkRafIdRef.current = null;
+    metronomeBlinkQueueRef.current = [];
+    if (metronomeIntervalRef.current !== null) {
+      clearInterval(metronomeIntervalRef.current);
+      metronomeIntervalRef.current = null;
+    }
+    metronomeSchedulerRef.current?.stop();
+    metronomeSchedulerRef.current = null;
+    const gain = metronomeGainRef.current;
+    const ctx = studioAudioContextRef.current;
+    if (gain && ctx && ctx.state !== "closed") {
+      try {
+        gain.gain.cancelScheduledValues(ctx.currentTime);
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
+
+  const applyKiteSyncPacketLossGuard = useCallback(
+    (packetLossPercent: number | null) => {
+      if (!kiteSyncEnabled) {
+        kiteSyncLossRecoverySinceMsRef.current = null;
+        if (kiteSyncLossPauseActiveRef.current) {
+          kiteSyncLossPauseActiveRef.current = false;
+          setKiteSyncNetworkMetronomePaused(false);
+        }
+        return;
+      }
+      if (packetLossPercent === null) {
+        kiteSyncLossRecoverySinceMsRef.current = null;
+        return;
+      }
+      if (packetLossPercent > KITE_SYNC_LOSS_PAUSE_PCT) {
+        kiteSyncLossRecoverySinceMsRef.current = null;
+        if (!kiteSyncLossPauseActiveRef.current) {
+          kiteSyncLossPauseActiveRef.current = true;
+          stopKiteMetronome();
+          setKiteSyncNetworkMetronomePaused(true);
+        }
+        return;
+      }
+      if (!kiteSyncLossPauseActiveRef.current) {
+        kiteSyncLossRecoverySinceMsRef.current = null;
+        return;
+      }
+      if (packetLossPercent >= KITE_SYNC_LOSS_RESUME_PCT) {
+        kiteSyncLossRecoverySinceMsRef.current = null;
+        return;
+      }
+      const now = performance.now();
+      if (kiteSyncLossRecoverySinceMsRef.current === null) {
+        kiteSyncLossRecoverySinceMsRef.current = now;
+        return;
+      }
+      if (now - kiteSyncLossRecoverySinceMsRef.current >= KITE_SYNC_LOSS_STABLE_MS) {
+        kiteSyncLossPauseActiveRef.current = false;
+        kiteSyncLossRecoverySinceMsRef.current = null;
+        setKiteSyncNetworkMetronomePaused(false);
+        setKiteSyncMetronomeResumeNonce((n) => n + 1);
+      }
+    },
+    [kiteSyncEnabled, stopKiteMetronome]
+  );
+
+  applyKiteSyncLossGuardRef.current = applyKiteSyncPacketLossGuard;
+
+  const teardownKiteSyncTransport = useCallback(() => {
+    stopKiteMetronome();
+    if (kiteSyncCountInRafIdRef.current !== null) {
+      cancelAnimationFrame(kiteSyncCountInRafIdRef.current);
+      kiteSyncCountInRafIdRef.current = null;
+    }
+    kiteSyncCountInEndAtContextSecRef.current = 0;
+    kiteSyncLossPauseActiveRef.current = false;
+    kiteSyncLossRecoverySinceMsRef.current = null;
+    if (mountedRef.current) {
+      setKiteSyncCountInActive(false);
+      setKiteSyncNetworkMetronomePaused(false);
+    }
+    resetKiteSyncSessionRefs();
+  }, [stopKiteMetronome, resetKiteSyncSessionRefs]);
+
   useEffect(() => {
     const gainNode = metronomeGainRef.current;
     if (!gainNode) return;
-    gainNode.gain.value = kiteSyncEnabled ? 0.8 : 0;
-  }, [kiteSyncEnabled]);
+    if (kiteSyncCountInActive) return;
+    gainNode.gain.value = kiteSyncEnabled ? metronomeVolumeRef.current : 0;
+  }, [kiteSyncEnabled, kiteSyncCountInActive]);
 
   useEffect(() => {
     console.log("Metronome Effect running. Enabled:", kiteSyncEnabled, "Context Ready:", audioContextReady);
     if (!kiteSyncEnabled) {
-      if (metronomeIntervalRef.current !== null) {
-        clearInterval(metronomeIntervalRef.current);
-        metronomeIntervalRef.current = null;
-      }
-      metronomeSchedulerRef.current?.stop();
-      metronomeSchedulerRef.current = null;
+      stopKiteMetronome();
+      return;
+    }
+    if (kiteSyncLossPauseActiveRef.current) {
+      stopKiteMetronome();
       return;
     }
 
@@ -1319,10 +1539,53 @@ export default function StudioBridgePage() {
       isExternalSync: role !=="host",
     });
     scheduler.start();
+    const blinkTick = () => {
+      const blinkCtx = studioAudioContextRef.current;
+      if (!blinkCtx || blinkCtx.state === "closed") return;
+      const now = blinkCtx.currentTime;
+      const queue = metronomeBlinkQueueRef.current;
+
+      while (queue.length > 0 && queue[0].startAt <= now) {
+        const beat = queue.shift();
+        const el = metronomeBlinkElementRef.current;
+        if (beat && el) {
+          el.classList.remove(
+            "bg-emerald-400",
+            "scale-125",
+            "bg-emerald-600/60",
+            "scale-110",
+            "shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+          );
+          void el.offsetWidth;
+          if (beat.isAccent) {
+            el.classList.add(
+              "bg-emerald-400",
+              "scale-125",
+              "shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+            );
+          } else {
+            el.classList.add("bg-emerald-600/60", "scale-110");
+          }
+          window.setTimeout(() => {
+            if (metronomeBlinkElementRef.current) {
+              metronomeBlinkElementRef.current.classList.remove(
+                "bg-emerald-400",
+                "scale-125",
+                "bg-emerald-600/60",
+                "scale-110",
+                "shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+              );
+            }
+          }, 100);
+        }
+      }
+      metronomeBlinkRafIdRef.current = requestAnimationFrame(blinkTick);
+    };
+    metronomeBlinkRafIdRef.current = requestAnimationFrame(blinkTick);
     metronomeSchedulerRef.current = scheduler;
     if (metronomeGainRef.current) {
-      metronomeGainRef.current.gain.value = 1.0;
-      console.log("VOLUME FORCED TO 1.0");
+      metronomeGainRef.current.gain.value = metronomeVolumeRef.current;
+      console.log("Metronome gain set to:", metronomeVolumeRef.current);
     }
 
     const pumpScheduler = () => {
@@ -1343,7 +1606,7 @@ export default function StudioBridgePage() {
       const ticks = activeScheduler.consumeDueTicks(nowSec);
       console.log("DEBUG: Ticks Generated:", ticks.length);
       for (const tick of ticks) {
-        playMetronomeClick(activeCtx, tick.atSec, tick);
+        playMetronomeClick(activeCtx, tick.atSec, tick, metronomeGainRef.current);
       }
     };
 
@@ -1363,18 +1626,23 @@ export default function StudioBridgePage() {
     playMetronomeClick,
     audioContextReady,
     metronomeGainRef.current,
+    stopKiteMetronome,
+    kiteSyncMetronomeResumeNonce,
   ]);
 
   useEffect(() => {
     return () => {
-      if (metronomeIntervalRef.current !== null) {
-        clearInterval(metronomeIntervalRef.current);
-        metronomeIntervalRef.current = null;
-      }
-      metronomeSchedulerRef.current?.stop();
-      metronomeSchedulerRef.current = null;
+      stopKiteMetronome();
     };
-  }, []);
+  }, [stopKiteMetronome]);
+
+  useEffect(() => {
+    if (kiteSyncEnabled) return;
+    kiteSyncLossPauseActiveRef.current = false;
+    kiteSyncLossRecoverySinceMsRef.current = null;
+    setKiteSyncNetworkMetronomePaused(false);
+    resetKiteSyncSessionRefs();
+  }, [kiteSyncEnabled, resetKiteSyncSessionRefs]);
 
   const clearRecordedBlobUrl = useCallback(() => {
     setRecordedBlobUrl((prev) => {
@@ -1624,6 +1892,7 @@ export default function StudioBridgePage() {
       if (teardownRan) return;
       teardownRan = true;
       cancelled = true;
+      teardownKiteSyncTransport();
       peerConnectionRef.current = null;
       highPingStreakRef.current = 0;
       highPingTipDismissedRef.current = false;
@@ -2031,6 +2300,8 @@ export default function StudioBridgePage() {
             if (msg.from === activeRole) return;
             const departedName = remoteParticipantName || "A participant";
             leaveSignalReceivedRef.current = true;
+            setKiteSyncEnabled(false);
+            stopKiteMetronome();
             addLog("Collaborator LEAVE received");
             clearLostCountdown();
             setCollaboratorLeft(true);
@@ -2325,6 +2596,8 @@ export default function StudioBridgePage() {
               if (msg.from === activeRole) return;
               const departedName = remoteParticipantName || "A participant";
               leaveSignalReceivedRef.current = true;
+              setKiteSyncEnabled(false);
+              stopKiteMetronome();
               clearLostCountdown();
               setCollaboratorLeft(true);
               setLastDepartedParticipantName(departedName);
@@ -2384,6 +2657,13 @@ export default function StudioBridgePage() {
                     Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) * sixteenthSec;
                 }
                 flushAndSetRemoteGridTarget(nextGridSec);
+                const countInTwoBeatsSec = (60 / msg.bpm) * 2;
+                if (Number.isFinite(countInTwoBeatsSec) && countInTwoBeatsSec > 0) {
+                  kiteSyncCountInEndAtContextSecRef.current =
+                    ctx.currentTime + countInTwoBeatsSec;
+                  if (metronomeGainRef.current) metronomeGainRef.current.gain.value = 0;
+                  setKiteSyncCountInActive(true);
+                }
               }
               console.log("KITE_SYNC received! Guest Target Start:", guestTargetSec);
             }
@@ -2595,7 +2875,13 @@ export default function StudioBridgePage() {
       micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
     };
-  }, [beginLostCountdown, clearLostCountdown, retryInitTick]);
+  }, [
+    beginLostCountdown,
+    clearLostCountdown,
+    retryInitTick,
+    stopKiteMetronome,
+    teardownKiteSyncTransport,
+  ]);
 
   const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
@@ -2883,7 +3169,11 @@ export default function StudioBridgePage() {
                 <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-stone-800/70 bg-stone-950/25 px-2 py-2">
                   <motion.button
                     type="button"
-                    disabled={!localMicStream || micPermissionDenied}
+                    disabled={
+                      !localMicStream ||
+                      micPermissionDenied ||
+                      (syncCountInBlocksLive && isMicMuted)
+                    }
                     onClick={toggleMic}
                     whileTap={{ scale: 0.97 }}
                     className={`flex flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
@@ -2910,7 +3200,9 @@ export default function StudioBridgePage() {
                   <div className="flex min-w-0 flex-1 flex-col gap-1.5">
                     <motion.button
                       type="button"
-                      disabled={!remoteStream}
+                      disabled={
+                        !remoteStream || (syncCountInBlocksLive && isSpeakerMuted)
+                      }
                       onClick={toggleSpeaker}
                       whileTap={{ scale: 0.97 }}
                       className={`flex w-full flex-1 items-center justify-center gap-2 rounded-lg border px-2 py-2 text-sm font-semibold transition ${
@@ -2940,7 +3232,7 @@ export default function StudioBridgePage() {
                       step={0.1}
                       value={remotePlaybackVolume}
                       onChange={onRemotePlaybackVolumeChange}
-                      disabled={!remoteStream}
+                      disabled={!remoteStream || syncCountInBlocksLive}
                       aria-label="Remote playback volume"
                       className="h-2 w-full min-w-0 accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                     />
@@ -2999,6 +3291,7 @@ export default function StudioBridgePage() {
               className="mt-8 space-y-4"
             >
               {status === "connected" ? (
+                <div className="relative">
                 <>
                   <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
                     <div className="w-full text-center">
@@ -3057,9 +3350,21 @@ export default function StudioBridgePage() {
                         {calculatedDelayMs === null ? "-- ms" : `${calculatedDelayMs} ms`}
                       </span>
                     </div>
+                    {kiteSyncNetworkMetronomePaused && kiteSyncEnabled ? (
+                      <div className="w-full rounded-lg border border-orange-500/30 bg-orange-950/25 px-3 py-2 text-left text-[11px] font-medium leading-snug text-orange-200/95">
+                        Metronome paused: inbound loss exceeded {KITE_SYNC_LOSS_PAUSE_PCT}%. It
+                        resumes after loss stays below {KITE_SYNC_LOSS_RESUME_PCT}% for a few
+                        seconds (hysteresis).
+                      </div>
+                    ) : null}
                     <div className="w-full rounded-lg border border-stone-800/80 bg-stone-900/40 px-3 py-2">
-                      <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-500">
-                        Kite Sync
+                      <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+                        <span>Kite Sync</span>
+                        <div
+                          ref={metronomeBlinkElementRef}
+                          className="h-2.5 w-2.5 rounded-full bg-stone-700 transition-all duration-75"
+                          aria-hidden
+                        />
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <button
@@ -3072,6 +3377,15 @@ export default function StudioBridgePage() {
                                 const ctx = studioAudioContextRef.current;
                                 if (ctx) {
                                   flushAndSetRemoteGridTarget(ctx.currentTime + 0.01);
+                                  const countInTwoBeatsSec = (60 / metronomeBpm) * 2;
+                                  if (Number.isFinite(countInTwoBeatsSec) && countInTwoBeatsSec > 0) {
+                                    kiteSyncCountInEndAtContextSecRef.current =
+                                      ctx.currentTime + countInTwoBeatsSec;
+                                    if (metronomeGainRef.current) {
+                                      metronomeGainRef.current.gain.value = 0;
+                                    }
+                                    setKiteSyncCountInActive(true);
+                                  }
                                 }
                               }
                               broadcastKiteSyncFromHost({ kiteSyncEnabled: next });
@@ -3169,6 +3483,21 @@ export default function StudioBridgePage() {
                             inputMode="numeric"
                           />
                         </label>
+                        <label className="flex w-full min-w-[12rem] flex-col gap-1.5 text-[11px] text-stone-300 sm:min-w-0 sm:max-w-xs">
+                          <span className="uppercase tracking-wider text-stone-500">
+                            Metronome Vol
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={2}
+                            step={0.1}
+                            value={metronomeVolume}
+                            onChange={onMetronomeVolumeChange}
+                            className="h-2 w-full min-w-0 accent-emerald-400"
+                            aria-label="Metronome volume"
+                          />
+                        </label>
                       </div>
                     </div>
                     <div className="w-full rounded-lg border border-stone-800/80 bg-stone-900/40 px-3 py-2">
@@ -3236,7 +3565,9 @@ export default function StudioBridgePage() {
                       <button
                         type="button"
                         onClick={toggleMic}
-                        disabled={!localMicStream}
+                        disabled={
+                          !localMicStream || (syncCountInBlocksLive && isMicMuted)
+                        }
                         className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
                           isMicMuted
                             ? "border-orange-500/35 bg-orange-500/10 text-orange-200/90 hover:bg-orange-500/15"
@@ -3251,7 +3582,9 @@ export default function StudioBridgePage() {
                       <button
                         type="button"
                         onClick={toggleSpeaker}
-                        disabled={!remoteStream}
+                        disabled={
+                          !remoteStream || (syncCountInBlocksLive && isSpeakerMuted)
+                        }
                         className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
                           isSpeakerMuted
                             ? "border-stone-700 bg-stone-900/50 text-stone-300 hover:bg-stone-800"
@@ -3270,7 +3603,7 @@ export default function StudioBridgePage() {
                         step={0.1}
                         value={remotePlaybackVolume}
                         onChange={onRemotePlaybackVolumeChange}
-                        disabled={!remoteStream}
+                        disabled={!remoteStream || syncCountInBlocksLive}
                         aria-label="Remote playback volume"
                         className="h-2 w-24 shrink-0 accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                       />
@@ -3364,6 +3697,19 @@ export default function StudioBridgePage() {
                     ) : null}
                   </div>
                 </>
+                {kiteSyncCountInActive && kiteSyncEnabled ? (
+                  <div
+                    className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-xl bg-stone-950/86 px-4 py-6 text-center backdrop-blur-[2px]"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <p className="text-sm font-semibold text-stone-100">Syncing…</p>
+                    <p className="max-w-xs text-xs font-medium leading-relaxed text-stone-400">
+                      Wait for the count-in to finish before unmuting or turning up remote audio.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
               ) : null}
 
               {role === "host" && inviteLink ? (
