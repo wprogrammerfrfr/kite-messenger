@@ -17,6 +17,7 @@
 ## 3. READ BEFORE WRITE
 - ALWAYS read the target file before editing it. 
 - NEVER assume what the code looks like based on previous context.
+- ALWAYS REMEMBER THAT THE CODE CHANGES SHOULD NOT DETER THE LATENCY PERFORMANCE
 
 ## 4. POST-EDIT REPORTING
 - After every code change, you MUST list exactly what was changed and explicitly list what was NOT touched.

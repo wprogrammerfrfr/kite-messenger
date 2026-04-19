@@ -944,21 +944,6 @@ export default function StudioBridgePage() {
             );
             setCalculatedDelayMs(oneWayDelayMs);
             calculatedDelayMsRef.current = oneWayDelayMs;
-            const delayNode = remotePlaybackDelayRef.current;
-            const ctx = studioAudioContextRef.current;
-            if (delayNode && ctx) {
-              const nextDelaySeconds = Math.max(
-                0,
-                Math.min(5, oneWayDelayMs / 1000)
-              );
-              if (Math.abs(delayNode.delayTime.value - nextDelaySeconds) > 0.01) {
-                delayNode.delayTime.setTargetAtTime(
-                  nextDelaySeconds,
-                  ctx.currentTime,
-                  0.08
-                );
-              }
-            }
           }
           let jitterSec = 0;
           stats.forEach((stat) => {
