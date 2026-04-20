@@ -369,7 +369,7 @@ export default function StudioBridgePage() {
   const [calculatedDelayMs, setCalculatedDelayMs] = useState<number | null>(null);
   const [kiteSyncEnabled, setKiteSyncEnabled] = useState(false);
   const [metronomeBpm, setMetronomeBpm] = useState(120);
-  const [beatsPerInterval, setBeatsPerInterval] = useState(16);
+  const [beatsPerInterval, setBeatsPerInterval] = useState(4);
   const [highPingTipOpen, setHighPingTipOpen] = useState(false);
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [micPermissionDenied, setMicPermissionDenied] = useState(false);
@@ -3443,7 +3443,7 @@ export default function StudioBridgePage() {
                     ) : null}
                     <div className="w-full rounded-lg border border-stone-800/80 bg-stone-900/40 px-3 py-2">
                       <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-stone-500">
-                        <span>Kite Sync</span>
+                        <span>Shared Metronome</span>
                         <div
                           ref={metronomeBlinkElementRef}
                           className="h-2.5 w-2.5 rounded-full bg-stone-700 transition-all duration-75"
@@ -3543,27 +3543,6 @@ export default function StudioBridgePage() {
                               });
                             }}
                             className="w-16 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
-                            inputMode="numeric"
-                          />
-                        </label>
-                        <label className="flex items-center gap-1 text-[11px] text-stone-300">
-                          <span className="uppercase tracking-wider text-stone-500">BPI</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={64}
-                            value={beatsPerInterval}
-                            onChange={(e) => {
-                              const next = Number(e.target.value);
-                              if (!Number.isFinite(next)) return;
-                              setBeatsPerInterval((prev) => {
-                                const normalized = Math.max(1, Math.min(64, Math.round(next)));
-                                if (normalized === prev) return prev;
-                                broadcastKiteSyncFromHost({ bpi: normalized });
-                                return normalized;
-                              });
-                            }}
-                            className="w-14 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
                             inputMode="numeric"
                           />
                         </label>
