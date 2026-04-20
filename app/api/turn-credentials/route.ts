@@ -1,36 +1,36 @@
-import { NextResponse } from 'next/server'
+import { NextResponse } from 'next/server';
 
 export async function GET() {
-  const username =
-    process.env.NEXT_PUBLIC_METERED_USERNAME || process.env.METERED_USERNAME
-  const credential =
-    process.env.NEXT_PUBLIC_METERED_PASSWORD || process.env.METERED_PASSWORD
+  // .trim() strips hidden Windows \r carriage returns that cause 401 errors
+  const username = process.env.METERED_USERNAME?.trim();
+  const password = process.env.METERED_PASSWORD?.trim();
 
-  if (!username || !credential) {
-    console.error('[Kite] TURN credentials not configured')
+  if (!username || !password) {
+    console.error('[Kite] TURN credentials not configured on server');
     return NextResponse.json(
       { error: 'TURN credentials not configured' },
       { status: 500 }
-    )
+    );
   }
 
-  return NextResponse.json({
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      {
-        urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-        username,
-        credential,
-      },
-      {
-        urls: [
-          'turn:global.relay.metered.ca:80',
-          'turn:global.relay.metered.ca:80?transport=tcp',
-          'turn:global.relay.metered.ca:443?transport=tcp',
-        ],
-        username,
-        credential,
-      },
-    ],
-  })
+  try {
+    // Fetch short-lived credentials from Metered.ca API
+    const res = await fetch(
+      `https://${username}.metered.live/api/v1/turn/credentials?apiKey=${password}`,
+      { cache: 'no-store' }
+    );
+    
+    if (!res.ok) {
+      throw new Error(`Metered API returned ${res.status}`);
+    }
+
+    const iceServers = await res.json();
+    return NextResponse.json({ iceServers });
+  } catch (error) {
+    console.error('[Kite] Failed to fetch TURN credentials:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch TURN credentials' },
+      { status: 500 }
+    );
+  }
 }
