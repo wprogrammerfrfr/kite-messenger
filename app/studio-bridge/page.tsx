@@ -417,6 +417,9 @@ export default function StudioBridgePage() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [audioContextReady, setAudioContextReady] = useState(false);
+  const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioInputDeviceId, setSelectedAudioInputDeviceId] = useState<string | null>(null);
+  const [devicePanelOpen, setDevicePanelOpen] = useState(false);
   /** One-bar count-in after Kite Sync enables; blocks unmute and playback level changes until the grid stabilizes. */
   const [kiteSyncCountInActive, setKiteSyncCountInActive] = useState(false);
   /** Bumps when resuming metronome after network-loss pause (forces scheduler re-init). */
@@ -524,6 +527,23 @@ export default function StudioBridgePage() {
     isAutoBufferRef.current = isAutoBuffer;
   }, [isAutoBuffer]);
 
+  const refreshAudioInputDevices = useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      if (!mountedRef.current) return;
+      const inputs = devices.filter((device) => device.kind === "audioinput");
+      setAudioInputDevices(inputs);
+      setSelectedAudioInputDeviceId((prev) => {
+        if (prev && inputs.some((device) => device.deviceId === prev)) return prev;
+        return inputs[0]?.deviceId ?? null;
+      });
+    } catch {
+      if (!mountedRef.current) return;
+      setAudioInputDevices([]);
+    }
+  }, []);
+
   const teardownRemotePlaybackGraph = useCallback(() => {
     setRemoteMeterTapActive(false);
     try {
@@ -615,6 +635,48 @@ export default function StudioBridgePage() {
       }
     },
     []
+  );
+
+  const switchAudioInputDevice = useCallback(
+    async (deviceId: string) => {
+      const requestedDeviceId = deviceId.trim();
+      if (!requestedDeviceId) return;
+      const prevStream = localStreamRef.current;
+      try {
+        const nextStream = await acquireStudioMicStream({ deviceId: requestedDeviceId });
+        if (!mountedRef.current) {
+          nextStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        const nextTrack = nextStream.getAudioTracks()[0] ?? null;
+        if (!nextTrack) {
+          nextStream.getTracks().forEach((track) => track.stop());
+          throw new Error("Selected input stream has no audio track.");
+        }
+        const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
+        replacePeerAudioTrack(prevTrack, nextTrack, prevStream ?? null, nextStream);
+        nextTrack.enabled = !isMicMutedRef.current;
+        localStreamRef.current = nextStream;
+        setLocalMicStream(nextStream);
+        setSelectedAudioInputDeviceId(requestedDeviceId);
+
+        const localEl = localMonitorAudioRef.current;
+        if (localEl) {
+          localEl.srcObject = nextStream;
+          localEl.muted = true;
+          await localEl.play().catch(() => {});
+        }
+
+        if (prevStream && prevStream !== nextStream) {
+          prevStream.getTracks().forEach((track) => track.stop());
+        }
+      } catch (err) {
+        console.error("Failed to switch audio input device:", err);
+      } finally {
+        void refreshAudioInputDevices();
+      }
+    },
+    [refreshAudioInputDevices, replacePeerAudioTrack]
   );
 
   const flushAndSetRemoteGridTarget = useCallback((targetTimeSec: number | null) => {
@@ -1877,6 +1939,17 @@ export default function StudioBridgePage() {
   }, []);
 
   useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.addEventListener) return;
+    const onDeviceChange = () => {
+      void refreshAudioInputDevices();
+    };
+    navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener("devicechange", onDeviceChange);
+    };
+  }, [refreshAudioInputDevices]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
 
     let cancelled = false;
@@ -2811,6 +2884,7 @@ export default function StudioBridgePage() {
         if (mountedRef.current) {
           setMicSyncTimedOut(false);
           setLocalMicStream(mediaStream);
+          void refreshAudioInputDevices();
         }
 
         const localEl = localMonitorAudioRef.current;
@@ -3885,6 +3959,66 @@ export default function StudioBridgePage() {
             </motion.div>
           )}
         </motion.div>
+      </div>
+      <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex flex-col items-end gap-2">
+        <motion.button
+          type="button"
+          onClick={() => setDevicePanelOpen((prev) => !prev)}
+          whileTap={{ scale: 0.97 }}
+          className="pointer-events-auto rounded-lg border border-stone-700/90 bg-stone-950/85 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-stone-200 transition hover:border-emerald-500/45 hover:text-emerald-200"
+          aria-expanded={devicePanelOpen}
+          aria-controls="audio-input-panel"
+        >
+          {devicePanelOpen ? "Hide Inputs" : "Audio Inputs"}
+        </motion.button>
+        {devicePanelOpen ? (
+          <div
+            id="audio-input-panel"
+            className="pointer-events-auto w-[17rem] rounded-xl border border-stone-700/90 bg-stone-950/95 p-3 shadow-2xl backdrop-blur-sm"
+          >
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-stone-500">
+              Input Device
+            </p>
+            <div className="mt-2 max-h-52 space-y-1.5 overflow-y-auto pr-1">
+              {audioInputDevices.length > 0 ? (
+                audioInputDevices.map((device) => {
+                  const isSelected = selectedAudioInputDeviceId === device.deviceId;
+                  return (
+                    <button
+                      key={device.deviceId || `audio-input-${device.label}`}
+                      type="button"
+                      onClick={() => void switchAudioInputDevice(device.deviceId)}
+                      className={`w-full rounded-lg border px-2.5 py-2 text-left text-xs font-medium transition ${
+                        isSelected
+                          ? "border-emerald-500/45 bg-emerald-500/10 text-emerald-200"
+                          : "border-stone-700 bg-stone-900/65 text-stone-300 hover:border-stone-600"
+                      }`}
+                    >
+                      {device.label || "Unnamed input device"}
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="rounded-lg border border-stone-800 bg-stone-900/60 px-2.5 py-2 text-xs text-stone-400">
+                  <p>No devices found.</p>
+                  <button
+                    type="button"
+                    onClick={() => void refreshAudioInputDevices()}
+                    className="mt-2 rounded border border-stone-700 px-2 py-1 text-[11px] font-medium text-stone-300 hover:border-stone-600"
+                  >
+                    Click to load devices
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="mt-3 rounded-lg border border-stone-700/80 bg-stone-900/70 px-2.5 py-2 text-[11px] leading-relaxed text-stone-400">
+              Pro Tip: Use your interface&apos;s &apos;Direct Monitor&apos; button to hear yourself.
+              Kite Studio captures your clean, direct signal for maximum speed. To use virtual
+              amps (like Neural DSP), route your audio through Voicemeeter (PC) or Loopback
+              (Mac).
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -161,13 +161,23 @@ export function getStudioAudioConstraints(
 
 export async function acquireStudioMicStream(options?: {
   echoSafetyMode?: boolean;
+  deviceId?: string;
 }): Promise<MediaStream> {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
     throw new Error("getUserMedia is not available.");
   }
-  const echoSafetyMode = Boolean(options?.echoSafetyMode);
+  const requestedDeviceId = options?.deviceId?.trim();
+  const audioConstraints: MediaTrackConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    ...({ latency: { ideal: 0.05 } } as unknown as MediaTrackConstraints),
+    channelCount: 2,
+    sampleRate: { ideal: 48000 },
+    ...(requestedDeviceId ? { deviceId: { exact: requestedDeviceId } } : {}),
+  };
   return navigator.mediaDevices.getUserMedia({
-    audio: getStudioAudioConstraints(echoSafetyMode),
+    audio: audioConstraints,
     video: false,
   });
 }
