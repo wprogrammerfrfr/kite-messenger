@@ -182,6 +182,92 @@ export async function acquireStudioMicStream(options?: {
   });
 }
 
+export type MixerInputStream = {
+  deviceId: string;
+  stream: MediaStream;
+};
+
+export type MasterAudioMixResult = {
+  masterStream: MediaStream;
+  masterTrack: MediaStreamTrack | null;
+  gainNodes: Map<string, GainNode>;
+  analyserNodes: Map<string, AnalyserNode>;
+  sourceNodes: Map<string, MediaStreamAudioSourceNode>;
+  splitterNodes: Map<string, ChannelSplitterNode>;
+  mergerNodes: Map<string, ChannelMergerNode>;
+  destinationNode: MediaStreamAudioDestinationNode;
+};
+
+function toPerceptualGain(volumePercent: number): number {
+  const clamped = Math.min(100, Math.max(0, volumePercent));
+  return Math.pow(clamped / 100, 2);
+}
+
+/**
+ * Build a single outbound master stream from multiple device streams.
+ * Each input is normalized to dual-mono and routed through analyser + gain.
+ */
+export function createMasterAudioMix(
+  inputs: MixerInputStream[],
+  audioCtx: AudioContext,
+  deviceVolumes: Record<string, number> = {}
+): MasterAudioMixResult {
+  const destinationNode = audioCtx.createMediaStreamDestination();
+  const gainNodes = new Map<string, GainNode>();
+  const analyserNodes = new Map<string, AnalyserNode>();
+  const sourceNodes = new Map<string, MediaStreamAudioSourceNode>();
+  const splitterNodes = new Map<string, ChannelSplitterNode>();
+  const mergerNodes = new Map<string, ChannelMergerNode>();
+
+  for (const input of inputs) {
+    const deviceId = input.deviceId?.trim();
+    if (!deviceId) continue;
+    const stream = input.stream;
+    if (!(stream instanceof MediaStream)) continue;
+    if (stream.getAudioTracks().length === 0) continue;
+
+    const sourceNode = audioCtx.createMediaStreamSource(stream);
+    const splitterNode = audioCtx.createChannelSplitter(2);
+    const mergerNode = audioCtx.createChannelMerger(2);
+    const analyserNode = audioCtx.createAnalyser();
+    const gainNode = audioCtx.createGain();
+
+    analyserNode.fftSize = 2048;
+    analyserNode.smoothingTimeConstant = 0.8;
+
+    // Safari-safe dual-mono path: copy first channel into both output channels.
+    sourceNode.connect(splitterNode);
+    splitterNode.connect(mergerNode, 0, 0);
+    splitterNode.connect(mergerNode, 0, 1);
+    mergerNode.connect(analyserNode);
+    analyserNode.connect(gainNode);
+    gainNode.connect(destinationNode);
+
+    const volumePercent = deviceVolumes[deviceId] ?? 100;
+    gainNode.gain.value = toPerceptualGain(volumePercent);
+
+    sourceNodes.set(deviceId, sourceNode);
+    splitterNodes.set(deviceId, splitterNode);
+    mergerNodes.set(deviceId, mergerNode);
+    analyserNodes.set(deviceId, analyserNode);
+    gainNodes.set(deviceId, gainNode);
+  }
+
+  const masterStream = destinationNode.stream;
+  const masterTrack = masterStream.getAudioTracks()[0] ?? null;
+
+  return {
+    masterStream,
+    masterTrack,
+    gainNodes,
+    analyserNodes,
+    sourceNodes,
+    splitterNodes,
+    mergerNodes,
+    destinationNode,
+  };
+}
+
 export function decodePeerDataChunk(chunk: unknown): string {
   if (typeof chunk === "string") return chunk;
   if (chunk instanceof ArrayBuffer) return new TextDecoder().decode(chunk);

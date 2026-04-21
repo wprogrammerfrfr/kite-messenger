@@ -19,6 +19,7 @@ import {
   acquireStudioMicStream,
   applyLowLatencyInboundAudioReceivers,
   checkAudioWorkletSupport,
+  createMasterAudioMix,
   decodePeerDataChunk,
   parseSelectedCandidatePairRttMs,
   parseInboundAudioPacketLoss,
@@ -418,7 +419,8 @@ export default function StudioBridgePage() {
   const [authReady, setAuthReady] = useState(false);
   const [audioContextReady, setAudioContextReady] = useState(false);
   const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedAudioInputDeviceId, setSelectedAudioInputDeviceId] = useState<string | null>(null);
+  const [activeDeviceIds, setActiveDeviceIds] = useState<string[]>([]);
+  const [deviceVolumes, setDeviceVolumes] = useState<Record<string, number>>({});
   const [devicePanelOpen, setDevicePanelOpen] = useState(false);
   /** One-bar count-in after Kite Sync enables; blocks unmute and playback level changes until the grid stabilizes. */
   const [kiteSyncCountInActive, setKiteSyncCountInActive] = useState(false);
@@ -439,6 +441,16 @@ export default function StudioBridgePage() {
   const remotePlaybackVolumeRef = useRef(DEFAULT_REMOTE_PLAYBACK_VOLUME);
   const localMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const activeStreamsMapRef = useRef<Map<string, MediaStream>>(new Map());
+  const mixerGainNodesRef = useRef<Map<string, GainNode>>(new Map());
+  const mixerAnalyserNodesRef = useRef<Map<string, AnalyserNode>>(new Map());
+  const mixerSourceNodesRef = useRef<Map<string, MediaStreamAudioSourceNode>>(new Map());
+  const mixerSplitterNodesRef = useRef<Map<string, ChannelSplitterNode>>(new Map());
+  const mixerMergerNodesRef = useRef<Map<string, ChannelMergerNode>>(new Map());
+  const mixerMasterStreamRef = useRef<MediaStream | null>(null);
+  const mixerMasterDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const activeDeviceIdsRef = useRef<string[]>([]);
+  const perChannelMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const localRecorderRef = useRef<TrackRecorder | null>(null);
   const recordingIntervalRef = useRef<number | null>(null);
   const pingIntervalRef = useRef<number | null>(null);
@@ -527,6 +539,49 @@ export default function StudioBridgePage() {
     isAutoBufferRef.current = isAutoBuffer;
   }, [isAutoBuffer]);
 
+  useEffect(() => {
+    activeDeviceIdsRef.current = activeDeviceIds;
+  }, [activeDeviceIds]);
+
+  useEffect(() => {
+    let rafId = 0;
+
+    const tick = () => {
+      const activeIds = activeDeviceIdsRef.current;
+      const stillActive = new Set(activeIds);
+
+      for (const [deviceId, el] of Array.from(perChannelMeterRefs.current.entries())) {
+        if (!stillActive.has(deviceId)) {
+          el.style.width = "0%";
+        }
+      }
+
+      for (const deviceId of activeIds) {
+        const analyser = mixerAnalyserNodesRef.current.get(deviceId);
+        const meterEl = perChannelMeterRefs.current.get(deviceId);
+        if (!analyser || !meterEl) continue;
+
+        const buf = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(buf);
+        let peak = 0;
+        for (let i = 0; i < buf.length; i += 1) {
+          const sample = buf[i] ?? 0;
+          if (sample > peak) peak = sample;
+        }
+
+        const levelPct = Math.min(100, Math.max(0, (peak / 255) * 100));
+        meterEl.style.width = `${levelPct}%`;
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
+  }, []);
+
   const refreshAudioInputDevices = useCallback(async () => {
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) return;
     try {
@@ -534,10 +589,6 @@ export default function StudioBridgePage() {
       if (!mountedRef.current) return;
       const inputs = devices.filter((device) => device.kind === "audioinput");
       setAudioInputDevices(inputs);
-      setSelectedAudioInputDeviceId((prev) => {
-        if (prev && inputs.some((device) => device.deviceId === prev)) return prev;
-        return inputs[0]?.deviceId ?? null;
-      });
     } catch {
       if (!mountedRef.current) return;
       setAudioInputDevices([]);
@@ -637,47 +688,209 @@ export default function StudioBridgePage() {
     []
   );
 
-  const switchAudioInputDevice = useCallback(
+  const removeAndCleanupDevice = useCallback((deviceId: string) => {
+    const stream = activeStreamsMapRef.current.get(deviceId);
+    const gainNode = mixerGainNodesRef.current.get(deviceId);
+    const analyserNode = mixerAnalyserNodesRef.current.get(deviceId);
+    const mergerNode = mixerMergerNodesRef.current.get(deviceId);
+    const splitterNode = mixerSplitterNodesRef.current.get(deviceId);
+    const sourceNode = mixerSourceNodesRef.current.get(deviceId);
+
+    try {
+      gainNode?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      analyserNode?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      mergerNode?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      splitterNode?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      sourceNode?.disconnect();
+    } catch {
+      /* ignore */
+    }
+
+    stream?.getTracks().forEach((track) => track.stop());
+    activeStreamsMapRef.current.delete(deviceId);
+    mixerGainNodesRef.current.delete(deviceId);
+    mixerAnalyserNodesRef.current.delete(deviceId);
+    mixerMergerNodesRef.current.delete(deviceId);
+    mixerSplitterNodesRef.current.delete(deviceId);
+    mixerSourceNodesRef.current.delete(deviceId);
+  }, []);
+
+  const teardownMixerGraphNodes = useCallback(() => {
+    for (const deviceId of Array.from(mixerGainNodesRef.current.keys())) {
+      const gainNode = mixerGainNodesRef.current.get(deviceId);
+      const analyserNode = mixerAnalyserNodesRef.current.get(deviceId);
+      const mergerNode = mixerMergerNodesRef.current.get(deviceId);
+      const splitterNode = mixerSplitterNodesRef.current.get(deviceId);
+      const sourceNode = mixerSourceNodesRef.current.get(deviceId);
+      try {
+        gainNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      try {
+        analyserNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      try {
+        mergerNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      try {
+        splitterNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      try {
+        sourceNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      mixerMasterDestinationRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    mixerGainNodesRef.current.clear();
+    mixerAnalyserNodesRef.current.clear();
+    mixerMergerNodesRef.current.clear();
+    mixerSplitterNodesRef.current.clear();
+    mixerSourceNodesRef.current.clear();
+    mixerMasterDestinationRef.current = null;
+    mixerMasterStreamRef.current = null;
+  }, []);
+
+  const rebuildMixerAndReplaceTrack = useCallback(() => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
+
+    const inputs = Array.from(activeStreamsMapRef.current.entries()).map(([deviceId, stream]) => ({
+      deviceId,
+      stream,
+    }));
+
+    teardownMixerGraphNodes();
+    if (inputs.length === 0) return;
+
+    const mix = createMasterAudioMix(inputs, ctx, deviceVolumes);
+    mixerGainNodesRef.current = mix.gainNodes;
+    mixerAnalyserNodesRef.current = mix.analyserNodes;
+    mixerSourceNodesRef.current = mix.sourceNodes;
+    mixerSplitterNodesRef.current = mix.splitterNodes;
+    mixerMergerNodesRef.current = mix.mergerNodes;
+    mixerMasterDestinationRef.current = mix.destinationNode;
+    mixerMasterStreamRef.current = mix.masterStream;
+    if (!mix.masterTrack) return;
+
+    const prevStream = localStreamRef.current;
+    const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
+    replacePeerAudioTrack(prevTrack, mix.masterTrack, prevStream ?? null, mix.masterStream);
+    mix.masterTrack.enabled = !isMicMutedRef.current;
+    localStreamRef.current = mix.masterStream;
+    setLocalMicStream(mix.masterStream);
+    const localEl = localMonitorAudioRef.current;
+    if (localEl) {
+      localEl.srcObject = mix.masterStream;
+      localEl.muted = true;
+      void localEl.play().catch(() => {});
+    }
+  }, [deviceVolumes, replacePeerAudioTrack, teardownMixerGraphNodes]);
+
+  const toggleAudioDevice = useCallback(
     async (deviceId: string) => {
       const requestedDeviceId = deviceId.trim();
       if (!requestedDeviceId) return;
-      const prevStream = localStreamRef.current;
+
+      const isActive = activeDeviceIdsRef.current.includes(requestedDeviceId);
+      if (isActive) {
+        setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
+        removeAndCleanupDevice(requestedDeviceId);
+        rebuildMixerAndReplaceTrack();
+        return;
+      }
+
+      if (activeDeviceIdsRef.current.length >= 3) {
+        console.warn("Maximum 3 active input devices supported.");
+        return;
+      }
+
+      setActiveDeviceIds((prev) => {
+        if (prev.includes(requestedDeviceId)) return prev;
+        return [...prev, requestedDeviceId];
+      });
+
       try {
         const nextStream = await acquireStudioMicStream({ deviceId: requestedDeviceId });
         if (!mountedRef.current) {
           nextStream.getTracks().forEach((track) => track.stop());
           return;
         }
-        const nextTrack = nextStream.getAudioTracks()[0] ?? null;
-        if (!nextTrack) {
+        const stillIntended = activeDeviceIdsRef.current.includes(requestedDeviceId);
+        if (!stillIntended) {
           nextStream.getTracks().forEach((track) => track.stop());
-          throw new Error("Selected input stream has no audio track.");
+          return;
         }
-        const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
-        replacePeerAudioTrack(prevTrack, nextTrack, prevStream ?? null, nextStream);
-        nextTrack.enabled = !isMicMutedRef.current;
-        localStreamRef.current = nextStream;
-        setLocalMicStream(nextStream);
-        setSelectedAudioInputDeviceId(requestedDeviceId);
-
-        const localEl = localMonitorAudioRef.current;
-        if (localEl) {
-          localEl.srcObject = nextStream;
-          localEl.muted = true;
-          await localEl.play().catch(() => {});
+        if ((nextStream.getAudioTracks()[0] ?? null) === null) {
+          nextStream.getTracks().forEach((track) => track.stop());
+          setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
+          return;
         }
-
-        if (prevStream && prevStream !== nextStream) {
-          prevStream.getTracks().forEach((track) => track.stop());
-        }
+        activeStreamsMapRef.current.set(requestedDeviceId, nextStream);
+        nextStream.getTracks().forEach((track) => {
+          track.onended = () => {
+            if (!activeDeviceIdsRef.current.includes(requestedDeviceId)) return;
+            setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
+            removeAndCleanupDevice(requestedDeviceId);
+            rebuildMixerAndReplaceTrack();
+          };
+        });
+        setDeviceVolumes((prev) => {
+          if (prev[requestedDeviceId] !== undefined) return prev;
+          return { ...prev, [requestedDeviceId]: 100 };
+        });
+        rebuildMixerAndReplaceTrack();
       } catch (err) {
-        console.error("Failed to switch audio input device:", err);
+        setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
+        console.error("Failed to toggle audio input device:", err);
       } finally {
         void refreshAudioInputDevices();
       }
     },
-    [refreshAudioInputDevices, replacePeerAudioTrack]
+    [rebuildMixerAndReplaceTrack, refreshAudioInputDevices, removeAndCleanupDevice]
   );
+
+  const handleVolumeChange = useCallback((deviceId: string, newVolume: number) => {
+    const clampedVolume = Math.min(100, Math.max(0, newVolume));
+    setDeviceVolumes((prev) => ({ ...prev, [deviceId]: clampedVolume }));
+    const gainNode = mixerGainNodesRef.current.get(deviceId);
+    if (!gainNode) return;
+    const streamStillActive = activeStreamsMapRef.current.has(deviceId);
+    if (!streamStillActive) return;
+    try {
+      const perceptualGain = Math.pow(clampedVolume / 100, 2);
+      gainNode.gain.value = perceptualGain;
+    } catch {
+      /* ignore slider updates during active teardown */
+    }
+  }, []);
 
   const flushAndSetRemoteGridTarget = useCallback((targetTimeSec: number | null) => {
     const bufferNode = remoteBufferNodeRef.current;
@@ -1939,15 +2152,32 @@ export default function StudioBridgePage() {
   }, []);
 
   useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.addEventListener) return;
-    const onDeviceChange = () => {
-      void refreshAudioInputDevices();
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices?.addEventListener ||
+      !navigator.mediaDevices?.enumerateDevices
+    ) {
+      return;
+    }
+    const onDeviceChange = async () => {
+      await refreshAudioInputDevices();
+      const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      const connectedIds = new Set(
+        devices.filter((d) => d.kind === "audioinput").map((d) => d.deviceId)
+      );
+      const missingActiveIds = activeDeviceIdsRef.current.filter((id) => !connectedIds.has(id));
+      if (missingActiveIds.length === 0) return;
+      setActiveDeviceIds((prev) => prev.filter((id) => connectedIds.has(id)));
+      for (const missingId of missingActiveIds) {
+        removeAndCleanupDevice(missingId);
+      }
+      rebuildMixerAndReplaceTrack();
     };
     navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
     return () => {
       navigator.mediaDevices.removeEventListener("devicechange", onDeviceChange);
     };
-  }, [refreshAudioInputDevices]);
+  }, [rebuildMixerAndReplaceTrack, refreshAudioInputDevices, removeAndCleanupDevice]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2032,6 +2262,26 @@ export default function StudioBridgePage() {
             handshakeFallbackIntervalRef.current = null;
           }
           teardownRemotePlaybackGraph();
+          // Mixer teardown: stop every active hardware stream and clear mixer graph/state.
+          for (const [deviceId, stream] of Array.from(activeStreamsMapRef.current.entries())) {
+            stream.getTracks().forEach((track) => {
+              track.onended = null;
+              track.stop();
+            });
+            activeStreamsMapRef.current.delete(deviceId);
+          }
+
+          // Ensure all mixer audio nodes are disconnected and references cleared.
+          teardownMixerGraphNodes();
+
+          // Reset mixer outbound references.
+          mixerMasterStreamRef.current = null;
+          mixerMasterDestinationRef.current = null;
+
+          // Reset mixer UI/state so lobby re-entry starts clean.
+          setActiveDeviceIds([]);
+          setDeviceVolumes({});
+          perChannelMeterRefs.current.clear();
           const ctx = studioAudioContextRef.current;
           if (ctx && ctx.state !== "closed") {
             await ctx.close().catch(() => {});
@@ -3982,20 +4232,49 @@ export default function StudioBridgePage() {
             <div className="mt-2 max-h-52 space-y-1.5 overflow-y-auto pr-1">
               {audioInputDevices.length > 0 ? (
                 audioInputDevices.map((device) => {
-                  const isSelected = selectedAudioInputDeviceId === device.deviceId;
+                  const deviceId = device.deviceId;
+                  const isSelected = activeDeviceIds.includes(deviceId);
                   return (
-                    <button
-                      key={device.deviceId || `audio-input-${device.label}`}
-                      type="button"
-                      onClick={() => void switchAudioInputDevice(device.deviceId)}
-                      className={`w-full rounded-lg border px-2.5 py-2 text-left text-xs font-medium transition ${
-                        isSelected
-                          ? "border-emerald-500/45 bg-emerald-500/10 text-emerald-200"
-                          : "border-stone-700 bg-stone-900/65 text-stone-300 hover:border-stone-600"
-                      }`}
-                    >
-                      {device.label || "Unnamed input device"}
-                    </button>
+                    <div key={deviceId || `audio-input-${device.label}`} className="space-y-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void toggleAudioDevice(deviceId)}
+                        className={`w-full rounded-lg border px-2.5 py-2 text-left text-xs font-medium transition ${
+                          isSelected
+                            ? "border-emerald-500/45 bg-emerald-500/10 text-emerald-200"
+                            : "border-stone-700 bg-stone-900/65 text-stone-300 hover:border-stone-600"
+                        }`}
+                      >
+                        {device.label || "Unnamed input device"}
+                      </button>
+                      {isSelected ? (
+                        <div className="rounded-lg border border-stone-700/80 bg-stone-900/70 px-2 py-1.5">
+                          <div className="mb-1.5 h-1.5 w-full overflow-hidden rounded bg-stone-800">
+                            <div
+                              ref={(el) => {
+                                if (el) perChannelMeterRefs.current.set(deviceId, el);
+                                else perChannelMeterRefs.current.delete(deviceId);
+                              }}
+                              className="h-full w-0 rounded bg-emerald-500 transition-[width] duration-75"
+                            />
+                          </div>
+                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-stone-400">
+                            Volume {deviceVolumes[deviceId] ?? 100}
+                          </label>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={deviceVolumes[deviceId] ?? 100}
+                            onChange={(e) =>
+                              handleVolumeChange(deviceId, Number.parseInt(e.target.value, 10))
+                            }
+                            className="w-full accent-emerald-500"
+                          />
+                        </div>
+                      ) : null}
+                    </div>
                   );
                 })
               ) : (
