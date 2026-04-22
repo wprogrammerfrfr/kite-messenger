@@ -187,15 +187,19 @@ export type MixerInputStream = {
   stream: MediaStream;
 };
 
-export type MasterAudioMixResult = {
-  masterStream: MediaStream;
-  masterTrack: MediaStreamTrack | null;
+export type StereoProbeResult = {
+  channelCount: 1 | 2;
+  confidence: "measured" | "fallback";
+};
+
+export type LaneGraphResult = {
+  laneKeys: string[];
+  laneInfo: StereoProbeResult;
   gainNodes: Map<string, GainNode>;
   analyserNodes: Map<string, AnalyserNode>;
-  sourceNodes: Map<string, MediaStreamAudioSourceNode>;
-  splitterNodes: Map<string, ChannelSplitterNode>;
-  mergerNodes: Map<string, ChannelMergerNode>;
-  destinationNode: MediaStreamAudioDestinationNode;
+  sourceNode: MediaStreamAudioSourceNode;
+  splitterNode: ChannelSplitterNode;
+  mergerNode: ChannelMergerNode;
 };
 
 function toPerceptualGain(volumePercent: number): number {
@@ -203,68 +207,170 @@ function toPerceptualGain(volumePercent: number): number {
   return Math.pow(clamped / 100, 2);
 }
 
-/**
- * Build a single outbound master stream from multiple device streams.
- * Each input is normalized to dual-mono and routed through analyser + gain.
- */
-export function createMasterAudioMix(
-  inputs: MixerInputStream[],
-  audioCtx: AudioContext,
-  deviceVolumes: Record<string, number> = {}
-): MasterAudioMixResult {
-  const destinationNode = audioCtx.createMediaStreamDestination();
-  const gainNodes = new Map<string, GainNode>();
-  const analyserNodes = new Map<string, AnalyserNode>();
-  const sourceNodes = new Map<string, MediaStreamAudioSourceNode>();
-  const splitterNodes = new Map<string, ChannelSplitterNode>();
-  const mergerNodes = new Map<string, ChannelMergerNode>();
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
 
-  for (const input of inputs) {
-    const deviceId = input.deviceId?.trim();
-    if (!deviceId) continue;
-    const stream = input.stream;
-    if (!(stream instanceof MediaStream)) continue;
-    if (stream.getAudioTracks().length === 0) continue;
+export async function probeStereoLane(
+  _ctx: AudioContext,
+  analyserCh0: AnalyserNode,
+  analyserCh1: AnalyserNode,
+  options?: {
+    sampleWindowMs?: number;
+    hardTimeoutMs?: number;
+    signal?: AbortSignal;
+  }
+): Promise<StereoProbeResult> {
+  const sampleWindowMs = options?.sampleWindowMs ?? 500;
+  const hardTimeoutMs = options?.hardTimeoutMs ?? 1500;
+  const signal = options?.signal;
 
-    const sourceNode = audioCtx.createMediaStreamSource(stream);
-    const splitterNode = audioCtx.createChannelSplitter(2);
-    const mergerNode = audioCtx.createChannelMerger(2);
-    const analyserNode = audioCtx.createAnalyser();
-    const gainNode = audioCtx.createGain();
+  const fallback = (): StereoProbeResult => ({
+    channelCount: 1,
+    confidence: "fallback",
+  });
 
-    analyserNode.fftSize = 2048;
-    analyserNode.smoothingTimeConstant = 0.8;
+  if (signal?.aborted) return fallback();
 
-    // Safari-safe dual-mono path: copy first channel into both output channels.
-    sourceNode.connect(splitterNode);
-    splitterNode.connect(mergerNode, 0, 0);
-    splitterNode.connect(mergerNode, 0, 1);
-    mergerNode.connect(analyserNode);
-    analyserNode.connect(gainNode);
-    gainNode.connect(destinationNode);
+  const runSampling = async (): Promise<StereoProbeResult> => {
+    const size0 = Math.max(32, analyserCh0.fftSize);
+    const size1 = Math.max(32, analyserCh1.fftSize);
+    const buf0 = new Float32Array(size0);
+    const buf1 = new Float32Array(size1);
 
-    const volumePercent = deviceVolumes[deviceId] ?? 100;
-    gainNode.gain.value = toPerceptualGain(volumePercent);
+    const startedAt = performance.now();
+    let samples = 0;
+    let energy0 = 0;
+    let energy1 = 0;
+    let peak0 = 0;
+    let peak1 = 0;
 
-    sourceNodes.set(deviceId, sourceNode);
-    splitterNodes.set(deviceId, splitterNode);
-    mergerNodes.set(deviceId, mergerNode);
-    analyserNodes.set(deviceId, analyserNode);
-    gainNodes.set(deviceId, gainNode);
+    while (performance.now() - startedAt < sampleWindowMs) {
+      if (signal?.aborted) return fallback();
+      analyserCh0.getFloatTimeDomainData(buf0);
+      analyserCh1.getFloatTimeDomainData(buf1);
+
+      let sumSquares0 = 0;
+      for (let i = 0; i < buf0.length; i += 1) {
+        const v = buf0[i] ?? 0;
+        const abs = Math.abs(v);
+        if (abs > peak0) peak0 = abs;
+        sumSquares0 += v * v;
+      }
+
+      let sumSquares1 = 0;
+      for (let i = 0; i < buf1.length; i += 1) {
+        const v = buf1[i] ?? 0;
+        const abs = Math.abs(v);
+        if (abs > peak1) peak1 = abs;
+        sumSquares1 += v * v;
+      }
+
+      energy0 += Math.sqrt(sumSquares0 / buf0.length);
+      energy1 += Math.sqrt(sumSquares1 / buf1.length);
+      samples += 1;
+
+      await sleepMs(20);
+    }
+
+    if (samples === 0) return fallback();
+    const avg0 = energy0 / samples;
+    const avg1 = energy1 / samples;
+    const baseline = Math.max(avg0, 1e-5);
+    const ratio = avg1 / baseline;
+
+    const isStereo =
+      (avg1 > 0.003 && ratio > 0.15) ||
+      (peak1 > 0.02 && peak0 > 0.02 && ratio > 0.1);
+
+    return {
+      channelCount: isStereo ? 2 : 1,
+      confidence: "measured",
+    };
+  };
+
+  const timeoutPromise = new Promise<StereoProbeResult>((resolve) => {
+    window.setTimeout(() => resolve(fallback()), hardTimeoutMs);
+  });
+
+  try {
+    return await Promise.race([runSampling(), timeoutPromise]);
+  } catch {
+    return fallback();
+  }
+}
+
+export async function createLaneGraph(args: {
+  deviceId: string;
+  stream: MediaStream;
+  audioCtx: AudioContext;
+  destinationNode: MediaStreamAudioDestinationNode;
+  deviceVolumes?: Record<string, number>;
+  probeOptions?: {
+    sampleWindowMs?: number;
+    hardTimeoutMs?: number;
+    signal?: AbortSignal;
+  };
+}): Promise<LaneGraphResult> {
+  const deviceId = args.deviceId?.trim();
+  if (!deviceId) {
+    throw new Error("createLaneGraph requires a non-empty deviceId.");
   }
 
-  const masterStream = destinationNode.stream;
-  const masterTrack = masterStream.getAudioTracks()[0] ?? null;
+  if (!(args.stream instanceof MediaStream) || args.stream.getAudioTracks().length === 0) {
+    throw new Error("createLaneGraph requires a MediaStream with at least one audio track.");
+  }
+
+  const audioCtx = args.audioCtx;
+  const destinationNode = args.destinationNode;
+  const gainNodes = new Map<string, GainNode>();
+  const analyserNodes = new Map<string, AnalyserNode>();
+  const sourceNode = audioCtx.createMediaStreamSource(args.stream);
+  const authoritativeChannelCount = sourceNode.channelCount >= 2 ? 2 : 1;
+  const splitterNode = audioCtx.createChannelSplitter(2);
+  const mergerNode = audioCtx.createChannelMerger(2);
+  const laneKeys: string[] = [];
+
+  sourceNode.connect(splitterNode);
+  for (let channelIdx = 0; channelIdx < 2; channelIdx += 1) {
+    const laneKey = `${deviceId}:ch${channelIdx}`;
+    const gainNode = audioCtx.createGain();
+    const analyserNode = audioCtx.createAnalyser();
+    analyserNode.fftSize = 256;
+    analyserNode.smoothingTimeConstant = 0.5;
+
+    const splitterOutput = authoritativeChannelCount === 2 ? channelIdx : 0;
+    splitterNode.connect(gainNode, splitterOutput, 0);
+    gainNode.connect(analyserNode);
+    analyserNode.connect(mergerNode, 0, channelIdx);
+
+    const volumePercent = args.deviceVolumes?.[deviceId] ?? 100;
+    gainNode.gain.value = toPerceptualGain(volumePercent);
+
+    gainNodes.set(laneKey, gainNode);
+    analyserNodes.set(laneKey, analyserNode);
+    laneKeys.push(laneKey);
+  }
+
+  mergerNode.connect(destinationNode);
+
+  const laneInfo = await probeStereoLane(
+    audioCtx,
+    analyserNodes.get(`${deviceId}:ch0`)!,
+    analyserNodes.get(`${deviceId}:ch1`)!,
+    args.probeOptions
+  );
 
   return {
-    masterStream,
-    masterTrack,
+    laneKeys,
+    laneInfo,
     gainNodes,
     analyserNodes,
-    sourceNodes,
-    splitterNodes,
-    mergerNodes,
-    destinationNode,
+    sourceNode,
+    splitterNode,
+    mergerNode,
   };
 }
 

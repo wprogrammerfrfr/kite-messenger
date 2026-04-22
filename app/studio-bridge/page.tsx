@@ -19,17 +19,19 @@ import {
   acquireStudioMicStream,
   applyLowLatencyInboundAudioReceivers,
   checkAudioWorkletSupport,
-  createMasterAudioMix,
+  createLaneGraph,
   decodePeerDataChunk,
   parseSelectedCandidatePairRttMs,
   parseInboundAudioPacketLoss,
   buildPeerConfig,
   fetchTurnCredentials,
+  type StereoProbeResult,
 } from "@/lib/studio-bridge-webrtc";
 import { createMetronomeScheduler, type MetronomeTick } from "@/lib/studio-metronome-schedule";
 import { forceMusicModeOpus } from '@/lib/sdp-utils'
 
 type BridgeStatus = "connecting" | "connected" | "failed";
+type StudioUiPhase = "lobby" | "connecting" | "studio";
 type Role = "host" | "peer";
 type SessionLeaveMessage = {
   type: "LEAVE";
@@ -381,7 +383,7 @@ export default function StudioBridgePage() {
   const [audioTestFailed, setAudioTestFailed] = useState(false);
   const [echoSafetyMode, setEchoSafetyMode] = useState(false);
   const [kiteSignal, setKiteSignal] = useState<KiteSignalState>("checking");
-  const [enteredStudio, setEnteredStudio] = useState(false);
+  const [studioUiPhase, setStudioUiPhase] = useState<StudioUiPhase>("lobby");
   const [isBufferingEnabled, setIsBufferingEnabled] = useState(false);
   const [isWorkletLoaded, setIsWorkletLoaded] = useState(false);
   const [bufferDepthFrames, setBufferDepthFrames] = useState(0);
@@ -429,6 +431,7 @@ export default function StudioBridgePage() {
   /** True while metronome is stopped due to inbound loss hysteresis (UX hint). */
   const [kiteSyncNetworkMetronomePaused, setKiteSyncNetworkMetronomePaused] = useState(false);
   const [metronomeVolume, setMetronomeVolume] = useState(1);
+  const isInStudioPhase = studioUiPhase === "studio";
 
   const micDeniedThisInitRef = useRef(false);
 
@@ -447,6 +450,8 @@ export default function StudioBridgePage() {
   const mixerSourceNodesRef = useRef<Map<string, MediaStreamAudioSourceNode>>(new Map());
   const mixerSplitterNodesRef = useRef<Map<string, ChannelSplitterNode>>(new Map());
   const mixerMergerNodesRef = useRef<Map<string, ChannelMergerNode>>(new Map());
+  const mixerLaneProbeRef = useRef<Map<string, StereoProbeResult>>(new Map());
+  const mixerTeardownOriginRef = useRef<"none" | "performTeardown">("none");
   const mixerMasterStreamRef = useRef<MediaStream | null>(null);
   const mixerMasterDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const activeDeviceIdsRef = useRef<string[]>([]);
@@ -476,6 +481,10 @@ export default function StudioBridgePage() {
   const historySavedRef = useRef(false);
   /** Prevents overlapping inits; cleared on effect cleanup so remount can proceed. */
   const bridgeInitInFlightRef = useRef(false);
+  const mixerRebuildInFlightRef = useRef(false);
+  const buildTransportRef = useRef<((localStream: MediaStream, ctx: AudioContext) => Promise<void>) | null>(
+    null
+  );
   /** Lazily created; resumed on "Enter Studio" so Safari unlocks audio on a user gesture. */
   const studioAudioContextRef = useRef<AudioContext | null>(null);
   const workletLoadPromiseRef = useRef<Promise<boolean> | null>(null);
@@ -518,6 +527,8 @@ export default function StudioBridgePage() {
   const isWorkletLoadedRef = useRef(isWorkletLoaded);
   const targetLeadFramesRef = useRef(targetLeadFrames);
   const isAutoBufferRef = useRef(true);
+  const deviceVolumesRef = useRef(deviceVolumes);
+  const localMicStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     isMicMutedRef.current = isMicMuted;
@@ -540,6 +551,27 @@ export default function StudioBridgePage() {
   }, [isAutoBuffer]);
 
   useEffect(() => {
+    deviceVolumesRef.current = deviceVolumes;
+  }, [deviceVolumes]);
+
+  useEffect(() => {
+    localMicStreamRef.current = localMicStream;
+  }, [localMicStream]);
+
+  const stopMediaStreamTracks = useCallback(
+    (stream: MediaStream | null | undefined, seenTrackIds: Set<string>) => {
+      if (!stream) return;
+      for (const track of stream.getTracks()) {
+        if (seenTrackIds.has(track.id)) continue;
+        seenTrackIds.add(track.id);
+        track.onended = null;
+        track.stop();
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
     activeDeviceIdsRef.current = activeDeviceIds;
   }, [activeDeviceIds]);
 
@@ -547,18 +579,17 @@ export default function StudioBridgePage() {
     let rafId = 0;
 
     const tick = () => {
-      const activeIds = activeDeviceIdsRef.current;
-      const stillActive = new Set(activeIds);
+      const activeLaneKeys = new Set(mixerAnalyserNodesRef.current.keys());
 
-      for (const [deviceId, el] of Array.from(perChannelMeterRefs.current.entries())) {
-        if (!stillActive.has(deviceId)) {
+      for (const [laneKey, el] of Array.from(perChannelMeterRefs.current.entries())) {
+        if (!activeLaneKeys.has(laneKey)) {
           el.style.width = "0%";
         }
       }
 
-      for (const deviceId of activeIds) {
-        const analyser = mixerAnalyserNodesRef.current.get(deviceId);
-        const meterEl = perChannelMeterRefs.current.get(deviceId);
+      for (const laneKey of Array.from(activeLaneKeys)) {
+        const analyser = mixerAnalyserNodesRef.current.get(laneKey);
+        const meterEl = perChannelMeterRefs.current.get(laneKey);
         if (!analyser || !meterEl) continue;
 
         const buf = new Uint8Array(analyser.frequencyBinCount);
@@ -690,22 +721,32 @@ export default function StudioBridgePage() {
 
   const removeAndCleanupDevice = useCallback((deviceId: string) => {
     const stream = activeStreamsMapRef.current.get(deviceId);
-    const gainNode = mixerGainNodesRef.current.get(deviceId);
-    const analyserNode = mixerAnalyserNodesRef.current.get(deviceId);
     const mergerNode = mixerMergerNodesRef.current.get(deviceId);
     const splitterNode = mixerSplitterNodesRef.current.get(deviceId);
     const sourceNode = mixerSourceNodesRef.current.get(deviceId);
+    const laneKeys = [`${deviceId}:ch0`, `${deviceId}:ch1`] as const;
 
-    try {
-      gainNode?.disconnect();
-    } catch {
-      /* ignore */
+    for (const laneKey of laneKeys) {
+      const gainNode = mixerGainNodesRef.current.get(laneKey);
+      const analyserNode = mixerAnalyserNodesRef.current.get(laneKey);
+      try {
+        gainNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      try {
+        analyserNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      mixerGainNodesRef.current.delete(laneKey);
+      mixerAnalyserNodesRef.current.delete(laneKey);
+      mixerLaneProbeRef.current.delete(laneKey);
+      const meterEl = perChannelMeterRefs.current.get(laneKey);
+      if (meterEl) meterEl.style.width = "0%";
+      perChannelMeterRefs.current.delete(laneKey);
     }
-    try {
-      analyserNode?.disconnect();
-    } catch {
-      /* ignore */
-    }
+
     try {
       mergerNode?.disconnect();
     } catch {
@@ -724,20 +765,40 @@ export default function StudioBridgePage() {
 
     stream?.getTracks().forEach((track) => track.stop());
     activeStreamsMapRef.current.delete(deviceId);
-    mixerGainNodesRef.current.delete(deviceId);
-    mixerAnalyserNodesRef.current.delete(deviceId);
     mixerMergerNodesRef.current.delete(deviceId);
     mixerSplitterNodesRef.current.delete(deviceId);
     mixerSourceNodesRef.current.delete(deviceId);
+
+    if (process.env.NODE_ENV !== "production") {
+      const laneKeyPattern = /^.+:(ch0|ch1)$/;
+      for (const laneKey of Array.from(mixerGainNodesRef.current.keys())) {
+        console.assert(
+          laneKeyPattern.test(laneKey),
+          "[Kite][Invariant] mixerGainNodesRef key must match /^.+:(ch0|ch1)$/",
+          laneKey
+        );
+      }
+      for (const laneKey of Array.from(mixerAnalyserNodesRef.current.keys())) {
+        console.assert(
+          laneKeyPattern.test(laneKey),
+          "[Kite][Invariant] mixerAnalyserNodesRef key must match /^.+:(ch0|ch1)$/",
+          laneKey
+        );
+      }
+      for (const laneKey of Array.from(perChannelMeterRefs.current.keys())) {
+        console.assert(
+          laneKeyPattern.test(laneKey),
+          "[Kite][Invariant] perChannelMeterRefs key must match /^.+:(ch0|ch1)$/",
+          laneKey
+        );
+      }
+    }
   }, []);
 
-  const teardownMixerGraphNodes = useCallback(() => {
-    for (const deviceId of Array.from(mixerGainNodesRef.current.keys())) {
-      const gainNode = mixerGainNodesRef.current.get(deviceId);
-      const analyserNode = mixerAnalyserNodesRef.current.get(deviceId);
-      const mergerNode = mixerMergerNodesRef.current.get(deviceId);
-      const splitterNode = mixerSplitterNodesRef.current.get(deviceId);
-      const sourceNode = mixerSourceNodesRef.current.get(deviceId);
+  const disconnectMixerLaneNodes = useCallback(() => {
+    for (const laneKey of Array.from(mixerGainNodesRef.current.keys())) {
+      const gainNode = mixerGainNodesRef.current.get(laneKey);
+      const analyserNode = mixerAnalyserNodesRef.current.get(laneKey);
       try {
         gainNode?.disconnect();
       } catch {
@@ -748,6 +809,12 @@ export default function StudioBridgePage() {
       } catch {
         /* ignore */
       }
+    }
+
+    for (const deviceId of Array.from(mixerMergerNodesRef.current.keys())) {
+      const mergerNode = mixerMergerNodesRef.current.get(deviceId);
+      const splitterNode = mixerSplitterNodesRef.current.get(deviceId);
+      const sourceNode = mixerSourceNodesRef.current.get(deviceId);
       try {
         mergerNode?.disconnect();
       } catch {
@@ -764,58 +831,163 @@ export default function StudioBridgePage() {
         /* ignore */
       }
     }
-    try {
-      mixerMasterDestinationRef.current?.disconnect();
-    } catch {
-      /* ignore */
-    }
     mixerGainNodesRef.current.clear();
     mixerAnalyserNodesRef.current.clear();
     mixerMergerNodesRef.current.clear();
     mixerSplitterNodesRef.current.clear();
     mixerSourceNodesRef.current.clear();
+    mixerLaneProbeRef.current.clear();
+  }, []);
+
+  const teardownMixerGraphNodes = useCallback(() => {
+    if (process.env.NODE_ENV !== "production") {
+      console.assert(
+        mixerTeardownOriginRef.current === "performTeardown",
+        "[Kite][Invariant] teardownMixerGraphNodes should be called only from performTeardown"
+      );
+    }
+    disconnectMixerLaneNodes();
+  }, [disconnectMixerLaneNodes]);
+
+  const teardownMasterDestinationNode = useCallback(() => {
+    try {
+      mixerMasterDestinationRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
     mixerMasterDestinationRef.current = null;
     mixerMasterStreamRef.current = null;
   }, []);
 
-  const rebuildMixerAndReplaceTrack = useCallback(() => {
+  const ensureMasterDestinationNode = useCallback(() => {
     const ctx = studioAudioContextRef.current;
-    if (!ctx || ctx.state === "closed") return;
+    if (!ctx || ctx.state === "closed") return null;
 
-    const inputs = Array.from(activeStreamsMapRef.current.entries()).map(([deviceId, stream]) => ({
-      deviceId,
-      stream,
-    }));
-
-    teardownMixerGraphNodes();
-    if (inputs.length === 0) return;
-
-    const mix = createMasterAudioMix(inputs, ctx, deviceVolumes);
-    mixerGainNodesRef.current = mix.gainNodes;
-    mixerAnalyserNodesRef.current = mix.analyserNodes;
-    mixerSourceNodesRef.current = mix.sourceNodes;
-    mixerSplitterNodesRef.current = mix.splitterNodes;
-    mixerMergerNodesRef.current = mix.mergerNodes;
-    mixerMasterDestinationRef.current = mix.destinationNode;
-    mixerMasterStreamRef.current = mix.masterStream;
-    if (!mix.masterTrack) return;
-
-    const prevStream = localStreamRef.current;
-    const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
-    replacePeerAudioTrack(prevTrack, mix.masterTrack, prevStream ?? null, mix.masterStream);
-    mix.masterTrack.enabled = !isMicMutedRef.current;
-    localStreamRef.current = mix.masterStream;
-    setLocalMicStream(mix.masterStream);
-    const localEl = localMonitorAudioRef.current;
-    if (localEl) {
-      localEl.srcObject = mix.masterStream;
-      localEl.muted = true;
-      void localEl.play().catch(() => {});
+    let destinationNode = mixerMasterDestinationRef.current;
+    if (!destinationNode) {
+      destinationNode = ctx.createMediaStreamDestination();
+      mixerMasterDestinationRef.current = destinationNode;
+      mixerMasterStreamRef.current = destinationNode.stream;
+    } else if (!mixerMasterStreamRef.current) {
+      mixerMasterStreamRef.current = destinationNode.stream;
     }
-  }, [deviceVolumes, replacePeerAudioTrack, teardownMixerGraphNodes]);
+
+    return destinationNode;
+  }, []);
+
+  const rebuildMixerAndReplaceTrack = useCallback(async () => {
+    if (mixerRebuildInFlightRef.current) return;
+    mixerRebuildInFlightRef.current = true;
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") {
+      mixerRebuildInFlightRef.current = false;
+      return;
+    }
+
+    try {
+      const inputs = Array.from(activeStreamsMapRef.current.entries()).map(([deviceId, stream]) => ({
+        deviceId,
+        stream,
+      }));
+
+      disconnectMixerLaneNodes();
+      const destinationNode = ensureMasterDestinationNode();
+      if (!destinationNode || inputs.length === 0) return;
+
+      for (const input of inputs) {
+        const laneGraph = await createLaneGraph({
+          deviceId: input.deviceId,
+          stream: input.stream,
+          audioCtx: ctx,
+          destinationNode,
+          deviceVolumes: deviceVolumesRef.current,
+        });
+        for (const [laneKey, gainNode] of Array.from(laneGraph.gainNodes.entries())) {
+          mixerGainNodesRef.current.set(laneKey, gainNode);
+        }
+        for (const [laneKey, analyserNode] of Array.from(laneGraph.analyserNodes.entries())) {
+          mixerAnalyserNodesRef.current.set(laneKey, analyserNode);
+        }
+        for (const laneKey of laneGraph.laneKeys) {
+          mixerLaneProbeRef.current.set(laneKey, laneGraph.laneInfo);
+        }
+        mixerSourceNodesRef.current.set(input.deviceId, laneGraph.sourceNode);
+        mixerSplitterNodesRef.current.set(input.deviceId, laneGraph.splitterNode);
+        mixerMergerNodesRef.current.set(input.deviceId, laneGraph.mergerNode);
+      }
+
+      mixerMasterDestinationRef.current = destinationNode;
+      mixerMasterStreamRef.current = destinationNode.stream;
+      if (process.env.NODE_ENV !== "production") {
+        console.assert(
+          mixerMasterDestinationRef.current !== null,
+          "[Kite][Invariant] masterDestinationRef must exist after lane build"
+        );
+      }
+      const masterTrack = destinationNode.stream.getAudioTracks()[0] ?? null;
+      if (!masterTrack) return;
+
+      const prevStream = localStreamRef.current;
+      const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
+      replacePeerAudioTrack(prevTrack, masterTrack, prevStream ?? null, destinationNode.stream);
+      masterTrack.enabled = !isMicMutedRef.current;
+      localStreamRef.current = destinationNode.stream;
+      setLocalMicStream(destinationNode.stream);
+      const localEl = localMonitorAudioRef.current;
+      if (localEl) {
+        localEl.srcObject = destinationNode.stream;
+        localEl.muted = true;
+        void localEl.play().catch(() => {});
+      }
+
+      if (process.env.NODE_ENV !== "production") {
+        const laneKeyPattern = /^.+:(ch0|ch1)$/;
+        for (const laneKey of Array.from(mixerGainNodesRef.current.keys())) {
+          console.assert(
+            laneKeyPattern.test(laneKey),
+            "[Kite][Invariant] mixerGainNodesRef key must match /^.+:(ch0|ch1)$/",
+            laneKey
+          );
+        }
+        for (const laneKey of Array.from(mixerAnalyserNodesRef.current.keys())) {
+          console.assert(
+            laneKeyPattern.test(laneKey),
+            "[Kite][Invariant] mixerAnalyserNodesRef key must match /^.+:(ch0|ch1)$/",
+            laneKey
+          );
+        }
+        for (const laneKey of Array.from(perChannelMeterRefs.current.keys())) {
+          console.assert(
+            laneKeyPattern.test(laneKey),
+            "[Kite][Invariant] perChannelMeterRefs key must match /^.+:(ch0|ch1)$/",
+            laneKey
+          );
+        }
+      }
+    } finally {
+      mixerRebuildInFlightRef.current = false;
+    }
+  }, [disconnectMixerLaneNodes, ensureMasterDestinationNode, replacePeerAudioTrack]);
 
   const toggleAudioDevice = useCallback(
     async (deviceId: string) => {
+      if (mixerRebuildInFlightRef.current) return;
+      let ctx = studioAudioContextRef.current;
+      if (ctx?.state === "closed") {
+        studioAudioContextRef.current = null;
+        ctx = null;
+      }
+      if (!ctx) {
+        ctx = createStudioAudioContext();
+        studioAudioContextRef.current = ctx;
+        workletLoadedContextRef.current = null;
+        workletLoadPromiseRef.current = null;
+        setIsWorkletLoaded(false);
+      }
+      void ctx
+        .resume()
+        .then(() => setAudioContextReady(true))
+        .catch(() => {});
       const requestedDeviceId = deviceId.trim();
       if (!requestedDeviceId) return;
 
@@ -823,7 +995,7 @@ export default function StudioBridgePage() {
       if (isActive) {
         setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
         removeAndCleanupDevice(requestedDeviceId);
-        rebuildMixerAndReplaceTrack();
+        void rebuildMixerAndReplaceTrack();
         return;
       }
 
@@ -859,14 +1031,25 @@ export default function StudioBridgePage() {
             if (!activeDeviceIdsRef.current.includes(requestedDeviceId)) return;
             setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
             removeAndCleanupDevice(requestedDeviceId);
-            rebuildMixerAndReplaceTrack();
+            setDeviceVolumes((prev) => {
+              if (prev[requestedDeviceId] === undefined) return prev;
+              const next = { ...prev };
+              delete next[requestedDeviceId];
+              return next;
+            });
           };
         });
         setDeviceVolumes((prev) => {
           if (prev[requestedDeviceId] !== undefined) return prev;
           return { ...prev, [requestedDeviceId]: 100 };
         });
-        rebuildMixerAndReplaceTrack();
+        await rebuildMixerAndReplaceTrack();
+        if (process.env.NODE_ENV !== "production") {
+          console.assert(
+            mixerMasterDestinationRef.current !== null,
+            "[Kite][Invariant] masterDestinationRef must exist after first device add"
+          );
+        }
       } catch (err) {
         setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
         console.error("Failed to toggle audio input device:", err);
@@ -880,13 +1063,18 @@ export default function StudioBridgePage() {
   const handleVolumeChange = useCallback((deviceId: string, newVolume: number) => {
     const clampedVolume = Math.min(100, Math.max(0, newVolume));
     setDeviceVolumes((prev) => ({ ...prev, [deviceId]: clampedVolume }));
-    const gainNode = mixerGainNodesRef.current.get(deviceId);
-    if (!gainNode) return;
     const streamStillActive = activeStreamsMapRef.current.has(deviceId);
     if (!streamStillActive) return;
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
     try {
       const perceptualGain = Math.pow(clampedVolume / 100, 2);
-      gainNode.gain.value = perceptualGain;
+      for (const laneKey of [`${deviceId}:ch0`, `${deviceId}:ch1`]) {
+        const gainNode = mixerGainNodesRef.current.get(laneKey);
+        if (!gainNode) continue;
+        gainNode.gain.cancelScheduledValues(ctx.currentTime);
+        gainNode.gain.setTargetAtTime(perceptualGain, ctx.currentTime, 0.01);
+      }
     } catch {
       /* ignore slider updates during active teardown */
     }
@@ -1090,7 +1278,18 @@ export default function StudioBridgePage() {
 
   const kiteSignalSecure = kiteSignal === "secure";
   const canEnterStudio =
-    Boolean(localMicStream) && audioTestDone && kiteSignalSecure;
+    studioUiPhase === "lobby" &&
+    Boolean(localMicStream) &&
+    audioTestDone &&
+    kiteSignalSecure;
+  console.log("DEBUG [EnterGate]:", {
+    canEnterStudio,
+    studioUiPhase,
+    hasLocalMic: Boolean(localMicStream),
+    audioTestDone,
+    kiteSignalSecure,
+  });
+  const showLobbyControls = studioUiPhase === "lobby";
 
   const remoteIsLive = remoteLevel > 0.07;
   const syncCountInBlocksLive = kiteSyncCountInActive && kiteSyncEnabled;
@@ -1493,16 +1692,16 @@ export default function StudioBridgePage() {
   }, [ensureKiteBufferWorkletLoaded]);
 
   useEffect(() => {
-    if (!enteredStudio) return;
+    if (!isInStudioPhase) return;
     if (!remoteStreamRef.current) return;
     rebuildRemoteGraphWithoutTeardown();
-  }, [enteredStudio, isBufferingEnabled, rebuildRemoteGraphWithoutTeardown]);
+  }, [isInStudioPhase, isBufferingEnabled, rebuildRemoteGraphWithoutTeardown]);
 
   useEffect(() => {
-    if (!enteredStudio || !isBufferingEnabled || !isWorkletLoaded) return;
+    if (!isInStudioPhase || !isBufferingEnabled || !isWorkletLoaded) return;
     if (!remoteStreamRef.current) return;
     rebuildRemoteGraphWithoutTeardown();
-  }, [enteredStudio, isBufferingEnabled, isWorkletLoaded, rebuildRemoteGraphWithoutTeardown]);
+  }, [isInStudioPhase, isBufferingEnabled, isWorkletLoaded, rebuildRemoteGraphWithoutTeardown]);
 
   useEffect(() => {
     if (kiteSyncEnabled) return;
@@ -1512,7 +1711,7 @@ export default function StudioBridgePage() {
   }, [kiteSyncEnabled]);
 
   useEffect(() => {
-    if (!enteredStudio) return;
+    if (!isInStudioPhase) return;
     const currentStream = localStreamRef.current;
     if (!currentStream || echoModeApplyingRef.current) return;
     echoModeApplyingRef.current = true;
@@ -1553,7 +1752,7 @@ export default function StudioBridgePage() {
         echoModeApplyingRef.current = false;
       }
     })();
-  }, [echoSafetyMode, enteredStudio, replacePeerAudioTrack]);
+  }, [echoSafetyMode, isInStudioPhase, replacePeerAudioTrack]);
 
   useEffect(() => {
     if (isAutoBufferRef.current) return;
@@ -2001,17 +2200,50 @@ export default function StudioBridgePage() {
   const onEnterStudioClick = useCallback(() => {
     void (async () => {
       try {
-        const ctx = ensureStudioAudioContext();
-        await ctx.resume().catch(() => {});
+        if (!studioAudioContextRef.current) {
+          ensureStudioAudioContext();
+        }
+        const resumePromise = studioAudioContextRef.current!.resume();
+        await resumePromise;
+        const ctx = studioAudioContextRef.current;
+        if (!ctx || ctx.state !== "running") {
+          console.warn("[EnterStudio] Aborted: audio context missing or not running.");
+          return;
+        }
+
+        const masterDestination = mixerMasterDestinationRef.current;
+        const masterTrack = masterDestination?.stream.getAudioTracks()[0] ?? null;
+        const fallbackLocalStream = localStreamRef.current;
+        const localStream =
+          masterDestination && masterTrack && masterTrack.readyState === "live"
+            ? masterDestination.stream
+            : fallbackLocalStream;
+        if (!localStream) {
+          console.warn("[EnterStudio] Aborted: local stream unavailable.");
+          return;
+        }
+        if (!masterDestination || !masterTrack || masterTrack.readyState !== "live") {
+          console.warn(
+            "Enter Studio: mixer master destination unavailable, falling back to localStreamRef.current."
+          );
+        }
+        const buildTransport = buildTransportRef.current;
+        if (!buildTransport) {
+          console.warn("[EnterStudio] Aborted: buildTransport not ready.");
+          return;
+        }
+
+        setStudioUiPhase("connecting");
+        await buildTransport(localStream, ctx);
         ensureMetronomeGainNode(ctx);
         const stream = remoteStreamRef.current;
         if (stream) {
           buildRemotePlaybackGraph(stream);
         }
-      } catch {
-        // Ignore; UI still enters studio.
+      } catch (err) {
+        console.error("[EnterStudio] Failed to enter studio:", err);
       }
-      setEnteredStudio(true);
+      setStudioUiPhase("studio");
     })();
   }, [buildRemotePlaybackGraph, ensureMetronomeGainNode, ensureStudioAudioContext]);
 
@@ -2171,7 +2403,7 @@ export default function StudioBridgePage() {
       for (const missingId of missingActiveIds) {
         removeAndCleanupDevice(missingId);
       }
-      rebuildMixerAndReplaceTrack();
+      await rebuildMixerAndReplaceTrack();
     };
     navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
     return () => {
@@ -2239,6 +2471,7 @@ export default function StudioBridgePage() {
       }
       void (async () => {
         try {
+          const stoppedTrackIds = new Set<string>();
           setPingMs(null);
           setInboundPacketLossPercent(null);
           setCalculatedDelayMs(null);
@@ -2264,15 +2497,15 @@ export default function StudioBridgePage() {
           teardownRemotePlaybackGraph();
           // Mixer teardown: stop every active hardware stream and clear mixer graph/state.
           for (const [deviceId, stream] of Array.from(activeStreamsMapRef.current.entries())) {
-            stream.getTracks().forEach((track) => {
-              track.onended = null;
-              track.stop();
-            });
+            stopMediaStreamTracks(stream, stoppedTrackIds);
             activeStreamsMapRef.current.delete(deviceId);
           }
 
           // Ensure all mixer audio nodes are disconnected and references cleared.
+          mixerTeardownOriginRef.current = "performTeardown";
           teardownMixerGraphNodes();
+          mixerTeardownOriginRef.current = "none";
+          teardownMasterDestinationNode();
 
           // Reset mixer outbound references.
           mixerMasterStreamRef.current = null;
@@ -2281,7 +2514,11 @@ export default function StudioBridgePage() {
           // Reset mixer UI/state so lobby re-entry starts clean.
           setActiveDeviceIds([]);
           setDeviceVolumes({});
+          for (const meterEl of Array.from(perChannelMeterRefs.current.values())) {
+            meterEl.style.width = "0%";
+          }
           perChannelMeterRefs.current.clear();
+          setStudioUiPhase("lobby");
           const ctx = studioAudioContextRef.current;
           if (ctx && ctx.state !== "closed") {
             await ctx.close().catch(() => {});
@@ -2297,8 +2534,8 @@ export default function StudioBridgePage() {
           if (remoteAudioRef.current) {
             remoteAudioRef.current.srcObject = null;
           }
+          stopMediaStreamTracks(remoteStreamRef.current, stoppedTrackIds);
           if (remoteStreamRef.current) {
-            remoteStreamRef.current.getTracks().forEach((track) => track.stop());
             remoteStreamRef.current = null;
           }
           if (localMonitorAudioRef.current) {
@@ -2314,7 +2551,8 @@ export default function StudioBridgePage() {
 
           const localStreamToStop = localStreamRef.current;
           try {
-            localStreamToStop?.getTracks().forEach((track) => track.stop());
+            stopMediaStreamTracks(localStreamToStop, stoppedTrackIds);
+            stopMediaStreamTracks(localMicStreamRef.current, stoppedTrackIds);
           } finally {
             micStream = null;
             localStreamRef.current = null;
@@ -2399,6 +2637,19 @@ export default function StudioBridgePage() {
     let reconnectTransport: () => Promise<void> = async () => {};
 
     const buildTransport = async (localStream: MediaStream, ctx: AudioContext) => {
+      const localTrack = localStream.getAudioTracks()[0] ?? null;
+      if (process.env.NODE_ENV !== "production") {
+        console.assert(
+          ctx.state === "running",
+          "[Kite][Invariant] buildTransport requires running AudioContext",
+          ctx.state
+        );
+        console.assert(
+          localTrack?.readyState === "live",
+          "[Kite][Invariant] buildTransport requires live local track",
+          localTrack?.readyState
+        );
+      }
       p2pConnectSucceededRef.current = false;
       appliedRemoteSignalRef.current = false;
       seenIceRef.current = new Set();
@@ -2974,6 +3225,7 @@ export default function StudioBridgePage() {
         }
       }
     };
+    buildTransportRef.current = buildTransport;
 
     reconnectTransport = async () => {
       if (!localStreamRef.current || !studioAudioContextRef.current) return;
@@ -3088,7 +3340,11 @@ export default function StudioBridgePage() {
 
         addLog("Phase 1: getUserMedia (audio only)");
         try {
-          mediaStream = await acquireStudioMicStream({ echoSafetyMode });
+          if (!mixerMasterDestinationRef.current) {
+            mediaStream = await acquireStudioMicStream({ echoSafetyMode });
+          } else {
+            mediaStream = localStreamRef.current;
+          }
         } catch (micErr) {
           console.error(micErr);
           addLog("Microphone blocked or unavailable");
@@ -3119,10 +3375,13 @@ export default function StudioBridgePage() {
         }
 
         if (cancelled || !mountedRef.current) {
-          mediaStream.getTracks().forEach((track) => track.stop());
+          mediaStream?.getTracks().forEach((track) => track.stop());
           return;
         }
 
+        if (!mediaStream) {
+          throw new Error("Microphone stream is unavailable.");
+        }
         const audioTracks = mediaStream.getAudioTracks();
         if (audioTracks.length === 0) {
           mediaStream.getTracks().forEach((track) => track.stop());
@@ -3130,7 +3389,9 @@ export default function StudioBridgePage() {
         }
 
         micStream = mediaStream;
-        localStreamRef.current = mediaStream;
+        if (!mixerMasterDestinationRef.current) {
+          localStreamRef.current = mediaStream;
+        }
         if (mountedRef.current) {
           setMicSyncTimedOut(false);
           setLocalMicStream(mediaStream);
@@ -3161,7 +3422,7 @@ export default function StudioBridgePage() {
 
         if (isHost) {
           addLog("Phase 2: host full upsert studio_sessions");
-          setStatusNote("Creating session...");
+          setStatusNote("Room Created. Waiting in Lobby...");
 
           console.log(
             "DEBUG: Attempting Supabase Upsert for session (full row):",
@@ -3182,10 +3443,7 @@ export default function StudioBridgePage() {
           }
         } else {
           addLog("Phase 2: guest fetch studio_sessions");
-          setStatusNote("Fetching room...");
-
-          const guestOfferReady = (row: StudioSessionRow) =>
-            row.offer != null && typeof row.offer === "object";
+          setStatusNote("Room Joined. Waiting in Lobby...");
 
           let { data: fetched, error: fetchErr } = await supabase
             .from("studio_sessions")
@@ -3194,32 +3452,6 @@ export default function StudioBridgePage() {
             .single<StudioSessionRow>();
 
           if (fetchErr || !fetched) throw new Error("Room not found.");
-
-          if (!guestOfferReady(fetched)) {
-            addLog("Phase 2: guest offer empty; retry after 2s");
-            setStatusNote("Waiting for host…");
-            await new Promise((resolve) => window.setTimeout(resolve, 2000));
-            if (cancelled || !mountedRef.current) {
-              micStream.getTracks().forEach((track) => track.stop());
-              micStream = null;
-              localStreamRef.current = null;
-              if (mountedRef.current) setLocalMicStream(null);
-              return;
-            }
-            const retry = await supabase
-              .from("studio_sessions")
-              .select("session_id, offer, answer, ice_candidates, host_user_id")
-              .eq("session_id", sessionId.toUpperCase())
-              .single<StudioSessionRow>();
-            fetchErr = retry.error;
-            fetched = retry.data ?? null;
-            if (fetchErr || !fetched) throw new Error("Room not found.");
-            if (!guestOfferReady(fetched)) {
-              throw new Error(
-                "Session not ready. The host may still be setting up—try again in a moment."
-              );
-            }
-          }
 
           const {
             data: { user },
@@ -3256,11 +3488,6 @@ export default function StudioBridgePage() {
         transportActiveRole = activeRole;
         transportIsHost = isHost;
         transportForceRelay = forceRelay;
-        if (!mediaStream) return;
-        await buildTransport(
-          localStreamRef.current!,
-          studioAudioContextRef.current as AudioContext
-        );
       } catch (error) {
         if (cancelled || !mountedRef.current) return;
         console.error("CRITICAL BRIDGE ERROR:", error);
@@ -3280,6 +3507,7 @@ export default function StudioBridgePage() {
     return () => {
       bridgeInitInFlightRef.current = false;
       bridgeTeardownRef.current = null;
+      buildTransportRef.current = null;
       micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
     };
@@ -3500,7 +3728,7 @@ export default function StudioBridgePage() {
             </div>
           ) : null}
 
-          {!enteredStudio ? (
+          {showLobbyControls ? (
             <>
               <div
                 className="mt-8 rounded-2xl border border-stone-800/90 bg-stone-950/40 p-5 shadow-2xl backdrop-blur-sm"
@@ -4249,14 +4477,27 @@ export default function StudioBridgePage() {
                       </button>
                       {isSelected ? (
                         <div className="rounded-lg border border-stone-700/80 bg-stone-900/70 px-2 py-1.5">
-                          <div className="mb-1.5 h-1.5 w-full overflow-hidden rounded bg-stone-800">
-                            <div
-                              ref={(el) => {
-                                if (el) perChannelMeterRefs.current.set(deviceId, el);
-                                else perChannelMeterRefs.current.delete(deviceId);
-                              }}
-                              className="h-full w-0 rounded bg-emerald-500 transition-[width] duration-75"
-                            />
+                          <div className="mb-1.5 space-y-1">
+                            <div className="h-1.5 w-full overflow-hidden rounded bg-stone-800">
+                              <div
+                                ref={(el) => {
+                                  const laneKey = `${deviceId}:ch0`;
+                                  if (el) perChannelMeterRefs.current.set(laneKey, el);
+                                  else perChannelMeterRefs.current.delete(laneKey);
+                                }}
+                                className="h-full w-0 rounded bg-emerald-500 transition-[width] duration-75"
+                              />
+                            </div>
+                            <div className="h-1.5 w-full overflow-hidden rounded bg-stone-800">
+                              <div
+                                ref={(el) => {
+                                  const laneKey = `${deviceId}:ch1`;
+                                  if (el) perChannelMeterRefs.current.set(laneKey, el);
+                                  else perChannelMeterRefs.current.delete(laneKey);
+                                }}
+                                className="h-full w-0 rounded bg-emerald-500/80 transition-[width] duration-75"
+                              />
+                            </div>
                           </div>
                           <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-stone-400">
                             Volume {deviceVolumes[deviceId] ?? 100}
