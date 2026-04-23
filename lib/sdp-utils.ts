@@ -18,6 +18,22 @@ function applySafariOpusStereoOffToFmtpParams(fmtpParams: string): string {
   return filtered.join(";");
 }
 
+/**
+ * Remove any stereo-related fmtp keys, then append stereo-on params for music mode.
+ */
+function applyOpusStereoOnToFmtpParams(fmtpParams: string): string {
+  const parts = fmtpParams
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const filtered = parts.filter((p) => {
+    const key = p.split("=")[0]?.trim().toLowerCase();
+    return key !== "stereo" && key !== "sprop-stereo";
+  });
+  filtered.push("stereo=1", "sprop-stereo=1");
+  return filtered.join(";");
+}
+
 export function forceMusicModeOpus(
   sdp: string,
   options?: ForceMusicModeOpusOptions
@@ -52,9 +68,9 @@ export function forceMusicModeOpus(
         updated += ";usedtx=0";
       }
 
-      if (safariStereo) {
-        updated = applySafariOpusStereoOffToFmtpParams(updated);
-      }
+      updated = safariStereo
+        ? applySafariOpusStereoOffToFmtpParams(updated)
+        : applyOpusStereoOnToFmtpParams(updated);
 
       return sdp.replace(fmtpMatch[0], fmtpMatch[1] + updated);
     }
@@ -64,9 +80,7 @@ export function forceMusicModeOpus(
     if (!rtpLine) return sdp;
     let newLine =
       `a=fmtp:${id} useinbandfec=1;maxaveragebitrate=510000;maxplaybackrate=48000;usedtx=0`;
-    if (safariStereo) {
-      newLine += ";stereo=0;sprop-stereo=0";
-    }
+    newLine += safariStereo ? ";stereo=0;sprop-stereo=0" : ";stereo=1;sprop-stereo=1";
     newLine += "\r\n";
     return sdp.replace(rtpLine, rtpLine + newLine);
   } catch (error) {

@@ -135,6 +135,12 @@ function isMicPermissionDeniedError(err: unknown): boolean {
   return name === "NotAllowedError" || name === "PermissionDeniedError";
 }
 
+function isDeviceBusyError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  return name === "NotReadableError" || name === "TrackStartError";
+}
+
 function addLog(msg: string) {
   console.log(msg);
 }
@@ -1052,6 +1058,9 @@ export default function StudioBridgePage() {
         }
       } catch (err) {
         setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
+        if (isDeviceBusyError(err)) {
+          setStatusNote("Device is busy. Please close Zoom, Discord, or your DAW and retry.");
+        }
         console.error("Failed to toggle audio input device:", err);
       } finally {
         void refreshAudioInputDevices();
@@ -1718,6 +1727,13 @@ export default function StudioBridgePage() {
 
     void (async () => {
       try {
+        // Preserve the Phase-1 singleton mixer destination: echo mode changes must flow
+        // through lane rebuild, never by swapping in a raw single-mic stream.
+        if (mixerMasterDestinationRef.current) {
+          await rebuildMixerAndReplaceTrack();
+          return;
+        }
+
         const nextStream = await acquireStudioMicStream({ echoSafetyMode });
         if (!mountedRef.current) {
           nextStream.getTracks().forEach((track) => track.stop());
@@ -1752,7 +1768,7 @@ export default function StudioBridgePage() {
         echoModeApplyingRef.current = false;
       }
     })();
-  }, [echoSafetyMode, isInStudioPhase, replacePeerAudioTrack]);
+  }, [echoSafetyMode, isInStudioPhase, rebuildMixerAndReplaceTrack, replacePeerAudioTrack]);
 
   useEffect(() => {
     if (isAutoBufferRef.current) return;
@@ -2748,7 +2764,7 @@ export default function StudioBridgePage() {
         sdpTransform: (sdp) => {
           console.log("[SDP-IN]", sdp);
           try {
-            const result = forceMusicModeOpus(sdp);
+            const result = forceMusicModeOpus(sdp, { isSafariWebKit });
             console.log("[SDP-OUT]", result);
             if (!result || typeof result !== "string") {
               console.error("[SDP-TRANSFORM] returned invalid value:", result);
