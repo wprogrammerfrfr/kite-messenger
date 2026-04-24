@@ -138,7 +138,7 @@ function isMicPermissionDeniedError(err: unknown): boolean {
 function isDeviceBusyError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const name = (err as { name?: string }).name;
-  return name === "NotReadableError" || name === "TrackStartError";
+  return name === "NotReadableError" || name === "TrackStartError" || name === "NotFoundError";
 }
 
 function addLog(msg: string) {
@@ -1058,7 +1058,10 @@ export default function StudioBridgePage() {
         }
       } catch (err) {
         setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
-        if (isDeviceBusyError(err)) {
+        const errorName = err && typeof err === "object" ? (err as { name?: string }).name : undefined;
+        if (errorName === "NotFoundError") {
+          setStatusNote("Device disconnected or not found.");
+        } else if (isDeviceBusyError(err)) {
           setStatusNote("Device is busy. Please close Zoom, Discord, or your DAW and retry.");
         }
         console.error("Failed to toggle audio input device:", err);
@@ -2755,6 +2758,9 @@ export default function StudioBridgePage() {
       const lowLatencyReceiverOpts = { isSafariWebKit };
 
       const iceServers = await fetchTurnCredentials();
+      if (transportForceRelay && iceServers.length === 0) {
+        setStatusNote("Secure relay servers unavailable. Restrictive network detected.");
+      }
       const peerConfig = buildPeerConfig(iceServers, transportForceRelay);
       const peer = new Peer({
         initiator: transportIsHost,
