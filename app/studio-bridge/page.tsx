@@ -16,6 +16,21 @@ import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { TrackRecorder } from "@/lib/track-recorder";
 import {
+  calcIntervalFrames,
+  calcLoopDurationSeconds,
+  type KiteIntervalTiming,
+} from "@/lib/kite-interval-math";
+import type { KiteIntervalGraph } from "@/lib/kite-interval-graph";
+import { buildSoloLooperEngine, type SoloLooperEngine } from "@/lib/solo-looper-engine";
+import type { KiteSchedulerWorkerHandle } from "@/lib/kite-scheduler-worker";
+import {
+  createLoadIntervalChunks,
+  KiteDataChannelChunkSender,
+  KiteIntervalReassembler,
+  type ReassembledLoadInterval,
+} from "@/lib/kite-data-chunking";
+import { resampleInterleavedFloat32 } from "@/lib/kite-resampler";
+import {
   acquireStudioMicStream,
   applyLowLatencyInboundAudioReceivers,
   checkAudioWorkletSupport,
@@ -31,8 +46,36 @@ import { createMetronomeScheduler, type MetronomeTick } from "@/lib/studio-metro
 import { forceMusicModeOpus } from '@/lib/sdp-utils'
 
 type BridgeStatus = "connecting" | "connected" | "failed";
-type StudioUiPhase = "lobby" | "connecting" | "studio";
+type StudioUiPhase = "lobby" | "connecting" | "studio" | "kite-setup";
 type Role = "host" | "peer";
+type KiteSetupStep = 1 | 2 | 3 | 4 | 5;
+type KiteMode = "live" | "solo" | "sync" | "broadcast";
+type BroadcastStatus = "idle" | "connecting" | "syncing" | "live";
+type SoloLooperState = "idle" | "recording" | "captured" | "playing";
+type JamSetupLock = { ownerId: string; ownerName: string; expiresAt: number } | null;
+type JamSetupLockAction = "acquire" | "release";
+type KiteSetupOrigin = "lobby" | "connected";
+type DeviceFlagMap = Record<string, boolean>;
+type KiteLoopChunkSendProgress = {
+  status: "idle" | "sending" | "sent" | "error";
+  sentChunks: number;
+  totalChunks: number;
+};
+type RetainedKiteLoopBuffer = {
+  intervalId: string;
+  sequenceNumber: number;
+  sampleRate: number;
+  intervalFrames: number;
+  channelCount: number;
+  buffer: ArrayBuffer;
+};
+type JamSetupLockMessage = {
+  type: "JAM_SETUP_LOCK";
+  action: JamSetupLockAction;
+  ownerId: string;
+  ownerName: string;
+  expiresAt?: number;
+};
 type SessionLeaveMessage = {
   type: "LEAVE";
   from: Role;
@@ -429,7 +472,32 @@ export default function StudioBridgePage() {
   const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
   const [activeDeviceIds, setActiveDeviceIds] = useState<string[]>([]);
   const [deviceVolumes, setDeviceVolumes] = useState<Record<string, number>>({});
+  const [interfaceInputDeviceFlags, setInterfaceInputDeviceFlags] = useState<DeviceFlagMap>({});
+  const [interfaceLiveMonitorEnabledFlags, setInterfaceLiveMonitorEnabledFlags] = useState<DeviceFlagMap>({});
   const [devicePanelOpen, setDevicePanelOpen] = useState(false);
+  const [kiteSetupStep, setKiteSetupStep] = useState<KiteSetupStep>(1);
+  const [kiteSetupTimeSignatureTop, setKiteSetupTimeSignatureTop] = useState(4);
+  const [kiteSetupTimeSignatureBottom, setKiteSetupTimeSignatureBottom] = useState(4);
+  const [kiteSetupIsSwing, setKiteSetupIsSwing] = useState(false);
+  const [kiteSetupChordCount, setKiteSetupChordCount] = useState(4);
+  const [kiteSetupUsesCustomChords, setKiteSetupUsesCustomChords] = useState(false);
+  const [kiteSetupTempo, setKiteSetupTempo] = useState(120);
+  const [kiteSetupOrigin, setKiteSetupOrigin] = useState<KiteSetupOrigin>("lobby");
+  const [kiteSetupMode, setKiteSetupMode] = useState<KiteMode>("solo");
+  const [kiteSetupError, setKiteSetupError] = useState<string | null>(null);
+  const [kiteMode, setKiteMode] = useState<KiteMode>("live");
+  const [broadcastStatus, setBroadcastStatus] = useState<BroadcastStatus>("idle");
+  const [jamSetupLock, setJamSetupLock] = useState<JamSetupLock>(null);
+  const [soloLooperState, setSoloLooperState] = useState<SoloLooperState>("idle");
+  const [loopProgress, setLoopProgress] = useState(0);
+  const [isRecordingArmed, setIsRecordingArmed] = useState(false);
+  const [recordingArmedCountdown, setRecordingArmedCountdown] = useState<number | null>(null);
+  const [loopChunkSendError, setLoopChunkSendError] = useState<string | null>(null);
+  const [loopChunkSendProgress, setLoopChunkSendProgress] = useState<KiteLoopChunkSendProgress>({
+    status: "idle",
+    sentChunks: 0,
+    totalChunks: 0,
+  });
   /** One-bar count-in after Kite Sync enables; blocks unmute and playback level changes until the grid stabilizes. */
   const [kiteSyncCountInActive, setKiteSyncCountInActive] = useState(false);
   /** Bumps when resuming metronome after network-loss pause (forces scheduler re-init). */
@@ -461,6 +529,10 @@ export default function StudioBridgePage() {
   const mixerMasterStreamRef = useRef<MediaStream | null>(null);
   const mixerMasterDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const activeDeviceIdsRef = useRef<string[]>([]);
+  const interfaceInputDeviceFlagsRef = useRef<DeviceFlagMap>({});
+  const interfaceLiveMonitorEnabledFlagsRef = useRef<DeviceFlagMap>({});
+  const interfaceLiveMonitorSourceNodesRef = useRef<Map<string, MediaStreamAudioSourceNode>>(new Map());
+  const interfaceLiveMonitorGainNodesRef = useRef<Map<string, GainNode>>(new Map());
   const perChannelMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const localRecorderRef = useRef<TrackRecorder | null>(null);
   const recordingIntervalRef = useRef<number | null>(null);
@@ -491,6 +563,39 @@ export default function StudioBridgePage() {
   const buildTransportRef = useRef<((localStream: MediaStream, ctx: AudioContext) => Promise<void>) | null>(
     null
   );
+  const kiteIntervalTimingRef = useRef<KiteIntervalTiming | null>(null);
+  const kiteIntervalGraphRef = useRef<KiteIntervalGraph | null>(null);
+  const soloLooperEngineRef = useRef<SoloLooperEngine | null>(null);
+  const kiteSchedulerWorkerRef = useRef<KiteSchedulerWorkerHandle | null>(null);
+  const kiteP2PEngineRef = useRef<KiteIntervalGraph | null>(null);
+  const kiteP2PSchedulerWorkerRef = useRef<KiteSchedulerWorkerHandle | null>(null);
+  const kiteP2PSequenceRef = useRef(0);
+  const queuedRemoteKiteIntervalRef = useRef<ReassembledLoadInterval | null>(null);
+  const queuedRemoteKiteIntervalTimeoutRef = useRef<number | null>(null);
+  const retryRetainedLoopSyncRef = useRef<(() => void) | null>(null);
+  const kiteModeRef = useRef<KiteMode>("live");
+  const broadcastStatusRef = useRef<BroadcastStatus>("idle");
+  const isBroadcastConnectPendingRef = useRef(false);
+  const retainedKiteLoopBufferRef = useRef<RetainedKiteLoopBuffer | null>(null);
+  const retainedRemoteKiteLoopRef = useRef<ReassembledLoadInterval | null>(null);
+  const lastRetainedKiteIntervalIdRef = useRef<string | null>(null);
+  const lastRetainedKiteSequenceRef = useRef<number | null>(null);
+  const hasCapturedFirstKiteLoopRef = useRef(false);
+  const soloLooperStateRef = useRef<SoloLooperState>("idle");
+  const loopProgressRafRef = useRef<number | null>(null);
+  const isRecordingArmedRef = useRef(false);
+  const soloCountInIntervalRef = useRef<number | null>(null);
+  const soloCountInTimeoutRef = useRef<number | null>(null);
+  const kiteLoopChunksRef = useRef<ReturnType<typeof createLoadIntervalChunks> | null>(null);
+  const kiteLoopChunkSenderRef = useRef<KiteDataChannelChunkSender | null>(null);
+  const kiteLoopReassemblerRef = useRef<KiteIntervalReassembler | null>(null);
+  const kiteLoopSendAbortControllerRef = useRef<AbortController | null>(null);
+  const originalVoipSenderTrackRef = useRef<MediaStreamTrack | null>(null);
+  const mutedVoipCloneTrackRef = useRef<MediaStreamTrack | null>(null);
+  const voipSenderMutedForKiteRef = useRef(false);
+  const jamSetupLockTokenRef = useRef<string | null>(null);
+  const jamSetupLockExpiresAtRef = useRef<number | null>(null);
+  const jamSetupLockTimerRef = useRef<number | null>(null);
   /** Lazily created; resumed on "Enter Studio" so Safari unlocks audio on a user gesture. */
   const studioAudioContextRef = useRef<AudioContext | null>(null);
   const workletLoadPromiseRef = useRef<Promise<boolean> | null>(null);
@@ -527,6 +632,7 @@ export default function StudioBridgePage() {
   const applyKiteSyncLossGuardRef = useRef<(packetLossPercent: number | null) => void>(
     () => {}
   );
+  const tapBeatTimestampsRef = useRef<number[]>([]);
   const echoModeApplyingRef = useRef(false);
   const isMicMutedRef = useRef(isMicMuted);
   const isBufferingEnabledRef = useRef(isBufferingEnabled);
@@ -539,6 +645,22 @@ export default function StudioBridgePage() {
   useEffect(() => {
     isMicMutedRef.current = isMicMuted;
   }, [isMicMuted]);
+
+  useEffect(() => {
+    soloLooperStateRef.current = soloLooperState;
+  }, [soloLooperState]);
+
+  useEffect(() => {
+    kiteModeRef.current = kiteMode;
+  }, [kiteMode]);
+
+  useEffect(() => {
+    broadcastStatusRef.current = broadcastStatus;
+  }, [broadcastStatus]);
+
+  useEffect(() => {
+    isRecordingArmedRef.current = isRecordingArmed;
+  }, [isRecordingArmed]);
 
   useEffect(() => {
     isBufferingEnabledRef.current = isBufferingEnabled;
@@ -559,6 +681,14 @@ export default function StudioBridgePage() {
   useEffect(() => {
     deviceVolumesRef.current = deviceVolumes;
   }, [deviceVolumes]);
+
+  useEffect(() => {
+    interfaceInputDeviceFlagsRef.current = interfaceInputDeviceFlags;
+  }, [interfaceInputDeviceFlags]);
+
+  useEffect(() => {
+    interfaceLiveMonitorEnabledFlagsRef.current = interfaceLiveMonitorEnabledFlags;
+  }, [interfaceLiveMonitorEnabledFlags]);
 
   useEffect(() => {
     localMicStreamRef.current = localMicStream;
@@ -725,6 +855,55 @@ export default function StudioBridgePage() {
     []
   );
 
+  const teardownInterfaceLiveMonitorGraph = useCallback((deviceId: string) => {
+    const sourceNode = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
+    const gainNode = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
+    try {
+      sourceNode?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    try {
+      gainNode?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    interfaceLiveMonitorSourceNodesRef.current.delete(deviceId);
+    interfaceLiveMonitorGainNodesRef.current.delete(deviceId);
+  }, []);
+
+  const teardownAllInterfaceLiveMonitorGraphs = useCallback(() => {
+    for (const deviceId of Array.from(interfaceLiveMonitorSourceNodesRef.current.keys())) {
+      teardownInterfaceLiveMonitorGraph(deviceId);
+    }
+    for (const deviceId of Array.from(interfaceLiveMonitorGainNodesRef.current.keys())) {
+      teardownInterfaceLiveMonitorGraph(deviceId);
+    }
+  }, [teardownInterfaceLiveMonitorGraph]);
+
+  const clearInterfaceMonitorStateForDevice = useCallback((deviceId: string) => {
+    interfaceInputDeviceFlagsRef.current = {
+      ...interfaceInputDeviceFlagsRef.current,
+      [deviceId]: false,
+    };
+    interfaceLiveMonitorEnabledFlagsRef.current = {
+      ...interfaceLiveMonitorEnabledFlagsRef.current,
+      [deviceId]: false,
+    };
+    setInterfaceInputDeviceFlags((prev) => {
+      if (prev[deviceId] === undefined) return prev;
+      const next = { ...prev };
+      delete next[deviceId];
+      return next;
+    });
+    setInterfaceLiveMonitorEnabledFlags((prev) => {
+      if (prev[deviceId] === undefined) return prev;
+      const next = { ...prev };
+      delete next[deviceId];
+      return next;
+    });
+  }, []);
+
   const removeAndCleanupDevice = useCallback((deviceId: string) => {
     const stream = activeStreamsMapRef.current.get(deviceId);
     const mergerNode = mixerMergerNodesRef.current.get(deviceId);
@@ -769,6 +948,8 @@ export default function StudioBridgePage() {
       /* ignore */
     }
 
+    teardownInterfaceLiveMonitorGraph(deviceId);
+    clearInterfaceMonitorStateForDevice(deviceId);
     stream?.getTracks().forEach((track) => track.stop());
     activeStreamsMapRef.current.delete(deviceId);
     mixerMergerNodesRef.current.delete(deviceId);
@@ -799,7 +980,7 @@ export default function StudioBridgePage() {
         );
       }
     }
-  }, []);
+  }, [clearInterfaceMonitorStateForDevice, teardownInterfaceLiveMonitorGraph]);
 
   const disconnectMixerLaneNodes = useCallback(() => {
     for (const laneKey of Array.from(mixerGainNodesRef.current.keys())) {
@@ -1092,6 +1273,76 @@ export default function StudioBridgePage() {
     }
   }, []);
 
+  const buildInterfaceLiveMonitorGraph = useCallback((deviceId: string) => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
+    if (interfaceLiveMonitorSourceNodesRef.current.has(deviceId)) return;
+    if (interfaceInputDeviceFlagsRef.current[deviceId] !== true) return;
+    if (interfaceLiveMonitorEnabledFlagsRef.current[deviceId] !== true) return;
+
+    const stream = activeStreamsMapRef.current.get(deviceId);
+    if (!stream || stream.getAudioTracks().length === 0) return;
+
+    try {
+      const sourceNode = ctx.createMediaStreamSource(stream);
+      const gainNode = ctx.createGain();
+      const volume = deviceVolumesRef.current[deviceId] ?? 100;
+      gainNode.gain.value = Math.pow(Math.min(100, Math.max(0, volume)) / 100, 2);
+      sourceNode.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      interfaceLiveMonitorSourceNodesRef.current.set(deviceId, sourceNode);
+      interfaceLiveMonitorGainNodesRef.current.set(deviceId, gainNode);
+    } catch (error) {
+      console.warn("[Kite] Could not start interface live monitor:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    for (const deviceId of activeDeviceIds) {
+      buildInterfaceLiveMonitorGraph(deviceId);
+    }
+  }, [activeDeviceIds, buildInterfaceLiveMonitorGraph, interfaceInputDeviceFlags, interfaceLiveMonitorEnabledFlags]);
+
+  const setInterfaceInputDeviceFlag = useCallback((deviceId: string, isInterfaceInput: boolean) => {
+    setInterfaceInputDeviceFlags((prev) => {
+      const next = { ...prev };
+      if (isInterfaceInput) {
+        next[deviceId] = true;
+      } else {
+        delete next[deviceId];
+      }
+      interfaceInputDeviceFlagsRef.current = next;
+      return next;
+    });
+
+    if (!isInterfaceInput) {
+      teardownInterfaceLiveMonitorGraph(deviceId);
+      setInterfaceLiveMonitorEnabledFlags((prev) => {
+        if (prev[deviceId] === undefined) return prev;
+        const next = { ...prev };
+        delete next[deviceId];
+        interfaceLiveMonitorEnabledFlagsRef.current = next;
+        return next;
+      });
+    }
+  }, [teardownInterfaceLiveMonitorGraph]);
+
+  const setInterfaceLiveMonitorEnabledFlag = useCallback((deviceId: string, isMonitorEnabled: boolean) => {
+    if (!isMonitorEnabled) {
+      teardownInterfaceLiveMonitorGraph(deviceId);
+    }
+    setInterfaceLiveMonitorEnabledFlags((prev) => {
+      const next = { ...prev };
+      if (isMonitorEnabled) {
+        next[deviceId] = true;
+      } else {
+        delete next[deviceId];
+      }
+      interfaceLiveMonitorEnabledFlagsRef.current = next;
+      return next;
+    });
+  }, [teardownInterfaceLiveMonitorGraph]);
+
   const flushAndSetRemoteGridTarget = useCallback((targetTimeSec: number | null) => {
     const bufferNode = remoteBufferNodeRef.current;
     if (!bufferNode || !("port" in bufferNode)) return;
@@ -1228,6 +1479,7 @@ export default function StudioBridgePage() {
   }, []);
 
   const rebuildRemoteGraphWithoutTeardown = useCallback(() => {
+    if (isBroadcastConnectPendingRef.current || kiteModeRef.current === "broadcast") return;
     const ctx = studioAudioContextRef.current;
     const stream = remoteStreamRef.current;
     if (!ctx || !stream) return;
@@ -1243,6 +1495,7 @@ export default function StudioBridgePage() {
     }
     window.setTimeout(() => {
       if (!mountedRef.current) return;
+      if (isBroadcastConnectPendingRef.current || kiteModeRef.current === "broadcast") return;
       buildRemotePlaybackGraph(stream);
       const rebuiltGain = remotePlaybackGainRef.current;
       const rebuiltCtx = studioAudioContextRef.current;
@@ -1302,6 +1555,12 @@ export default function StudioBridgePage() {
     kiteSignalSecure,
   });
   const showLobbyControls = studioUiPhase === "lobby";
+  const localJamSetupOwnerId = user?.id ?? `${role ?? "unknown"}:${sessionId ?? "local"}`;
+  const localJamSetupOwnerName = role === "host" ? "Host" : "Bandmate";
+  const jamSetupLockedByRemote =
+    Boolean(jamSetupLock) &&
+    jamSetupLock!.ownerId !== localJamSetupOwnerId &&
+    jamSetupLock!.expiresAt > Date.now();
 
   const remoteIsLive = remoteLevel > 0.07;
   const syncCountInBlocksLive = kiteSyncCountInActive && kiteSyncEnabled;
@@ -1444,8 +1703,9 @@ export default function StudioBridgePage() {
           });
           const parsed = parseInboundAudioPacketLoss(stats);
           if (isAutoBufferRef.current && parsedRtt !== null) {
+            const sampleRate = studioAudioContextRef.current?.sampleRate ?? 48000;
             const rttSec = (parsedRtt.rttMs / 2) / 1000;
-            let autoTarget = Math.round((rttSec + jitterSec + 0.02) * 48000);
+            let autoTarget = Math.round((rttSec + jitterSec + 0.02) * sampleRate);
             autoTarget = Math.max(480, Math.min(19200, autoTarget));
             const currentTarget = targetLeadFramesRef.current;
             if (Math.abs(autoTarget - currentTarget) >= 480) {
@@ -1705,12 +1965,14 @@ export default function StudioBridgePage() {
 
   useEffect(() => {
     if (!isInStudioPhase) return;
+    if (isBroadcastConnectPendingRef.current || kiteModeRef.current === "broadcast") return;
     if (!remoteStreamRef.current) return;
     rebuildRemoteGraphWithoutTeardown();
   }, [isInStudioPhase, isBufferingEnabled, rebuildRemoteGraphWithoutTeardown]);
 
   useEffect(() => {
     if (!isInStudioPhase || !isBufferingEnabled || !isWorkletLoaded) return;
+    if (isBroadcastConnectPendingRef.current || kiteModeRef.current === "broadcast") return;
     if (!remoteStreamRef.current) return;
     rebuildRemoteGraphWithoutTeardown();
   }, [isInStudioPhase, isBufferingEnabled, isWorkletLoaded, rebuildRemoteGraphWithoutTeardown]);
@@ -2216,6 +2478,459 @@ export default function StudioBridgePage() {
     }
   }, [clearRecordedBlobUrl, clearRecordingInterval]);
 
+  const clearJamSetupLockTimer = useCallback(() => {
+    if (jamSetupLockTimerRef.current !== null) {
+      window.clearTimeout(jamSetupLockTimerRef.current);
+      jamSetupLockTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleJamSetupLockExpiry = useCallback(
+    (expiresAt: number) => {
+      clearJamSetupLockTimer();
+      const delayMs = expiresAt - Date.now();
+      if (!Number.isFinite(delayMs) || delayMs <= 0) {
+        jamSetupLockExpiresAtRef.current = null;
+        setJamSetupLock(null);
+        return;
+      }
+      jamSetupLockExpiresAtRef.current = expiresAt;
+      jamSetupLockTimerRef.current = window.setTimeout(() => {
+        jamSetupLockTimerRef.current = null;
+        jamSetupLockExpiresAtRef.current = null;
+        jamSetupLockTokenRef.current = null;
+        setJamSetupLock(null);
+      }, delayMs);
+    },
+    [clearJamSetupLockTimer]
+  );
+
+  const sendJamSetupLock = useCallback(
+    (action: JamSetupLockAction): boolean => {
+      const peer = peerRef.current;
+      if (!peer || !peer.connected) return false;
+
+      const ownerId = localJamSetupOwnerId;
+      const ownerName = localJamSetupOwnerName;
+      const expiresAt = action === "acquire" ? Date.now() + 60000 : undefined;
+      const payload: JamSetupLockMessage = {
+        type: "JAM_SETUP_LOCK",
+        action,
+        ownerId,
+        ownerName,
+        expiresAt,
+      };
+
+      try {
+        peer.send(JSON.stringify(payload));
+      } catch {
+        return false;
+      }
+
+      if (action === "acquire" && expiresAt) {
+        jamSetupLockTokenRef.current = ownerId;
+        setJamSetupLock({ ownerId, ownerName, expiresAt });
+        scheduleJamSetupLockExpiry(expiresAt);
+      } else {
+        clearJamSetupLockTimer();
+        jamSetupLockTokenRef.current = null;
+        jamSetupLockExpiresAtRef.current = null;
+        setJamSetupLock(null);
+      }
+
+      return true;
+    },
+    [clearJamSetupLockTimer, localJamSetupOwnerId, localJamSetupOwnerName, scheduleJamSetupLockExpiry]
+  );
+
+  const cleanupKiteEngine = useCallback(
+    ({ stopLocalTracks = false }: { stopLocalTracks?: boolean } = {}) => {
+      kiteIntervalGraphRef.current?.teardown();
+      kiteSchedulerWorkerRef.current?.terminate();
+      kiteIntervalGraphRef.current = null;
+      kiteSchedulerWorkerRef.current = null;
+      if (kiteModeRef.current !== "broadcast" && broadcastStatusRef.current !== "live") {
+        retainedKiteLoopBufferRef.current = null;
+        retainedRemoteKiteLoopRef.current = null;
+        lastRetainedKiteIntervalIdRef.current = null;
+        lastRetainedKiteSequenceRef.current = null;
+      }
+      hasCapturedFirstKiteLoopRef.current = false;
+      soloLooperStateRef.current = "idle";
+      if (loopProgressRafRef.current !== null) {
+        cancelAnimationFrame(loopProgressRafRef.current);
+        loopProgressRafRef.current = null;
+      }
+      if (soloCountInIntervalRef.current !== null) {
+        clearInterval(soloCountInIntervalRef.current);
+        soloCountInIntervalRef.current = null;
+      }
+      if (soloCountInTimeoutRef.current !== null) {
+        clearTimeout(soloCountInTimeoutRef.current);
+        soloCountInTimeoutRef.current = null;
+      }
+      kiteLoopChunksRef.current = null;
+      kiteLoopChunkSenderRef.current = null;
+      kiteLoopReassemblerRef.current = null;
+      kiteLoopSendAbortControllerRef.current?.abort();
+      kiteLoopSendAbortControllerRef.current = null;
+      kiteIntervalTimingRef.current = null;
+      setSoloLooperState("idle");
+      setLoopProgress(0);
+      isRecordingArmedRef.current = false;
+      setIsRecordingArmed(false);
+      setRecordingArmedCountdown(null);
+      setLoopChunkSendError(null);
+      setLoopChunkSendProgress({ status: "idle", sentChunks: 0, totalChunks: 0 });
+      setKiteMode("live");
+
+      if (stopLocalTracks) {
+        const stoppedTrackIds = new Set<string>();
+        stopMediaStreamTracks(localStreamRef.current, stoppedTrackIds);
+        stopMediaStreamTracks(localMicStreamRef.current, stoppedTrackIds);
+        localStreamRef.current = null;
+        localMicStreamRef.current = null;
+        setLocalMicStream(null);
+      }
+    },
+    [stopMediaStreamTracks]
+  );
+
+  const handleStartKiteSetup = useCallback(
+    (origin: KiteSetupOrigin) => {
+      setKiteSetupStep(1);
+      setKiteSetupTimeSignatureTop(4);
+      setKiteSetupTimeSignatureBottom(4);
+      setKiteSetupIsSwing(false);
+      setKiteSetupChordCount(4);
+      setKiteSetupUsesCustomChords(false);
+      setKiteSetupTempo(metronomeBpm);
+      setKiteSetupOrigin(origin);
+      setKiteSetupMode(origin === "lobby" ? "solo" : "sync");
+      setKiteSetupError(null);
+      setStudioUiPhase("kite-setup");
+    },
+    [metronomeBpm]
+  );
+
+  const handleCancelKiteSetup = useCallback(() => {
+    if (kiteSetupOrigin === "connected") {
+      sendJamSetupLock("release");
+      setStudioUiPhase("studio");
+      return;
+    }
+    setStudioUiPhase("lobby");
+    cleanupKiteEngine({ stopLocalTracks: true });
+  }, [cleanupKiteEngine, kiteSetupOrigin, sendJamSetupLock]);
+
+  const goToNextKiteSetupStep = useCallback(() => {
+    setKiteSetupStep((step) => (step < 5 ? ((step + 1) as KiteSetupStep) : step));
+  }, []);
+
+  const goToPreviousKiteSetupStep = useCallback(() => {
+    setKiteSetupStep((step) => (step > 1 ? ((step - 1) as KiteSetupStep) : step));
+  }, []);
+
+  const handleTapBeat = useCallback(() => {
+    const now = performance.now();
+    const taps = tapBeatTimestampsRef.current;
+    const lastTap = taps[taps.length - 1] ?? 0;
+
+    if (now - lastTap > 2000) {
+      tapBeatTimestampsRef.current = [now];
+      return;
+    }
+
+    const recentTaps = [...taps, now].slice(-8);
+    tapBeatTimestampsRef.current = recentTaps;
+    if (recentTaps.length < 4) return;
+
+    const intervals = recentTaps.slice(1).map((tap, index) => tap - recentTaps[index]);
+    const avgMs = intervals.reduce((sum, interval) => sum + interval, 0) / intervals.length;
+    if (!Number.isFinite(avgMs) || avgMs <= 0) return;
+
+    const nextBpm = Math.round(60000 / avgMs);
+    setKiteSetupTempo(Math.max(40, Math.min(240, nextBpm)));
+  }, []);
+
+  const deriveKiteTimingMetadata = useCallback((): KiteIntervalTiming => {
+    const localSampleRate = Math.round(studioAudioContextRef.current?.sampleRate ?? 48000);
+    const bpm = Math.max(20, Math.min(320, Math.round(kiteSetupTempo)));
+    const chords = Math.max(1, Math.min(64, Math.round(kiteSetupChordCount)));
+    const beatsPerBar = Math.max(1, Math.min(16, Math.round(kiteSetupTimeSignatureTop)));
+    const bpi = chords * beatsPerBar;
+    const loopDurationSeconds = calcLoopDurationSeconds(bpm, bpi);
+    const localIntervalFrames = calcIntervalFrames(loopDurationSeconds, localSampleRate);
+
+    const timing: KiteIntervalTiming = {
+      bpm,
+      chords,
+      beatsPerBar,
+      timeSignatureTop: beatsPerBar,
+      timeSignatureBottom: Math.max(1, Math.min(32, Math.round(kiteSetupTimeSignatureBottom))),
+      bpi,
+      loopDurationSeconds,
+      intervalMs: loopDurationSeconds * 1000,
+      hostSampleRate: localSampleRate,
+      hostIntervalFrames: localIntervalFrames,
+      localSampleRate,
+      localIntervalFrames,
+    };
+    kiteIntervalTimingRef.current = timing;
+    return timing;
+  }, [
+    kiteSetupChordCount,
+    kiteSetupTempo,
+    kiteSetupTimeSignatureBottom,
+    kiteSetupTimeSignatureTop,
+  ]);
+
+  const playSoloMetronomeClick = useCallback(
+    (isDownbeat: boolean, startAtContextSec?: number) => {
+      const ctx = studioAudioContextRef.current;
+      if (!ctx || ctx.state === "closed") return;
+      if (ctx.state === "suspended") {
+        void ctx.resume();
+      }
+
+      const startAt = Math.max(ctx.currentTime, startAtContextSec ?? ctx.currentTime);
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(isDownbeat ? 1500 : 1000, startAt);
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(isDownbeat ? 0.16 : 0.1, startAt + 0.004);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.045);
+      oscillator.connect(gain);
+      gain.connect(ctx.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.05);
+      oscillator.onended = () => {
+        oscillator.disconnect();
+        gain.disconnect();
+      };
+    },
+    []
+  );
+
+  const startSoloLooper = useCallback(
+    async (timing: KiteIntervalTiming): Promise<void> => {
+      const ctx = ensureStudioAudioContext();
+      await ctx.resume();
+      if (ctx.state !== "running") {
+        throw new Error("AudioContext could not be started for Kite Sync.");
+      }
+
+      const inputStream = localStreamRef.current;
+      if (!inputStream || inputStream.getAudioTracks().length === 0) {
+        throw new Error("Raw microphone stream is unavailable for Kite Sync.");
+      }
+
+      const destinationNode = ensureMasterDestinationNode();
+      if (!destinationNode) {
+        throw new Error("Kite Sync output destination is unavailable.");
+      }
+      if (inputStream === destinationNode.stream || inputStream === mixerMasterDestinationRef.current?.stream) {
+        throw new Error("Kite Sync input must be raw mic audio, not the master mix.");
+      }
+
+      soloLooperEngineRef.current?.teardown();
+      soloLooperEngineRef.current = null;
+
+      const intervalId = `${sessionId ?? "solo"}-${Date.now()}`;
+      const sequenceNumber = (lastRetainedKiteSequenceRef.current ?? 0) + 1;
+      const engine = await buildSoloLooperEngine({
+        audioContext: ctx,
+        inputStream,
+        destinationNode,
+        timing,
+        loopId: intervalId,
+        channelCount: 2,
+        monitorDestination: ctx.destination,
+        monitorGain: 1,
+        onEvent: (event) => {
+          if (event.type !== "LOOP_READY") return;
+          if (hasCapturedFirstKiteLoopRef.current) return;
+          if (soloLooperStateRef.current !== "recording") return;
+
+          hasCapturedFirstKiteLoopRef.current = true;
+          const retainedIntervalId = event.loopId ?? intervalId;
+          const retainedSequenceNumber = sequenceNumber;
+          const retainedBuffer = event.buffer.slice(0);
+          retainedKiteLoopBufferRef.current = {
+            intervalId: retainedIntervalId,
+            sequenceNumber: retainedSequenceNumber,
+            sampleRate: event.sampleRate,
+            intervalFrames: event.intervalFrames,
+            channelCount: event.channelCount,
+            buffer: retainedBuffer,
+          };
+          lastRetainedKiteIntervalIdRef.current = retainedIntervalId;
+          lastRetainedKiteSequenceRef.current = retainedSequenceNumber;
+          soloLooperStateRef.current = "captured";
+          setSoloLooperState("captured");
+          if (loopProgressRafRef.current !== null) {
+            cancelAnimationFrame(loopProgressRafRef.current);
+            loopProgressRafRef.current = null;
+          }
+          setLoopProgress(100);
+        },
+      });
+
+      soloLooperEngineRef.current = engine;
+      engine.startRecording();
+
+      if (loopProgressRafRef.current !== null) {
+        cancelAnimationFrame(loopProgressRafRef.current);
+      }
+      const intervalMs = (timing.localIntervalFrames / timing.localSampleRate) * 1000;
+      const totalBeats = Math.max(1, Math.round(timing.bpi));
+      const beatsPerBar = Math.max(1, Math.round(timing.beatsPerBar));
+      const beatDurationSeconds = timing.localIntervalFrames / timing.localSampleRate / totalBeats;
+      const startedAt = performance.now();
+      const intervalStartContextSec = ctx.currentTime;
+      for (let beatIndex = 0; beatIndex < totalBeats; beatIndex += 1) {
+        playSoloMetronomeClick(
+          beatIndex % beatsPerBar === 0,
+          intervalStartContextSec + beatIndex * beatDurationSeconds
+        );
+      }
+      const animateProgress = () => {
+        if (soloLooperStateRef.current !== "recording") {
+          loopProgressRafRef.current = null;
+          return;
+        }
+        const elapsedMs = performance.now() - startedAt;
+        const currentTick = Math.min(intervalMs, Math.max(0, elapsedMs));
+        setLoopProgress(Math.min(100, Math.max(0, (currentTick / intervalMs) * 100)));
+        if (elapsedMs < intervalMs) {
+          loopProgressRafRef.current = requestAnimationFrame(animateProgress);
+        } else {
+          loopProgressRafRef.current = null;
+        }
+      };
+      animateProgress();
+      setKiteMode(kiteSetupMode === "sync" ? "sync" : "solo");
+    },
+    [ensureMasterDestinationNode, ensureStudioAudioContext, kiteSetupMode, playSoloMetronomeClick, sessionId]
+  );
+
+  const handleConfirmKiteSetup = useCallback(() => {
+    void (async () => {
+      try {
+        setKiteSetupError(null);
+        hasCapturedFirstKiteLoopRef.current = false;
+        if (kiteModeRef.current !== "broadcast" && broadcastStatusRef.current !== "live") {
+          retainedKiteLoopBufferRef.current = null;
+          lastRetainedKiteIntervalIdRef.current = null;
+        }
+        soloLooperStateRef.current = "idle";
+        isRecordingArmedRef.current = false;
+        setIsRecordingArmed(false);
+        setRecordingArmedCountdown(null);
+        setSoloLooperState("idle");
+        setKiteMode(kiteSetupMode === "sync" ? "sync" : "solo");
+        setStudioUiPhase("studio");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not start Kite Sync.";
+        setKiteSetupError(message);
+        soloLooperStateRef.current = "idle";
+        isRecordingArmedRef.current = false;
+        setIsRecordingArmed(false);
+        setRecordingArmedCountdown(null);
+        setSoloLooperState("idle");
+      }
+    })();
+  }, [kiteSetupMode]);
+
+  const handleRecordFirstLoop = useCallback(() => {
+    void (async () => {
+      try {
+        const timing = deriveKiteTimingMetadata();
+        const ctx = studioAudioContextRef.current ?? ensureStudioAudioContext();
+        await ctx.resume();
+
+        cleanupKiteEngine({ stopLocalTracks: false });
+        setKiteMode("solo");
+
+        if (soloCountInIntervalRef.current !== null) {
+          clearInterval(soloCountInIntervalRef.current);
+          soloCountInIntervalRef.current = null;
+        }
+        if (soloCountInTimeoutRef.current !== null) {
+          clearTimeout(soloCountInTimeoutRef.current);
+          soloCountInTimeoutRef.current = null;
+        }
+
+        hasCapturedFirstKiteLoopRef.current = false;
+        // intentional re-record clear
+        retainedKiteLoopBufferRef.current = null;
+        lastRetainedKiteIntervalIdRef.current = null;
+        isRecordingArmedRef.current = true;
+        setIsRecordingArmed(true);
+        soloLooperStateRef.current = "idle";
+        setSoloLooperState("idle");
+        setLoopProgress(0);
+
+        const beatSec = 60 / timing.bpm;
+        const beatsPerBar = Math.max(1, Math.round(timing.timeSignatureTop));
+        const startAt = ctx.currentTime;
+        setRecordingArmedCountdown(beatsPerBar);
+
+        for (let beatIndex = 0; beatIndex < beatsPerBar; beatIndex += 1) {
+          playSoloMetronomeClick(beatIndex === 0, startAt + beatIndex * beatSec);
+        }
+
+        let remainingBeats = beatsPerBar;
+        soloCountInIntervalRef.current = window.setInterval(() => {
+          remainingBeats -= 1;
+          setRecordingArmedCountdown(remainingBeats > 0 ? remainingBeats : null);
+        }, beatSec * 1000);
+
+        soloCountInTimeoutRef.current = window.setTimeout(() => {
+          if (soloCountInIntervalRef.current !== null) {
+            clearInterval(soloCountInIntervalRef.current);
+            soloCountInIntervalRef.current = null;
+          }
+          soloCountInTimeoutRef.current = null;
+          isRecordingArmedRef.current = false;
+          setIsRecordingArmed(false);
+          setRecordingArmedCountdown(null);
+          soloLooperStateRef.current = "recording";
+          setSoloLooperState("recording");
+          hasCapturedFirstKiteLoopRef.current = false;
+          void startSoloLooper(timing);
+        }, beatsPerBar * beatSec * 1000);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not start recording.";
+        setKiteSetupError(message);
+        isRecordingArmedRef.current = false;
+        setIsRecordingArmed(false);
+        setRecordingArmedCountdown(null);
+      }
+    })();
+  }, [
+    cleanupKiteEngine,
+    deriveKiteTimingMetadata,
+    ensureStudioAudioContext,
+    playSoloMetronomeClick,
+    startSoloLooper,
+  ]);
+
+  const handleStopAndResetSoloLooper = useCallback(() => {
+    soloLooperEngineRef.current?.teardown();
+    soloLooperEngineRef.current = null;
+    cleanupKiteEngine({ stopLocalTracks: false });
+    isRecordingArmedRef.current = false;
+    setIsRecordingArmed(false);
+    setRecordingArmedCountdown(null);
+    soloLooperStateRef.current = "idle";
+    setSoloLooperState("idle");
+    setLoopProgress(0);
+    hasCapturedFirstKiteLoopRef.current = false;
+    setKiteMode("solo");
+  }, [cleanupKiteEngine]);
+
   const onEnterStudioClick = useCallback(() => {
     void (async () => {
       try {
@@ -2256,7 +2971,11 @@ export default function StudioBridgePage() {
         await buildTransport(localStream, ctx);
         ensureMetronomeGainNode(ctx);
         const stream = remoteStreamRef.current;
-        if (stream) {
+        if (
+          stream &&
+          !isBroadcastConnectPendingRef.current &&
+          kiteModeRef.current !== "broadcast"
+        ) {
           buildRemotePlaybackGraph(stream);
         }
       } catch (err) {
@@ -2265,6 +2984,52 @@ export default function StudioBridgePage() {
       setStudioUiPhase("studio");
     })();
   }, [buildRemotePlaybackGraph, ensureMetronomeGainNode, ensureStudioAudioContext]);
+
+  const handleInviteBandmate = useCallback(() => {
+    void (async () => {
+      try {
+        if (!studioAudioContextRef.current) {
+          ensureStudioAudioContext();
+        }
+        const resumePromise = studioAudioContextRef.current!.resume();
+        await resumePromise;
+        const ctx = studioAudioContextRef.current;
+        if (!ctx || ctx.state !== "running") {
+          console.warn("[InviteBandmate] Aborted: audio context missing or not running.");
+          return;
+        }
+
+        const masterDestination = mixerMasterDestinationRef.current;
+        const masterTrack = masterDestination?.stream.getAudioTracks()[0] ?? null;
+        const fallbackLocalStream = localStreamRef.current;
+        const localStream =
+          masterDestination && masterTrack && masterTrack.readyState === "live"
+            ? masterDestination.stream
+            : fallbackLocalStream;
+        if (!localStream) {
+          console.warn("[InviteBandmate] Aborted: local stream unavailable.");
+          return;
+        }
+        if (!masterDestination || !masterTrack || masterTrack.readyState !== "live") {
+          console.warn(
+            "Invite Bandmate: mixer master destination unavailable, falling back to localStreamRef.current."
+          );
+        }
+        const buildTransport = buildTransportRef.current;
+        if (!buildTransport) {
+          console.warn("[InviteBandmate] Aborted: buildTransport not ready.");
+          return;
+        }
+
+        isBroadcastConnectPendingRef.current = true;
+        broadcastStatusRef.current = "connecting";
+        setBroadcastStatus("connecting");
+        await buildTransport(localStream, ctx);
+      } catch (err) {
+        console.error("[InviteBandmate] Failed to start invite transport:", err);
+      }
+    })();
+  }, [ensureStudioAudioContext]);
 
   const returnToLobby = useCallback(() => {
     setConfirmExitOpen(true);
@@ -2514,6 +3279,8 @@ export default function StudioBridgePage() {
             handshakeFallbackIntervalRef.current = null;
           }
           teardownRemotePlaybackGraph();
+          cleanupKiteEngine({ stopLocalTracks: true });
+          teardownAllInterfaceLiveMonitorGraphs();
           // Mixer teardown: stop every active hardware stream and clear mixer graph/state.
           for (const [deviceId, stream] of Array.from(activeStreamsMapRef.current.entries())) {
             stopMediaStreamTracks(stream, stoppedTrackIds);
@@ -2533,6 +3300,10 @@ export default function StudioBridgePage() {
           // Reset mixer UI/state so lobby re-entry starts clean.
           setActiveDeviceIds([]);
           setDeviceVolumes({});
+          interfaceInputDeviceFlagsRef.current = {};
+          interfaceLiveMonitorEnabledFlagsRef.current = {};
+          setInterfaceInputDeviceFlags({});
+          setInterfaceLiveMonitorEnabledFlags({});
           for (const meterEl of Array.from(perChannelMeterRefs.current.values())) {
             meterEl.style.width = "0%";
           }
@@ -2563,9 +3334,7 @@ export default function StudioBridgePage() {
           channelRef.current?.unsubscribe();
           channelRef.current = null;
 
-          if (!p2pConnectSucceededRef.current) {
-            peerRef.current?.destroy();
-          }
+          peerRef.current?.destroy();
           peerRef.current = null;
 
           const localStreamToStop = localStreamRef.current;
@@ -2962,7 +3731,11 @@ export default function StudioBridgePage() {
             addLog("Remote audio play() blocked (tap page if silent)");
           });
         }
-        if (studioAudioContextRef.current) {
+        if (
+          studioAudioContextRef.current &&
+          !isBroadcastConnectPendingRef.current &&
+          kiteModeRef.current !== "broadcast"
+        ) {
           buildRemotePlaybackGraph(remoteStream);
         }
       });
@@ -2982,6 +3755,10 @@ export default function StudioBridgePage() {
             serverTimestamp?: number;
             sequenceNumber?: number;
             from?: Role;
+            action?: JamSetupLockAction;
+            ownerId?: string;
+            ownerName?: string;
+            expiresAt?: number;
           };
           if (msg.type === "LEAVE") {
             if (msg.from === transportActiveRole) return;
@@ -2996,6 +3773,32 @@ export default function StudioBridgePage() {
             setStatus("failed");
             setStatusNote(`${departedName} left the session.`);
             return;
+          }
+          if (msg.type === "JAM_SETUP_LOCK") {
+            if (msg.action === "acquire") {
+              if (
+                typeof msg.ownerId !== "string" ||
+                typeof msg.ownerName !== "string" ||
+                typeof msg.expiresAt !== "number" ||
+                msg.expiresAt <= Date.now()
+              ) {
+                return;
+              }
+              setJamSetupLock({
+                ownerId: msg.ownerId,
+                ownerName: msg.ownerName,
+                expiresAt: msg.expiresAt,
+              });
+              scheduleJamSetupLockExpiry(msg.expiresAt);
+              return;
+            }
+            if (msg.action === "release") {
+              clearJamSetupLockTimer();
+              jamSetupLockExpiresAtRef.current = null;
+              jamSetupLockTokenRef.current = null;
+              setJamSetupLock(null);
+              return;
+            }
           }
           if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
             if (mountedRef.current) {
@@ -3028,7 +3831,8 @@ export default function StudioBridgePage() {
             const receivedAtMs = Date.now();
             const rttDelaySec = (calculatedDelayMsRef.current || 0) / 1000;
             const offsetSec = (receivedAtMs - msg.serverTimestamp) / 1000;
-            const bufferDelaySec = targetLeadFramesRef.current / 48000;
+            const sampleRate = studioAudioContextRef.current?.sampleRate ?? 48000;
+            const bufferDelaySec = targetLeadFramesRef.current / sampleRate;
             const guestTargetSec =
               msg.hostTime + offsetSec + rttDelaySec + bufferDelaySec;
 
@@ -3536,6 +4340,7 @@ export default function StudioBridgePage() {
   }, [
     beginLostCountdown,
     clearLostCountdown,
+    cleanupKiteEngine,
     retryInitTick,
     stopKiteMetronome,
     teardownKiteSyncTransport,
@@ -3655,7 +4460,11 @@ export default function StudioBridgePage() {
       <audio ref={localMonitorAudioRef} className="sr-only" playsInline muted />
       <audio ref={remoteAudioRef} className="sr-only" playsInline muted />
 
-      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-16 pb-28 sm:px-6 lg:pb-16">
+      <div
+        className={`relative z-10 mx-auto flex min-h-screen w-full flex-col justify-center py-16 pb-28 lg:pb-16 ${
+          studioUiPhase === "studio" ? "max-w-6xl px-6 sm:px-8" : "max-w-md px-5 sm:px-6"
+        }`}
+      >
         <motion.button
           type="button"
           onClick={returnToLobby}
@@ -3941,14 +4750,618 @@ export default function StudioBridgePage() {
               >
                 Enter Studio
               </motion.button>
+              <motion.button
+                type="button"
+                disabled={!canEnterStudio}
+                onClick={() => handleStartKiteSetup("lobby")}
+                className={`mt-3 w-full rounded-xl px-4 py-3.5 text-sm font-semibold transition ${
+                  canEnterStudio
+                    ? "border border-emerald-500/40 text-stone-50 shadow-lg"
+                    : "cursor-not-allowed border border-stone-700 bg-stone-900/60 text-stone-500"
+                }`}
+                style={
+                  canEnterStudio
+                    ? {
+                        background: `linear-gradient(135deg, rgba(34,197,94,0.2), rgba(255,69,0,0.14))`,
+                        boxShadow: `0 0 26px -8px ${EMERALD}77, 0 0 30px -10px ${ORANGE}55`,
+                      }
+                    : undefined
+                }
+                whileTap={canEnterStudio ? { scale: 0.97 } : undefined}
+              >
+                Start Kite Sync
+              </motion.button>
             </>
+          ) : studioUiPhase === "kite-setup" ? (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-8 rounded-2xl border border-stone-800/90 bg-stone-950/50 p-5 shadow-2xl backdrop-blur-sm"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-emerald-300">
+                    Kite Sync Setup
+                  </p>
+                  <h2 className="mt-1 text-xl font-bold tracking-tight text-stone-50">
+                    Step {kiteSetupStep} of 5
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCancelKiteSetup}
+                  className="rounded-lg border border-stone-700 bg-stone-900/60 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:bg-stone-800"
+                >
+                  Cancel
+                </button>
+              </div>
+
+              <div className="mt-5 rounded-xl border border-stone-800/80 bg-stone-950/45 p-4">
+                {kiteSetupStep === 1 ? (
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="text-lg font-bold tracking-tight text-stone-100">
+                        How does the beat group?
+                      </h3>
+                      <p className="mt-1 text-sm font-medium leading-relaxed text-stone-400">
+                        Tap your foot to the song. Does it feel like it groups in 2s, 3s, or
+                        something unusual? Pick the closest match.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      {[
+                        {
+                          top: 4,
+                          bottom: 4,
+                          swing: false,
+                          title: "Groups of 4",
+                          meter: "4/4 time",
+                          example: "Most pop, rock, jazz, blues",
+                          dots: [4],
+                        },
+                        {
+                          top: 3,
+                          bottom: 4,
+                          swing: false,
+                          title: "Groups of 3",
+                          meter: "3/4 time",
+                          example: "Waltz, folk ballad, Chopin",
+                          dots: [3],
+                        },
+                        {
+                          top: 6,
+                          bottom: 8,
+                          swing: false,
+                          title: "Two groups of 3",
+                          meter: "6/8 time",
+                          example: "Jig, compound feel, House of the Rising Sun",
+                          dots: [3, 3],
+                        },
+                        {
+                          top: 5,
+                          bottom: 4,
+                          swing: false,
+                          title: "Groups of 5",
+                          meter: "5/4 time",
+                          example: "Take Five, Mission Impossible",
+                          dots: [3, 2],
+                        },
+                        {
+                          top: 7,
+                          bottom: 4,
+                          swing: false,
+                          title: "Groups of 7",
+                          meter: "7/4 time",
+                          example: "Money (Pink Floyd), Unsquare Dance",
+                          dots: [4, 3],
+                        },
+                        {
+                          top: 4,
+                          bottom: 4,
+                          swing: true,
+                          title: "4/4 swing feel",
+                          meter: "4/4 shuffled",
+                          example: "Jazz swing, shuffle blues",
+                          dots: [4],
+                        },
+                      ].map((option) => {
+                        const selected =
+                          kiteSetupTimeSignatureTop === option.top &&
+                          kiteSetupTimeSignatureBottom === option.bottom &&
+                          kiteSetupIsSwing === option.swing;
+                        return (
+                          <button
+                            key={`${option.title}-${option.meter}`}
+                            type="button"
+                            onClick={() => {
+                              setKiteSetupTimeSignatureTop(option.top);
+                              setKiteSetupTimeSignatureBottom(option.bottom);
+                              setKiteSetupIsSwing(option.swing);
+                            }}
+                            className={`rounded-xl border px-4 py-4 text-left transition ${
+                              selected
+                                ? "border-blue-500 bg-blue-950/25 text-stone-50"
+                                : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+                            }`}
+                          >
+                            <span className="flex h-5 items-center gap-1.5" aria-hidden>
+                              {option.dots.map((group, groupIndex) => (
+                                <span key={`${option.title}-${groupIndex}`} className="flex gap-1.5">
+                                  {Array.from({ length: group }).map((_, dotIndex) => (
+                                    <span
+                                      key={dotIndex}
+                                      className={`h-3 w-3 rounded-full ${
+                                        dotIndex === 0 ? "bg-stone-100" : "bg-stone-500"
+                                      }`}
+                                    />
+                                  ))}
+                                </span>
+                              ))}
+                            </span>
+                            <span className="mt-3 block text-base font-bold text-stone-100">
+                              {option.title}
+                            </span>
+                            <span className="mt-0.5 block text-sm font-semibold text-stone-300">
+                              {option.meter}
+                            </span>
+                            <span className="mt-1 block text-xs font-semibold italic leading-snug text-stone-400">
+                              {option.example}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+
+                {kiteSetupStep === 2 ? (
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="text-lg font-bold tracking-tight text-stone-100">
+                        How many chords before it repeats?
+                      </h3>
+                      <p className="mt-1 text-sm font-medium leading-relaxed text-stone-400">
+                        Count the chords in one cycle. Don&apos;t overthink — just count what
+                        you&apos;d play before starting over.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
+                      {[
+                        { count: 2, label: "I–V vamp" },
+                        { count: 4, label: "pop 4-chord" },
+                        { count: 8, label: "Canon / jazz 8" },
+                        { count: 12, label: "12-bar blues" },
+                        { count: 16, label: "long jazz form" },
+                      ].map((option) => (
+                        <button
+                          key={option.count}
+                          type="button"
+                          onClick={() => {
+                            setKiteSetupUsesCustomChords(false);
+                            setKiteSetupChordCount(option.count);
+                          }}
+                          className={`rounded-xl border px-3 py-4 text-center transition ${
+                            !kiteSetupUsesCustomChords && kiteSetupChordCount === option.count
+                              ? "border-blue-500 bg-blue-950/25 text-stone-50"
+                              : "border-stone-700 bg-stone-900/50 text-stone-300 hover:bg-stone-800"
+                          }`}
+                        >
+                          <span className="block text-2xl font-bold">{option.count}</span>
+                          <span className="mt-1 block text-[11px] font-semibold text-stone-400">
+                            {option.label}
+                          </span>
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => setKiteSetupUsesCustomChords(true)}
+                        className={`rounded-xl border px-3 py-4 text-center transition ${
+                          kiteSetupUsesCustomChords
+                            ? "border-blue-500 bg-blue-950/25 text-stone-50"
+                            : "border-stone-700 bg-stone-900/50 text-stone-300 hover:bg-stone-800"
+                        }`}
+                      >
+                        <span className="block text-lg font-bold">other</span>
+                      </button>
+                    </div>
+                    {kiteSetupUsesCustomChords ? (
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="number"
+                          min={1}
+                          max={64}
+                          value={kiteSetupChordCount}
+                          onChange={(event) => {
+                            const next = Number(event.target.value);
+                            if (!Number.isFinite(next)) return;
+                            setKiteSetupChordCount(Math.max(1, Math.min(64, Math.round(next))));
+                          }}
+                          placeholder="e.g. 10"
+                          className="w-32 rounded-lg border border-stone-700 bg-stone-900 px-4 py-3 text-sm font-semibold text-stone-100 placeholder:text-stone-500"
+                          inputMode="numeric"
+                        />
+                        <span className="text-sm font-semibold text-stone-400">
+                          chords per cycle
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {kiteSetupStep === 3 ? (
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="text-lg font-bold tracking-tight text-stone-100">How fast?</h3>
+                      <p className="mt-1 text-sm font-medium leading-relaxed text-stone-400">
+                        Tap the button in rhythm, or drag the slider.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        { label: "Slow", bpm: 75 },
+                        { label: "Medium", bpm: 120 },
+                        { label: "Upbeat", bpm: 155 },
+                      ].map((option) => (
+                        <button
+                          key={option.label}
+                          type="button"
+                          onClick={() => setKiteSetupTempo(option.bpm)}
+                          className="rounded-full border border-stone-600 bg-stone-800/60 px-4 py-2 text-sm font-semibold text-stone-300 transition hover:bg-stone-700"
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-5 pt-5">
+                      <input
+                        type="range"
+                        min={40}
+                        max={240}
+                        step={1}
+                        value={kiteSetupTempo}
+                        onChange={(event) => setKiteSetupTempo(Number(event.target.value))}
+                        className="h-2 flex-1 accent-stone-300"
+                        aria-label="Kite Sync tempo"
+                      />
+                      <div className="min-w-16 text-right">
+                        <div className="text-3xl font-bold leading-none text-stone-100">
+                          {kiteSetupTempo}
+                        </div>
+                        <div className="mt-1 text-xs font-semibold uppercase tracking-wider text-stone-400">
+                          BPM
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleTapBeat}
+                      className="w-full rounded-xl border border-stone-600 bg-stone-900/50 px-4 py-3 text-base font-bold text-stone-200 transition hover:bg-stone-800"
+                    >
+                      Tap the beat ♪
+                    </button>
+                    <p className="text-center text-xs font-semibold text-stone-400">
+                      Tap 4+ times — resets after 2 seconds of silence
+                    </p>
+                  </div>
+                ) : null}
+
+                {kiteSetupStep === 4 ? (
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="text-sm font-semibold text-stone-100">Mode</h3>
+                      <p className="mt-1 text-xs leading-relaxed text-stone-500">
+                        Choose whether to practice alone or prepare to jam with someone.
+                      </p>
+                    </div>
+                    <div className="grid gap-3">
+                      {[
+                        { mode: "solo" as const, title: "Practice Alone", copy: "Start the Solo Looper first." },
+                        { mode: "sync" as const, title: "Jam With Someone", copy: "Prepare Kite Sync for collaboration." },
+                      ].map((option) => (
+                        <button
+                          key={option.mode}
+                          type="button"
+                          onClick={() => setKiteSetupMode(option.mode)}
+                          className={`rounded-xl border px-4 py-3 text-left transition ${
+                            kiteSetupMode === option.mode
+                              ? "border-emerald-500/45 bg-emerald-500/15"
+                              : "border-stone-700 bg-stone-900/50 hover:bg-stone-800"
+                          }`}
+                        >
+                          <span className="block text-sm font-semibold text-stone-100">
+                            {option.title}
+                          </span>
+                          <span className="mt-1 block text-xs text-stone-500">{option.copy}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {kiteSetupStep === 5 ? (
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="text-lg font-bold tracking-tight text-stone-100">
+                        Your loop is ready
+                      </h3>
+                      <p className="mt-1 text-sm font-medium leading-relaxed text-stone-400">
+                        Here&apos;s what we&apos;ve set up in plain terms.
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-stone-900/70 px-5 py-4 text-sm font-semibold text-stone-300">
+                      {[
+                        {
+                          label: "Beat grouping",
+                          value: `${kiteSetupTimeSignatureTop}/${kiteSetupTimeSignatureBottom}${
+                            kiteSetupIsSwing ? " swing" : ""
+                          }`,
+                        },
+                        { label: "Chord cycle", value: `${kiteSetupChordCount} chords` },
+                        {
+                          label: "Loop length (BPI)",
+                          value: `${kiteSetupChordCount} bars  (1× chord cycle)`,
+                        },
+                        { label: "Tempo", value: `${kiteSetupTempo} BPM` },
+                        {
+                          label: "Each loop lasts",
+                          value: `${Math.round(
+                            (60 / kiteSetupTempo) *
+                              kiteSetupTimeSignatureTop *
+                              kiteSetupChordCount
+                          )} seconds`,
+                        },
+                        {
+                          label: "Wait for bandmate",
+                          value: `${Math.round(
+                            (60 / kiteSetupTempo) *
+                              kiteSetupTimeSignatureTop *
+                              kiteSetupChordCount
+                          )} seconds`,
+                          accent: true,
+                        },
+                      ].map((row) => (
+                        <div
+                          key={row.label}
+                          className="flex items-center justify-between gap-3 border-b border-stone-700/70 py-2 last:border-0"
+                        >
+                          <span>{row.label}</span>
+                          <span
+                            className={`text-right text-base font-bold ${
+                              row.accent ? "text-blue-400" : "text-stone-100"
+                            }`}
+                          >
+                            {row.value}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="border-l-2 border-stone-600 pl-4 text-sm font-semibold leading-relaxed text-stone-300">
+                      Your song is in {kiteSetupTimeSignatureTop}/{kiteSetupTimeSignatureBottom}
+                      {kiteSetupIsSwing ? " swing" : ""} — each bar has{" "}
+                      {kiteSetupTimeSignatureTop} beats. We set the loop to {kiteSetupChordCount}{" "}
+                      bars so your {kiteSetupChordCount}-chord cycle completes cleanly before the
+                      next loop starts. Your bandmate will always hear a full phrase, never a
+                      cut-off chord.
+                    </div>
+                    <motion.button
+                      type="button"
+                      onClick={handleConfirmKiteSetup}
+                      whileTap={{ scale: 0.97 }}
+                      className="w-full rounded-xl border border-emerald-500/40 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/22"
+                    >
+                      Confirm & Launch
+                    </motion.button>
+                  </div>
+                ) : null}
+              </div>
+
+              {kiteSetupError ? (
+                <p className="mt-3 rounded-lg border border-red-500/30 bg-red-950/20 px-3 py-2 text-xs font-medium text-red-200">
+                  {kiteSetupError}
+                </p>
+              ) : null}
+
+              <div className="mt-5 flex items-center justify-between gap-3">
+                <motion.button
+                  type="button"
+                  disabled={kiteSetupStep === 1}
+                  onClick={goToPreviousKiteSetupStep}
+                  whileTap={kiteSetupStep === 1 ? undefined : { scale: 0.97 }}
+                  className={`flex-1 rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${
+                    kiteSetupStep === 1
+                      ? "cursor-not-allowed border-stone-800 bg-stone-900/40 text-stone-600"
+                      : "border-stone-700 bg-stone-900/60 text-stone-200 hover:bg-stone-800"
+                  }`}
+                >
+                  Previous
+                </motion.button>
+                <motion.button
+                  type="button"
+                  disabled={kiteSetupStep === 5}
+                  onClick={goToNextKiteSetupStep}
+                  whileTap={kiteSetupStep === 5 ? undefined : { scale: 0.97 }}
+                  className={`flex-1 rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${
+                    kiteSetupStep === 5
+                      ? "cursor-not-allowed border-stone-800 bg-stone-900/40 text-stone-600"
+                      : "border-orange-500/35 bg-orange-500/12 text-orange-100 hover:bg-orange-500/18"
+                  }`}
+                >
+                  Next
+                </motion.button>
+              </div>
+            </motion.div>
           ) : (
             <motion.div
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               className="mt-8 space-y-4"
             >
-              {status === "connected" ? (
+              {kiteMode === "solo" ? (
+                <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+                  <div className="rounded-2xl border border-stone-800/90 bg-stone-950/55 p-6 shadow-2xl">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-emerald-300">
+                      Solo Practice Suite
+                    </p>
+                    <h2 className="mt-2 text-2xl font-bold tracking-tight text-stone-50">
+                      Build your first Kite loop
+                    </h2>
+                    <div className="mt-5 flex flex-wrap items-center gap-3">
+                      <span
+                        className={`rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-widest ${
+                          soloLooperState === "recording"
+                            ? "animate-pulse border-red-500/45 bg-red-500/15 text-red-200"
+                            : soloLooperState === "captured"
+                              ? "border-emerald-500/45 bg-emerald-500/15 text-emerald-200"
+                              : "border-stone-700 bg-stone-900/70 text-stone-400"
+                        }`}
+                      >
+                        {soloLooperState === "recording"
+                          ? "Recording..."
+                          : isRecordingArmed
+                            ? "Armed"
+                          : soloLooperState === "captured"
+                            ? "Loop Captured"
+                            : "Idle"}
+                      </span>
+                      {kiteIntervalTimingRef.current ? (
+                        <span className="text-xs font-semibold text-stone-400">
+                          {kiteIntervalTimingRef.current.chords} chords ·{" "}
+                          {kiteIntervalTimingRef.current.bpm} BPM ·{" "}
+                          {kiteIntervalTimingRef.current.timeSignatureTop}/
+                          {kiteIntervalTimingRef.current.timeSignatureBottom}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-6 h-3 overflow-hidden rounded-full border border-stone-800 bg-stone-900">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-orange-500 to-emerald-400 transition-[width] duration-75"
+                        style={{ width: `${loopProgress}%` }}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs font-medium text-stone-500">
+                      Loop progress: {Math.round(loopProgress)}%
+                    </p>
+                    {!isRecordingArmed && soloLooperState === "idle" ? (
+                      <div className="mt-6 space-y-4 rounded-xl border border-stone-800 bg-stone-900/40 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs font-semibold uppercase tracking-widest text-stone-400">
+                            Solo Timing
+                          </p>
+                          <span className="text-sm font-bold text-stone-100">{kiteSetupTempo} BPM</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={40}
+                          max={240}
+                          step={1}
+                          value={kiteSetupTempo}
+                          onChange={(event) => setKiteSetupTempo(Number(event.target.value))}
+                          className="h-2 w-full accent-stone-300"
+                          aria-label="Solo loop tempo"
+                        />
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          {[
+                            { label: "Slow", bpm: 75 },
+                            { label: "Medium", bpm: 120 },
+                            { label: "Upbeat", bpm: 155 },
+                          ].map((option) => (
+                            <button
+                              key={option.label}
+                              type="button"
+                              onClick={() => setKiteSetupTempo(option.bpm)}
+                              className="rounded-full border border-stone-600 bg-stone-800/60 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:bg-stone-700"
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-xs font-semibold uppercase tracking-widest text-stone-400">
+                            Time Signature
+                          </p>
+                          <div className="grid gap-2 sm:grid-cols-3">
+                            {[
+                              { title: "Straight 4/4", top: 4, bottom: 4, swing: false },
+                              { title: "Waltz 3/4", top: 3, bottom: 4, swing: false },
+                              { title: "Shuffle 6/8", top: 6, bottom: 8, swing: true },
+                            ].map((option) => {
+                              const selected =
+                                kiteSetupTimeSignatureTop === option.top &&
+                                kiteSetupTimeSignatureBottom === option.bottom &&
+                                kiteSetupIsSwing === option.swing;
+                              return (
+                                <button
+                                  key={option.title}
+                                  type="button"
+                                  onClick={() => {
+                                    setKiteSetupTimeSignatureTop(option.top);
+                                    setKiteSetupTimeSignatureBottom(option.bottom);
+                                    setKiteSetupIsSwing(option.swing);
+                                  }}
+                                  className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                                    selected
+                                      ? "border-blue-500/45 bg-blue-500/15 text-blue-100"
+                                      : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+                                  }`}
+                                >
+                                  {option.title}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                    <motion.button
+                      type="button"
+                      disabled={isRecordingArmed || soloLooperState === "recording"}
+                      onClick={handleRecordFirstLoop}
+                      whileTap={isRecordingArmed || soloLooperState === "recording" ? undefined : { scale: 0.98 }}
+                      className={`mt-8 w-full rounded-2xl border px-5 py-5 text-lg font-bold shadow-lg transition ${
+                        isRecordingArmed
+                          ? "cursor-wait border-orange-500/45 bg-orange-500/15 text-orange-100"
+                          : soloLooperState === "recording"
+                            ? "cursor-not-allowed border-red-500/45 bg-red-500/15 text-red-100"
+                            : "border-red-500/45 bg-red-500/15 text-red-100 hover:bg-red-500/22"
+                      }`}
+                    >
+                      {isRecordingArmed
+                        ? recordingArmedCountdown === null
+                          ? "Waiting for count-in..."
+                          : `Starting in ${recordingArmedCountdown}...`
+                        : soloLooperState === "recording"
+                          ? "Recording..."
+                          : "🔴 Record First Loop"}
+                    </motion.button>
+                    {soloLooperState === "recording" || soloLooperState === "captured" ? (
+                      <button
+                        type="button"
+                        onClick={handleStopAndResetSoloLooper}
+                        className="mt-3 w-full rounded-xl border border-stone-700 bg-stone-900/70 px-4 py-3 text-sm font-semibold text-stone-200 transition hover:bg-stone-800"
+                      >
+                        Stop & Reset
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="rounded-2xl border border-stone-800/90 bg-stone-950/45 p-6">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-stone-500">
+                      Go Live
+                    </p>
+                    <h3 className="mt-2 text-lg font-bold text-stone-100">Invite Bandmate</h3>
+                    <p className="mt-2 text-sm font-medium leading-relaxed text-stone-400">
+                      Keep practicing here. When you are ready, invite a bandmate without
+                      rebuilding the Solo Looper.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleInviteBandmate}
+                      className="mt-6 w-full rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/15"
+                    >
+                      Invite Bandmate
+                    </button>
+                  </div>
+                </div>
+              ) : status === "connected" ? (
                 <div className="relative">
                 <>
                   <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
@@ -4008,6 +5421,23 @@ export default function StudioBridgePage() {
                         {calculatedDelayMs === null ? "-- ms" : `${calculatedDelayMs} ms`}
                       </span>
                     </div>
+                    <motion.button
+                      type="button"
+                      disabled={jamSetupLockedByRemote}
+                      onClick={() => {
+                        if (sendJamSetupLock("acquire")) {
+                          handleStartKiteSetup("connected");
+                        }
+                      }}
+                      whileTap={jamSetupLockedByRemote ? undefined : { scale: 0.97 }}
+                      className={`w-full rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+                        jamSetupLockedByRemote
+                          ? "cursor-not-allowed border-stone-700 bg-stone-900/60 text-stone-500"
+                          : "border-emerald-500/35 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15"
+                      }`}
+                    >
+                      {jamSetupLockedByRemote ? "Bandmate is setting up..." : "Start Kite Sync"}
+                    </motion.button>
                     {kiteSyncNetworkMetronomePaused && kiteSyncEnabled ? (
                       <div className="w-full rounded-lg border border-orange-500/30 bg-orange-950/25 px-3 py-2 text-left text-[11px] font-medium leading-snug text-orange-200/95">
                         Metronome paused: inbound loss exceeded {KITE_SYNC_LOSS_PAUSE_PCT}%. It
@@ -4155,7 +5585,10 @@ export default function StudioBridgePage() {
                         <div>
                           Depth:{" "}
                           <span className="font-mono text-stone-100">
-                            {Math.round(bufferDepthFrames / 48)} ms
+                            {Math.round(
+                              bufferDepthFrames /
+                                ((studioAudioContextRef.current?.sampleRate ?? 48000) / 1000)
+                            )} ms
                           </span>
                         </div>
                         <div>
@@ -4484,6 +5917,9 @@ export default function StudioBridgePage() {
                 audioInputDevices.map((device) => {
                   const deviceId = device.deviceId;
                   const isSelected = activeDeviceIds.includes(deviceId);
+                  const isInterfaceInput = interfaceInputDeviceFlags[deviceId] === true;
+                  const isInterfaceMonitorEnabled =
+                    isInterfaceInput && interfaceLiveMonitorEnabledFlags[deviceId] === true;
                   return (
                     <div key={deviceId || `audio-input-${device.label}`} className="space-y-1.5">
                       <button
@@ -4535,6 +5971,53 @@ export default function StudioBridgePage() {
                             }
                             className="w-full accent-emerald-500"
                           />
+                          <div className="mt-2 space-y-2 rounded-lg border border-stone-800/90 bg-stone-950/45 px-2 py-2">
+                            <label className="flex items-start gap-2 text-[11px] leading-snug text-stone-300">
+                              <input
+                                type="checkbox"
+                                checked={isInterfaceInput}
+                                onChange={(event) =>
+                                  setInterfaceInputDeviceFlag(deviceId, event.target.checked)
+                                }
+                                className="mt-0.5 accent-emerald-500"
+                              />
+                              <span>
+                                <span className="block font-semibold text-stone-200">
+                                  Interface / line-in source
+                                </span>
+                                <span className="text-stone-500">
+                                  Mark this only for plugged-in instruments or interface outputs.
+                                </span>
+                              </span>
+                            </label>
+                            <label
+                              className={`flex items-start gap-2 text-[11px] leading-snug ${
+                                isInterfaceInput ? "text-stone-300" : "text-stone-600"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isInterfaceMonitorEnabled}
+                                disabled={!isInterfaceInput}
+                                onChange={(event) =>
+                                  setInterfaceLiveMonitorEnabledFlag(deviceId, event.target.checked)
+                                }
+                                className="mt-0.5 accent-emerald-500 disabled:accent-stone-700"
+                              />
+                              <span>
+                                <span className="block font-semibold">Live monitor</span>
+                                <span>
+                                  Hear this interface input locally. Use headphones to avoid feedback.
+                                </span>
+                              </span>
+                            </label>
+                            {isInterfaceMonitorEnabled ? (
+                              <p className="rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1 text-[10px] font-medium leading-snug text-yellow-100">
+                                Headphones recommended. This control only marks the monitor setting;
+                                the audio graph is added in the next plan step.
+                              </p>
+                            ) : null}
+                          </div>
                         </div>
                       ) : null}
                     </div>
