@@ -423,6 +423,9 @@ export default function StudioBridgePage() {
   const [metronomeBpm, setMetronomeBpm] = useState(120);
   const [beatsPerInterval, setBeatsPerInterval] = useState(4);
   const [highPingTipOpen, setHighPingTipOpen] = useState(false);
+  const [isVisualMetronomeOnly, setIsVisualMetronomeOnly] = useState(false);
+  const isVisualMetronomeOnlyRef = useRef(false);
+  const [visualBeatState, setVisualBeatState] = useState<"downbeat" | "upbeat" | "off">("off");
   const [localMicStream, setLocalMicStream] = useState<MediaStream | null>(null);
   const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const [micPermissionHint, setMicPermissionHint] = useState<string | null>(null);
@@ -586,6 +589,8 @@ export default function StudioBridgePage() {
   const isRecordingArmedRef = useRef(false);
   const soloCountInIntervalRef = useRef<number | null>(null);
   const soloCountInTimeoutRef = useRef<number | null>(null);
+  const scheduledMetronomeOscillatorsRef = useRef<Set<OscillatorNode>>(new Set());
+  const scheduledMetronomeTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const kiteLoopChunksRef = useRef<ReturnType<typeof createLoadIntervalChunks> | null>(null);
   const kiteLoopChunkSenderRef = useRef<KiteDataChannelChunkSender | null>(null);
   const kiteLoopReassemblerRef = useRef<KiteIntervalReassembler | null>(null);
@@ -669,6 +674,10 @@ export default function StudioBridgePage() {
   useEffect(() => {
     isWorkletLoadedRef.current = isWorkletLoaded;
   }, [isWorkletLoaded]);
+
+  useEffect(() => {
+    isVisualMetronomeOnlyRef.current = isVisualMetronomeOnly;
+  }, [isVisualMetronomeOnly]);
 
   useEffect(() => {
     targetLeadFramesRef.current = targetLeadFrames;
@@ -2686,7 +2695,7 @@ export default function StudioBridgePage() {
   ]);
 
   const playSoloMetronomeClick = useCallback(
-    (isDownbeat: boolean, startAtContextSec?: number) => {
+    (isDownbeat: boolean, startAtContextSec?: number, forceAudio?: boolean) => {
       const ctx = studioAudioContextRef.current;
       if (!ctx || ctx.state === "closed") return;
       if (ctx.state === "suspended") {
@@ -2694,24 +2703,56 @@ export default function StudioBridgePage() {
       }
 
       const startAt = Math.max(ctx.currentTime, startAtContextSec ?? ctx.currentTime);
-      const oscillator = ctx.createOscillator();
-      const gain = ctx.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(isDownbeat ? 1500 : 1000, startAt);
-      gain.gain.setValueAtTime(0.0001, startAt);
-      gain.gain.exponentialRampToValueAtTime(isDownbeat ? 0.16 : 0.1, startAt + 0.004);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.045);
-      oscillator.connect(gain);
-      gain.connect(ctx.destination);
-      oscillator.start(startAt);
-      oscillator.stop(startAt + 0.05);
-      oscillator.onended = () => {
-        oscillator.disconnect();
-        gain.disconnect();
-      };
+      
+      const delayMs = Math.max(0, (startAt - ctx.currentTime) * 1000);
+      const visualTimeoutId = setTimeout(() => {
+        setVisualBeatState(isDownbeat ? "downbeat" : "upbeat");
+        setTimeout(() => setVisualBeatState("off"), 150);
+      }, delayMs);
+      scheduledMetronomeTimeoutsRef.current.add(visualTimeoutId);
+
+      const shouldPlayAudio = forceAudio || !isVisualMetronomeOnlyRef.current;
+      if (shouldPlayAudio) {
+        const oscillator = ctx.createOscillator();
+        scheduledMetronomeOscillatorsRef.current.add(oscillator);
+        const gain = ctx.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(isDownbeat ? 1500 : 1000, startAt);
+        gain.gain.setValueAtTime(0.0001, startAt);
+        gain.gain.exponentialRampToValueAtTime(isDownbeat ? 0.16 : 0.1, startAt + 0.004);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.045);
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+        oscillator.start(startAt);
+        oscillator.stop(startAt + 0.05);
+        oscillator.onended = () => {
+          oscillator.disconnect();
+          gain.disconnect();
+          scheduledMetronomeOscillatorsRef.current.delete(oscillator);
+        };
+      }
     },
     []
   );
+
+  const cancelScheduledMetronomeClicks = useCallback(() => {
+    scheduledMetronomeOscillatorsRef.current.forEach(oscillator => {
+      try {
+        oscillator.stop();
+        oscillator.disconnect();
+      } catch (e) {
+        // Oscillator may have already stopped/disconnected
+      }
+    });
+    scheduledMetronomeOscillatorsRef.current.clear();
+
+    scheduledMetronomeTimeoutsRef.current.forEach(timeoutId => {
+      clearTimeout(timeoutId);
+    });
+    scheduledMetronomeTimeoutsRef.current.clear();
+
+    setVisualBeatState("off");
+  }, []);
 
   const startSoloLooper = useCallback(
     async (timing: KiteIntervalTiming): Promise<void> => {
@@ -2774,6 +2815,7 @@ export default function StudioBridgePage() {
             loopProgressRafRef.current = null;
           }
           setLoopProgress(100);
+          cancelScheduledMetronomeClicks();
         },
       });
 
@@ -2812,7 +2854,7 @@ export default function StudioBridgePage() {
       animateProgress();
       setKiteMode(kiteSetupMode === "sync" ? "sync" : "solo");
     },
-    [ensureMasterDestinationNode, ensureStudioAudioContext, kiteSetupMode, playSoloMetronomeClick, sessionId]
+    [cancelScheduledMetronomeClicks, ensureMasterDestinationNode, ensureStudioAudioContext, kiteSetupMode, playSoloMetronomeClick, sessionId]
   );
 
   const handleConfirmKiteSetup = useCallback(() => {
@@ -2878,7 +2920,7 @@ export default function StudioBridgePage() {
         setRecordingArmedCountdown(beatsPerBar);
 
         for (let beatIndex = 0; beatIndex < beatsPerBar; beatIndex += 1) {
-          playSoloMetronomeClick(beatIndex === 0, startAt + beatIndex * beatSec);
+          playSoloMetronomeClick(beatIndex === 0, startAt + beatIndex * beatSec, true);
         }
 
         let remainingBeats = beatsPerBar;
@@ -2918,6 +2960,7 @@ export default function StudioBridgePage() {
   ]);
 
   const handleStopAndResetSoloLooper = useCallback(() => {
+    cancelScheduledMetronomeClicks();
     soloLooperEngineRef.current?.teardown();
     soloLooperEngineRef.current = null;
     cleanupKiteEngine({ stopLocalTracks: false });
@@ -2929,7 +2972,7 @@ export default function StudioBridgePage() {
     setLoopProgress(0);
     hasCapturedFirstKiteLoopRef.current = false;
     setKiteMode("solo");
-  }, [cleanupKiteEngine]);
+  }, [cancelScheduledMetronomeClicks, cleanupKiteEngine]);
 
   const onEnterStudioClick = useCallback(() => {
     void (async () => {
@@ -4382,6 +4425,34 @@ export default function StudioBridgePage() {
       ? "Playing test tone…"
       : "Tap Test Audio to play a short tone.";
 
+  const renderVisualMetronomeControls = () => (
+    <>
+      <button
+        type="button"
+        title="Use if you don't have headphones!"
+        onClick={() => setIsVisualMetronomeOnly(prev => !prev)}
+        className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+          isVisualMetronomeOnly
+            ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/22"
+            : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+        }`}
+      >
+        {isVisualMetronomeOnly ? "👁️ Visual Mode Active" : "🔊 Audio Metronome"}
+      </button>
+      <div className="flex items-center gap-2">
+        <div
+          className={`h-4 w-4 rounded-full transition-all duration-75 ${
+            visualBeatState === "downbeat"
+              ? "bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.8)]"
+              : visualBeatState === "upbeat"
+              ? "bg-stone-400 shadow-[0_0_8px_rgba(168,162,158,0.6)]"
+              : "bg-stone-800"
+          }`}
+        />
+      </div>
+    </>
+  );
+
   return (
     <div className="relative min-h-screen overflow-hidden text-white antialiased">
       <div className="fixed inset-0" style={{ backgroundColor: OBSIDIAN }} aria-hidden />
@@ -5234,46 +5305,66 @@ export default function StudioBridgePage() {
                     </div>
                     <div className="mt-6 h-3 overflow-hidden rounded-full border border-stone-800 bg-stone-900">
                       <div
-                        className="h-full rounded-full bg-gradient-to-r from-orange-500 to-emerald-400 transition-[width] duration-75"
+                        className="h-full rounded-full bg-gradient-to-r from-orange-500 to-emerald-400"
                         style={{ width: `${loopProgress}%` }}
                       />
                     </div>
                     <p className="mt-2 text-xs font-medium text-stone-500">
                       Loop progress: {Math.round(loopProgress)}%
                     </p>
-                    {!isRecordingArmed && soloLooperState === "idle" ? (
-                      <div className="mt-6 space-y-4 rounded-xl border border-stone-800 bg-stone-900/40 p-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-xs font-semibold uppercase tracking-widest text-stone-400">
-                            Solo Timing
-                          </p>
-                          <span className="text-sm font-bold text-stone-100">{kiteSetupTempo} BPM</span>
-                        </div>
-                        <input
-                          type="range"
-                          min={40}
-                          max={240}
-                          step={1}
-                          value={kiteSetupTempo}
-                          onChange={(event) => setKiteSetupTempo(Number(event.target.value))}
-                          className="h-2 w-full accent-stone-300"
-                          aria-label="Solo loop tempo"
-                        />
+                    <div className="mt-6 space-y-4 rounded-xl border border-stone-800 bg-stone-900/40 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs font-semibold uppercase tracking-widest text-stone-400">
+                          Solo Timing
+                        </p>
+                        <span className="text-sm font-bold text-stone-100">{kiteSetupTempo} BPM</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={40}
+                        max={240}
+                        step={1}
+                        value={kiteSetupTempo}
+                        onChange={(event) => setKiteSetupTempo(Number(event.target.value))}
+                        disabled={isRecordingArmed || soloLooperState !== "idle"}
+                        className={`h-2 w-full accent-stone-300 ${
+                          isRecordingArmed || soloLooperState !== "idle"
+                            ? "cursor-not-allowed opacity-50"
+                            : ""
+                        }`}
+                        aria-label="Solo loop tempo"
+                      />
                         <div className="grid gap-2 sm:grid-cols-3">
                           {[
                             { label: "Slow", bpm: 75 },
                             { label: "Medium", bpm: 120 },
                             { label: "Upbeat", bpm: 155 },
-                          ].map((option) => (
-                            <button
-                              key={option.label}
-                              type="button"
-                              onClick={() => setKiteSetupTempo(option.bpm)}
-                              className="rounded-full border border-stone-600 bg-stone-800/60 px-3 py-1.5 text-xs font-semibold text-stone-300 transition hover:bg-stone-700"
-                            >
-                              {option.label}
-                            </button>
-                          ))}
+                          ].map((option) => {
+                            const isTimingLocked = isRecordingArmed || soloLooperState !== "idle";
+                            return (
+                              <button
+                                key={option.label}
+                                type="button"
+                                disabled={isTimingLocked}
+                                onClick={() => setKiteSetupTempo(option.bpm)}
+                                className={`rounded-full border border-stone-600 bg-stone-800/60 px-3 py-1.5 text-xs font-semibold text-stone-300 transition ${
+                                  isTimingLocked
+                                    ? "cursor-not-allowed opacity-50"
+                                    : "hover:bg-stone-700"
+                                }`}
+                              >
+                                {option.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-xs font-semibold uppercase tracking-widest text-stone-400">
+                            Metronome Mode
+                          </p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {renderVisualMetronomeControls()}
+                          </div>
                         </div>
                         <div className="space-y-2">
                           <p className="text-xs font-semibold uppercase tracking-widest text-stone-400">
@@ -5289,19 +5380,23 @@ export default function StudioBridgePage() {
                                 kiteSetupTimeSignatureTop === option.top &&
                                 kiteSetupTimeSignatureBottom === option.bottom &&
                                 kiteSetupIsSwing === option.swing;
+                              const isTimingLocked = isRecordingArmed || soloLooperState !== "idle";
                               return (
                                 <button
                                   key={option.title}
                                   type="button"
+                                  disabled={isTimingLocked}
                                   onClick={() => {
                                     setKiteSetupTimeSignatureTop(option.top);
                                     setKiteSetupTimeSignatureBottom(option.bottom);
                                     setKiteSetupIsSwing(option.swing);
                                   }}
                                   className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
-                                    selected
-                                      ? "border-blue-500/45 bg-blue-500/15 text-blue-100"
-                                      : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+                                    isTimingLocked
+                                      ? "cursor-not-allowed opacity-50"
+                                      : selected
+                                        ? "border-blue-500/45 bg-blue-500/15 text-blue-100"
+                                        : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
                                   }`}
                                 >
                                   {option.title}
@@ -5311,7 +5406,6 @@ export default function StudioBridgePage() {
                           </div>
                         </div>
                       </div>
-                    ) : null}
                     <motion.button
                       type="button"
                       disabled={isRecordingArmed || soloLooperState === "recording"}
@@ -5529,6 +5623,7 @@ export default function StudioBridgePage() {
                             🔊 Resume Audio
                           </button>
                         ) : null}
+                        {renderVisualMetronomeControls()}
                         <label className="flex items-center gap-1 text-[11px] text-stone-300">
                           <span className="uppercase tracking-wider text-stone-500">BPM</span>
                           <input
