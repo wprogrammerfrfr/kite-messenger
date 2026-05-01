@@ -2144,33 +2144,37 @@ export default function StudioBridgePage() {
       ctx: AudioContext,
       time: number,
       tick: MetronomeTick,
-      masterGainNode?: GainNode | null
+      masterGainNode?: GainNode | null,
+      forceAudio?: boolean
     ) => {
       if (!ctx || ctx.state === "closed") return;
       if (ctx.state === "suspended") void ctx.resume();
       console.log("🎵 TICK scheduled for:", time, "Downbeat:", tick.isAccent);
       console.log("DEBUG: Creating Oscillator at time:", time);
       const startAt = Math.max(time, ctx.currentTime);
-      const osc = ctx.createOscillator();
-      const durationSec = 0.1;
-      const stopAt = startAt + durationSec;
-      osc.type = "sine";
-      const frequency =
-        tick.beatIndex === 0 ? 1760 : tick.beatIndex % 4 === 0 ? 880 : 440;
-      osc.frequency.setValueAtTime(frequency, startAt);
-      const targetNode = masterGainNode || ctx.destination;
-      osc.connect(targetNode);
-      osc.start(startAt);
       metronomeBlinkQueueRef.current.push({ startAt, isAccent: tick.isAccent });
       if (metronomeBlinkQueueRef.current.length > 20) metronomeBlinkQueueRef.current.shift();
-      osc.stop(stopAt);
-      osc.addEventListener("ended", () => {
-        try {
-          osc.disconnect();
-        } catch {
-          /* ignore */
-        }
-      });
+      const shouldPlayAudio = forceAudio || !isVisualMetronomeOnlyRef.current;
+      if (shouldPlayAudio) {
+        const osc = ctx.createOscillator();
+        const durationSec = 0.1;
+        const stopAt = startAt + durationSec;
+        osc.type = "sine";
+        const frequency =
+          tick.beatIndex === 0 ? 1760 : tick.beatIndex % 4 === 0 ? 880 : 440;
+        osc.frequency.setValueAtTime(frequency, startAt);
+        const targetNode = masterGainNode || ctx.destination;
+        osc.connect(targetNode);
+        osc.start(startAt);
+        osc.stop(stopAt);
+        osc.addEventListener("ended", () => {
+          try {
+            osc.disconnect();
+          } catch {
+            /* ignore */
+          }
+        });
+      }
     },
     []
   );
@@ -2257,6 +2261,7 @@ export default function StudioBridgePage() {
 
   const teardownKiteSyncTransport = useCallback(() => {
     stopKiteMetronome();
+    setBroadcastStatus("idle");
     if (kiteSyncCountInRafIdRef.current !== null) {
       cancelAnimationFrame(kiteSyncCountInRafIdRef.current);
       kiteSyncCountInRafIdRef.current = null;
@@ -2279,8 +2284,8 @@ export default function StudioBridgePage() {
   }, [kiteSyncEnabled, kiteSyncCountInActive]);
 
   useEffect(() => {
-    console.log("Metronome Effect running. Enabled:", kiteSyncEnabled, "Context Ready:", audioContextReady);
-    if (!kiteSyncEnabled) {
+    console.log("Metronome Effect running. Enabled:", kiteSyncEnabled, "BroadcastStatus:", broadcastStatus, "Context Ready:", audioContextReady);
+    if (!kiteSyncEnabled || (broadcastStatus !== "syncing" && broadcastStatus !== "live")) {
       stopKiteMetronome();
       return;
     }
@@ -2391,8 +2396,12 @@ export default function StudioBridgePage() {
       );
       const ticks = activeScheduler.consumeDueTicks(nowSec);
       console.log("DEBUG: Ticks Generated:", ticks.length);
+      const isCountIn =
+        broadcastStatusRef.current === "syncing" ||
+        (kiteSyncCountInEndAtContextSecRef.current !== null &&
+          activeCtx.currentTime < kiteSyncCountInEndAtContextSecRef.current);
       for (const tick of ticks) {
-        playMetronomeClick(activeCtx, tick.atSec, tick, metronomeGainRef.current);
+        playMetronomeClick(activeCtx, tick.atSec, tick, metronomeGainRef.current, isCountIn);
       }
     };
 
@@ -2404,6 +2413,7 @@ export default function StudioBridgePage() {
     );
   }, [
     beatsPerInterval,
+    broadcastStatus,
     kiteSyncEnabled,
     metronomeBpm,
     role,
@@ -3405,6 +3415,7 @@ export default function StudioBridgePage() {
             setIsRecording(false);
             setRecordingTimeMs(0);
             setKiteSyncEnabled(false);
+            setBroadcastStatus("idle");
             setRecordedBlobUrl((prev) => {
               if (prev) URL.revokeObjectURL(prev);
               return null;
@@ -3502,6 +3513,7 @@ export default function StudioBridgePage() {
           const departedName = remoteParticipantName || "A participant";
           leaveSignalReceivedRef.current = true;
           setKiteSyncEnabled(false);
+          setBroadcastStatus("idle");
           stopKiteMetronome();
           addLog("Collaborator LEAVE received");
           clearLostCountdown();
@@ -3808,6 +3820,7 @@ export default function StudioBridgePage() {
             const departedName = remoteParticipantName || "A participant";
             leaveSignalReceivedRef.current = true;
             setKiteSyncEnabled(false);
+            setBroadcastStatus("idle");
             stopKiteMetronome();
             clearLostCountdown();
             setCollaboratorLeft(true);
@@ -3869,6 +3882,7 @@ export default function StudioBridgePage() {
             if (msg.sequenceNumber <= lastAcceptedKiteSyncSeqRef.current) return;
             lastAcceptedKiteSyncSeqRef.current = msg.sequenceNumber;
             setKiteSyncEnabled(msg.enabled);
+            setBroadcastStatus(msg.enabled ? "syncing" : "idle");
             if (!msg.enabled) return;
 
             const receivedAtMs = Date.now();
@@ -3897,10 +3911,12 @@ export default function StudioBridgePage() {
                   Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) * sixteenthSec;
               }
               flushAndSetRemoteGridTarget(nextGridSec);
-              const countInTwoBeatsSec = (60 / msg.bpm) * 2;
-              if (Number.isFinite(countInTwoBeatsSec) && countInTwoBeatsSec > 0) {
+              // One-bar count-in: KITE_SYNC does not carry timeSignatureTop, so 4 (4/4 default)
+              // is used here. SET_INTERVAL will deliver the real beatsPerBar in a later step.
+              const countInOneBarSec = (60 / msg.bpm) * 4;
+              if (Number.isFinite(countInOneBarSec) && countInOneBarSec > 0) {
                 kiteSyncCountInEndAtContextSecRef.current =
-                  ctx.currentTime + countInTwoBeatsSec;
+                  ctx.currentTime + countInOneBarSec;
                 if (metronomeGainRef.current) metronomeGainRef.current.gain.value = 0;
                 setKiteSyncCountInActive(true);
               }
@@ -5551,18 +5567,17 @@ export default function StudioBridgePage() {
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <button
                           type="button"
-                          onClick={() =>
-                            setKiteSyncEnabled((prev) => {
-                              const next = !prev;
+                          onClick={() => {
+                              const next = !kiteSyncEnabled;
                               console.log("Kite Sync Toggle Clicked. New State:", next);
                               if (next) {
                                 const ctx = studioAudioContextRef.current;
                                 if (ctx) {
                                   flushAndSetRemoteGridTarget(ctx.currentTime + 0.01);
-                                  const countInTwoBeatsSec = (60 / metronomeBpm) * 2;
-                                  if (Number.isFinite(countInTwoBeatsSec) && countInTwoBeatsSec > 0) {
+                                  const countInOneBarSec = (60 / metronomeBpm) * Math.max(1, Math.round(kiteSetupTimeSignatureTop));
+                                  if (Number.isFinite(countInOneBarSec) && countInOneBarSec > 0) {
                                     kiteSyncCountInEndAtContextSecRef.current =
-                                      ctx.currentTime + countInTwoBeatsSec;
+                                      ctx.currentTime + countInOneBarSec;
                                     if (metronomeGainRef.current) {
                                       metronomeGainRef.current.gain.value = 0;
                                     }
@@ -5570,10 +5585,10 @@ export default function StudioBridgePage() {
                                   }
                                 }
                               }
+                              setKiteSyncEnabled(next);
+                              setBroadcastStatus(next ? "syncing" : "idle");
                               broadcastKiteSyncFromHost({ kiteSyncEnabled: next });
-                              return next;
-                            })
-                          }
+                            }}
                           className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                             kiteSyncEnabled
                               ? "border-emerald-500/40 bg-emerald-500/12 text-emerald-200 hover:bg-emerald-500/18"
@@ -5881,9 +5896,9 @@ export default function StudioBridgePage() {
                     role="status"
                     aria-live="polite"
                   >
-                    <p className="text-sm font-semibold text-stone-100">Syncing…</p>
+                    <p className="text-sm font-semibold text-stone-100">One-bar sync count-in…</p>
                     <p className="max-w-xs text-xs font-medium leading-relaxed text-stone-400">
-                      Wait for the count-in to finish before unmuting or turning up remote audio.
+                      A one-bar count-in is playing to lock the grid. Unmute and volume controls will unlock when it finishes.
                     </p>
                   </div>
                 ) : null}
