@@ -20,11 +20,12 @@ import {
   calcLoopDurationSeconds,
   type KiteIntervalTiming,
 } from "@/lib/kite-interval-math";
-import type { KiteIntervalGraph } from "@/lib/kite-interval-graph";
+import { buildKiteIntervalGraph, type KiteIntervalGraph } from "@/lib/kite-interval-graph";
 import { buildSoloLooperEngine, type SoloLooperEngine } from "@/lib/solo-looper-engine";
-import type { KiteSchedulerWorkerHandle } from "@/lib/kite-scheduler-worker";
+import { createKiteSchedulerWorker, type KiteSchedulerWorkerHandle } from "@/lib/kite-scheduler-worker";
 import {
   createLoadIntervalChunks,
+  decodeLoadIntervalChunk,
   KiteDataChannelChunkSender,
   KiteIntervalReassembler,
   type ReassembledLoadInterval,
@@ -566,10 +567,9 @@ export default function StudioBridgePage() {
   const buildTransportRef = useRef<((localStream: MediaStream, ctx: AudioContext) => Promise<void>) | null>(
     null
   );
+  const initNetworkSessionRef = useRef<(() => Promise<void>) | null>(null);
   const kiteIntervalTimingRef = useRef<KiteIntervalTiming | null>(null);
-  const kiteIntervalGraphRef = useRef<KiteIntervalGraph | null>(null);
   const soloLooperEngineRef = useRef<SoloLooperEngine | null>(null);
-  const kiteSchedulerWorkerRef = useRef<KiteSchedulerWorkerHandle | null>(null);
   const kiteP2PEngineRef = useRef<KiteIntervalGraph | null>(null);
   const kiteP2PSchedulerWorkerRef = useRef<KiteSchedulerWorkerHandle | null>(null);
   const kiteP2PSequenceRef = useRef(0);
@@ -1556,6 +1556,10 @@ export default function StudioBridgePage() {
     Boolean(localMicStream) &&
     audioTestDone &&
     kiteSignalSecure;
+  const canPracticeAlone =
+    studioUiPhase === "lobby" &&
+    Boolean(localMicStream) &&
+    audioTestDone;
   console.log("DEBUG [EnterGate]:", {
     canEnterStudio,
     studioUiPhase,
@@ -2123,6 +2127,117 @@ export default function StudioBridgePage() {
   }, [buildKiteSyncPacket, kiteSyncEnabled, role, sendOrQueueKiteSyncPacket]);
 
   /**
+   * Send P2P timing metadata to the connected peer so both sides can agree on the
+   * interval clock before the P2P engine starts. Does NOT trigger chunk transfer.
+   */
+  const sendSetInterval = useCallback((timing: KiteIntervalTiming, hasRetainedLoop: boolean): void => {
+    const peer = peerRef.current;
+    if (!peer || peer.destroyed || peer.connected !== true) return;
+    const clockAnchorSec = studioAudioContextRef.current?.currentTime ?? 0;
+    const payload = {
+      type: "SET_INTERVAL",
+      timing,
+      clockAnchorSec,
+      hasRetainedLoop,
+    };
+    try {
+      peer.send(JSON.stringify(payload));
+      console.log("[SET_INTERVAL] sent", { bpm: timing.bpm, bpi: timing.bpi, clockAnchorSec, hasRetainedLoop });
+    } catch {
+      console.warn("[SET_INTERVAL] send failed — peer channel not ready");
+    }
+  }, []);
+
+  /**
+   * Apply incoming SET_INTERVAL timing to local setup state so the guest's UI
+   * and math mirror the host's configuration. Does not send anything over the network.
+   */
+  const applySetIntervalLocally = useCallback((
+    timing: KiteIntervalTiming,
+    clockAnchorSec: number,
+    hasRetainedLoop: boolean,
+  ): void => {
+    setKiteSetupTempo(Math.max(20, Math.min(320, Math.round(timing.bpm))));
+    setKiteSetupTimeSignatureTop(Math.max(1, Math.min(16, Math.round(timing.timeSignatureTop))));
+    setKiteSetupTimeSignatureBottom(Math.max(1, Math.min(32, Math.round(timing.timeSignatureBottom))));
+    setKiteSetupChordCount(Math.max(1, Math.min(64, Math.round(timing.chords))));
+    console.log("[SET_INTERVAL] local timing synced from host", {
+      bpm: timing.bpm,
+      chords: timing.chords,
+      timeSignatureTop: timing.timeSignatureTop,
+      timeSignatureBottom: timing.timeSignatureBottom,
+      clockAnchorSec,
+      hasRetainedLoop,
+    });
+  }, []);
+
+  /**
+   * Send the retained loop buffer to the peer as binary LOAD_INTERVAL chunks.
+   * The retained loop is intentionally preserved on any failure so the caller
+   * can trigger a fresh attempt via `retryRetainedLoopSyncRef`.
+   */
+  const sendRetainedLoopChunks = useCallback(async (): Promise<void> => {
+    const retained = retainedKiteLoopBufferRef.current;
+    if (!retained) return;
+
+    const peer = peerRef.current;
+    if (!peer || peer.destroyed || peer.connected !== true) {
+      console.warn("[sendRetainedLoopChunks] peer not ready — retained loop preserved for retry");
+      return;
+    }
+
+    const dataChannel = (peer as unknown as { _channel?: RTCDataChannel })._channel;
+    if (!dataChannel || dataChannel.readyState !== "open") {
+      console.warn("[sendRetainedLoopChunks] data channel not open — retained loop preserved for retry");
+      return;
+    }
+
+    // Abort any in-progress send before starting a new one.
+    kiteLoopSendAbortControllerRef.current?.abort("Replacing with new send attempt");
+    const abortController = new AbortController();
+    kiteLoopSendAbortControllerRef.current = abortController;
+
+    let chunks: ReturnType<typeof createLoadIntervalChunks>;
+    try {
+      chunks = createLoadIntervalChunks({
+        sessionId: sessionId ?? "kite",
+        intervalId: retained.intervalId,
+        origin: role ?? "host",
+        channelCount: retained.channelCount,
+        sampleRate: retained.sampleRate,
+        intervalFrames: retained.intervalFrames,
+        buffer: retained.buffer,
+      });
+    } catch (err) {
+      console.error("[sendRetainedLoopChunks] failed to slice retained loop into chunks:", err);
+      return; // Retained loop is preserved; caller can retry.
+    }
+    kiteLoopChunksRef.current = chunks;
+
+    // Create a fresh sender bound to the current data channel.
+    kiteLoopChunkSenderRef.current = new KiteDataChannelChunkSender(dataChannel);
+
+    // Register a retry closure before attempting the send so callers can trigger
+    // a fresh attempt if this one fails or the peer reconnects.
+    retryRetainedLoopSyncRef.current = () => { void sendRetainedLoopChunks(); };
+
+    try {
+      await kiteLoopChunkSenderRef.current.sendChunks(chunks, { signal: abortController.signal });
+      retryRetainedLoopSyncRef.current = null;
+      console.log(
+        "[sendRetainedLoopChunks] sent",
+        chunks.length,
+        "chunks for intervalId",
+        retained.intervalId,
+      );
+    } catch (err) {
+      if (abortController.signal.aborted) return; // Aborted intentionally — retained loop is preserved.
+      console.error("[sendRetainedLoopChunks] send failed — retained loop preserved for retry:", err);
+      // Intentionally do NOT clear retainedKiteLoopBufferRef.current here.
+    }
+  }, [sessionId, role]);
+
+  /**
    * Parallel output branch for precision click-track playback.
    * This path is isolated from remote stream and local recorder chains.
    */
@@ -2563,17 +2678,8 @@ export default function StudioBridgePage() {
   );
 
   const cleanupKiteEngine = useCallback(
-    ({ stopLocalTracks = false }: { stopLocalTracks?: boolean } = {}) => {
-      kiteIntervalGraphRef.current?.teardown();
-      kiteSchedulerWorkerRef.current?.terminate();
-      kiteIntervalGraphRef.current = null;
-      kiteSchedulerWorkerRef.current = null;
-      if (kiteModeRef.current !== "broadcast" && broadcastStatusRef.current !== "live") {
-        retainedKiteLoopBufferRef.current = null;
-        retainedRemoteKiteLoopRef.current = null;
-        lastRetainedKiteIntervalIdRef.current = null;
-        lastRetainedKiteSequenceRef.current = null;
-      }
+    ({ stopLocalTracks = false, isFull = false }: { stopLocalTracks?: boolean; isFull?: boolean } = {}) => {
+      // ── Solo engine ──────────────────────────────────────────────────────────
       hasCapturedFirstKiteLoopRef.current = false;
       soloLooperStateRef.current = "idle";
       if (loopProgressRafRef.current !== null) {
@@ -2588,20 +2694,68 @@ export default function StudioBridgePage() {
         clearTimeout(soloCountInTimeoutRef.current);
         soloCountInTimeoutRef.current = null;
       }
-      kiteLoopChunksRef.current = null;
-      kiteLoopChunkSenderRef.current = null;
-      kiteLoopReassemblerRef.current = null;
-      kiteLoopSendAbortControllerRef.current?.abort();
-      kiteLoopSendAbortControllerRef.current = null;
       kiteIntervalTimingRef.current = null;
       setSoloLooperState("idle");
       setLoopProgress(0);
       isRecordingArmedRef.current = false;
       setIsRecordingArmed(false);
       setRecordingArmedCountdown(null);
+      setKiteMode("live");
+
+      // ── P2P engine ───────────────────────────────────────────────────────────
+      kiteP2PEngineRef.current?.teardown();
+      kiteP2PEngineRef.current = null;
+      kiteP2PSchedulerWorkerRef.current?.terminate();
+      kiteP2PSchedulerWorkerRef.current = null;
+      kiteP2PSequenceRef.current = 0;
+      if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
+        clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
+        queuedRemoteKiteIntervalTimeoutRef.current = null;
+      }
+      queuedRemoteKiteIntervalRef.current = null;
+
+      // ── Chunk transfer ───────────────────────────────────────────────────────
+      kiteLoopSendAbortControllerRef.current?.abort();
+      kiteLoopSendAbortControllerRef.current = null;
+      kiteLoopChunksRef.current = null;
+      kiteLoopChunkSenderRef.current = null;
+      kiteLoopReassemblerRef.current = null;
       setLoopChunkSendError(null);
       setLoopChunkSendProgress({ status: "idle", sentChunks: 0, totalChunks: 0 });
-      setKiteMode("live");
+
+      // ── Full cleanup only ────────────────────────────────────────────────────
+      if (isFull) {
+        retainedKiteLoopBufferRef.current = null;
+        retainedRemoteKiteLoopRef.current = null;
+        lastRetainedKiteIntervalIdRef.current = null;
+        lastRetainedKiteSequenceRef.current = null;
+        retryRetainedLoopSyncRef.current = null;
+
+        // Restore the outbound WebRTC audio sender from the muted Kite clone back
+        // to the original live mic track. Only do this on full cleanup — partial
+        // Solo-to-P2P transition cleanup must never accidentally restore VoIP.
+        if (voipSenderMutedForKiteRef.current) {
+          const peer = peerRef.current as (Peer.Instance & { replaceTrack?: (o: MediaStreamTrack, n: MediaStreamTrack, s: MediaStream) => void }) | null;
+          const original = originalVoipSenderTrackRef.current;
+          const clone = mutedVoipCloneTrackRef.current;
+          const stream = localMicStreamRef.current;
+          if (peer && typeof peer.replaceTrack === "function" && original && clone && stream) {
+            try {
+              peer.replaceTrack(clone, original, stream);
+            } catch {
+              // Peer may already be destroyed; restoration is best-effort.
+            }
+          }
+          voipSenderMutedForKiteRef.current = false;
+          originalVoipSenderTrackRef.current = null;
+          mutedVoipCloneTrackRef.current = null;
+        }
+
+        // Disconnect all interface live monitor graphs. Partial Solo-to-P2P
+        // transition cleanup must leave these running so the user continues to
+        // hear hardware interface inputs during the mode switch.
+        teardownAllInterfaceLiveMonitorGraphs();
+      }
 
       if (stopLocalTracks) {
         const stoppedTrackIds = new Set<string>();
@@ -2612,7 +2766,7 @@ export default function StudioBridgePage() {
         setLocalMicStream(null);
       }
     },
-    [stopMediaStreamTracks]
+    [stopMediaStreamTracks, teardownAllInterfaceLiveMonitorGraphs]
   );
 
   const handleStartKiteSetup = useCallback(
@@ -2639,7 +2793,7 @@ export default function StudioBridgePage() {
       return;
     }
     setStudioUiPhase("lobby");
-    cleanupKiteEngine({ stopLocalTracks: true });
+    cleanupKiteEngine({ stopLocalTracks: true, isFull: true });
   }, [cleanupKiteEngine, kiteSetupOrigin, sendJamSetupLock]);
 
   const goToNextKiteSetupStep = useCallback(() => {
@@ -2867,6 +3021,161 @@ export default function StudioBridgePage() {
     [cancelScheduledMetronomeClicks, ensureMasterDestinationNode, ensureStudioAudioContext, kiteSetupMode, playSoloMetronomeClick, sessionId]
   );
 
+  const startP2PEngine = useCallback(
+    async (timing: KiteIntervalTiming): Promise<void> => {
+      const ctx = ensureStudioAudioContext();
+      await ctx.resume();
+      if (ctx.state !== "running") {
+        throw new Error("AudioContext could not be started for P2P engine.");
+      }
+
+      // Use the raw mic stream directly so the P2P capture path is strictly
+      // independent of the mixer master output and the interface live monitor
+      // graphs (which route hardware device streams to ctx.destination).
+      const inputStream = localMicStreamRef.current;
+      if (!inputStream || inputStream.getAudioTracks().length === 0) {
+        throw new Error("Raw microphone stream is unavailable for P2P engine.");
+      }
+
+      const destinationNode = ensureMasterDestinationNode();
+      if (!destinationNode) {
+        throw new Error("P2P engine output destination is unavailable.");
+      }
+      // Defensive: localMicStreamRef must never be the master mix, but guard
+      // here to catch any future refactor that might break the invariant.
+      if (inputStream === destinationNode.stream || inputStream === mixerMasterDestinationRef.current?.stream) {
+        throw new Error("P2P engine input must be raw mic audio, not the master mix.");
+      }
+
+      // Tear down any existing P2P graph and worker before rebuilding.
+      kiteP2PEngineRef.current?.teardown();
+      kiteP2PEngineRef.current = null;
+      kiteP2PSchedulerWorkerRef.current?.terminate();
+      kiteP2PSchedulerWorkerRef.current = null;
+      kiteP2PSequenceRef.current = 0;
+      if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
+        clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
+        queuedRemoteKiteIntervalTimeoutRef.current = null;
+      }
+      queuedRemoteKiteIntervalRef.current = null;
+
+      const intervalId = `${sessionId ?? "p2p"}-p2p-${Date.now()}`;
+
+      // monitorDestination is intentionally omitted: the P2P engine must not
+      // self-monitor its mic input. Local playback is the interface live monitor's
+      // responsibility; routing the mic through an additional monitor here would
+      // duplicate audio for any user with interface monitoring enabled.
+      const graph = await buildKiteIntervalGraph({
+        audioContext: ctx,
+        inputStreams: [{ id: "p2p-mic", stream: inputStream }],
+        destinationNode,
+        timing,
+        intervalId,
+        channelCount: 2,
+        onEvent: (event) => {
+          if (event.type !== "INTERVAL_READY") return;
+          if (broadcastStatusRef.current !== "live") {
+            console.log("[P2P INTERVAL_READY] skipped — not live (status:", broadcastStatusRef.current, ")");
+            return;
+          }
+          kiteP2PSequenceRef.current += 1;
+          const outboundSeq = kiteP2PSequenceRef.current;
+          const liveIntervalId = `p2p-live-${outboundSeq}`;
+          console.log("[P2P INTERVAL_READY] seq", outboundSeq, "frames:", event.intervalFrames);
+
+          const peer = peerRef.current;
+          const dataChannel = (peer as unknown as { _channel?: RTCDataChannel })._channel;
+          if (!peer || peer.destroyed || peer.connected !== true || !dataChannel || dataChannel.readyState !== "open") {
+            console.warn("[P2P INTERVAL_READY] data channel not ready, dropping interval seq", outboundSeq);
+            return;
+          }
+
+          void (async () => {
+            try {
+              const chunks = createLoadIntervalChunks({
+                sessionId: sessionId ?? "p2p",
+                intervalId: liveIntervalId,
+                origin: role ?? "host",
+                channelCount: event.channelCount,
+                sampleRate: event.sampleRate,
+                intervalFrames: event.intervalFrames,
+                buffer: event.buffer,
+              });
+              const sender = new KiteDataChannelChunkSender(dataChannel);
+              await sender.sendChunks(chunks);
+              console.log("[P2P INTERVAL_READY] sent", chunks.length, "chunks for", liveIntervalId);
+            } catch (err) {
+              console.error("[P2P INTERVAL_READY] send failed for seq", outboundSeq, err);
+            }
+          })();
+        },
+      });
+      kiteP2PEngineRef.current = graph;
+
+      const worker = createKiteSchedulerWorker((msg) => {
+        if (msg.type === "KITE_INTERVAL_TICK") {
+          console.log("[P2P SCHEDULER TICK] seq", msg.sequenceNumber, "interval", msg.intervalIndex);
+
+          // Consume any queued remote interval and inject it into the engine for grid-aligned playback.
+          const queued = queuedRemoteKiteIntervalRef.current;
+          if (queued && kiteP2PEngineRef.current) {
+            kiteP2PEngineRef.current.loadInterval({
+              intervalId: queued.intervalId,
+              intervalFrames: queued.intervalFrames,
+              channelCount: queued.channelCount,
+              sampleRate: queued.sampleRate,
+              buffer: queued.payload,
+            });
+            queuedRemoteKiteIntervalRef.current = null;
+            console.log(
+              "[P2P TICK] loaded remote interval",
+              queued.intervalId,
+              "at seq",
+              msg.sequenceNumber
+            );
+          } else if (msg.sequenceNumber > 1) {
+            // Seq 1 is the very first tick; no remote interval is expected yet.
+            console.warn(
+              "[P2P TICK] no remote interval queued at seq",
+              msg.sequenceNumber,
+              "— remote audio may be late or dropped"
+            );
+          }
+
+          // Reset the per-interval deadline timeout.
+          if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
+            clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
+            queuedRemoteKiteIntervalTimeoutRef.current = null;
+          }
+          const intervalDurationMs = (msg.localIntervalFrames / msg.localSampleRate) * 1000;
+          queuedRemoteKiteIntervalTimeoutRef.current = window.setTimeout(() => {
+            queuedRemoteKiteIntervalTimeoutRef.current = null;
+            if (queuedRemoteKiteIntervalRef.current === null) {
+              console.warn(
+                "[P2P TIMEOUT] remote interval deadline missed before seq",
+                msg.sequenceNumber + 1,
+                "— packet may be lost or network is slow"
+              );
+            }
+          }, intervalDurationMs) as unknown as number;
+        } else if (msg.type === "KITE_SCHEDULER_ERROR") {
+          console.error("[P2P SCHEDULER ERROR]", msg.message);
+        }
+      });
+      worker.start({
+        loopDurationSeconds: timing.loopDurationSeconds,
+        localIntervalFrames: timing.localIntervalFrames,
+        localSampleRate: timing.localSampleRate,
+      });
+      kiteP2PSchedulerWorkerRef.current = worker;
+
+      kiteModeRef.current = "broadcast";
+      setKiteMode("broadcast");
+      console.log("[P2P Engine] started", { bpm: timing.bpm, bpi: timing.bpi, intervalId });
+    },
+    [ensureStudioAudioContext, ensureMasterDestinationNode, sessionId, role]
+  );
+
   const handleConfirmKiteSetup = useCallback(() => {
     void (async () => {
       try {
@@ -2984,7 +3293,7 @@ export default function StudioBridgePage() {
     setKiteMode("solo");
   }, [cancelScheduledMetronomeClicks, cleanupKiteEngine]);
 
-  const onEnterStudioClick = useCallback(() => {
+  const handleEnterStudio = useCallback(() => {
     void (async () => {
       try {
         if (!studioAudioContextRef.current) {
@@ -3019,8 +3328,14 @@ export default function StudioBridgePage() {
           console.warn("[EnterStudio] Aborted: buildTransport not ready.");
           return;
         }
+        const initNetworkSession = initNetworkSessionRef.current;
+        if (!initNetworkSession) {
+          console.warn("[EnterStudio] Aborted: network session initializer not ready.");
+          return;
+        }
 
         setStudioUiPhase("connecting");
+        await initNetworkSession();
         await buildTransport(localStream, ctx);
         ensureMetronomeGainNode(ctx);
         const stream = remoteStreamRef.current;
@@ -3332,8 +3647,7 @@ export default function StudioBridgePage() {
             handshakeFallbackIntervalRef.current = null;
           }
           teardownRemotePlaybackGraph();
-          cleanupKiteEngine({ stopLocalTracks: true });
-          teardownAllInterfaceLiveMonitorGraphs();
+          cleanupKiteEngine({ stopLocalTracks: true, isFull: true });
           // Mixer teardown: stop every active hardware stream and clear mixer graph/state.
           for (const [deviceId, stream] of Array.from(activeStreamsMapRef.current.entries())) {
             stopMediaStreamTracks(stream, stoppedTrackIds);
@@ -3796,6 +4110,49 @@ export default function StudioBridgePage() {
       });
 
       peer.on("data", (chunk: unknown) => {
+        // Binary path: KITE interval chunk — must be checked before text/JSON path.
+        const loadChunk = decodeLoadIntervalChunk(chunk);
+        if (loadChunk) {
+          if (!kiteLoopReassemblerRef.current) {
+            kiteLoopReassemblerRef.current = new KiteIntervalReassembler();
+          }
+          const result = kiteLoopReassemblerRef.current.acceptChunk(loadChunk);
+          if (result.status === "pending") {
+            console.log(
+              "[P2P RX] chunk pending",
+              result.receivedChunks,
+              "/",
+              result.totalChunks,
+              "key:",
+              result.key
+            );
+          } else if (result.status === "discarded") {
+            console.warn("[P2P RX] chunk discarded:", result.reason, "key:", result.key);
+          } else if (result.status === "complete") {
+            const interval = result.interval;
+            const isLive = interval.intervalId.startsWith("p2p-live-");
+            if (isLive) {
+              queuedRemoteKiteIntervalRef.current = interval;
+              console.log(
+                "[P2P RX] live interval complete:",
+                interval.intervalId,
+                "frames:",
+                interval.intervalFrames
+              );
+            } else {
+              retainedRemoteKiteLoopRef.current = interval;
+              console.log(
+                "[P2P RX] retained loop complete:",
+                interval.intervalId,
+                "frames:",
+                interval.intervalFrames
+              );
+            }
+          }
+          return;
+        }
+
+        // Text/JSON path: all signalling and control messages.
         try {
           const text = decodePeerDataChunk(chunk);
           const msg = JSON.parse(text) as {
@@ -3814,6 +4171,9 @@ export default function StudioBridgePage() {
             ownerId?: string;
             ownerName?: string;
             expiresAt?: number;
+            timing?: unknown;
+            clockAnchorSec?: number;
+            hasRetainedLoop?: boolean;
           };
           if (msg.type === "LEAVE") {
             if (msg.from === transportActiveRole) return;
@@ -3855,6 +4215,21 @@ export default function StudioBridgePage() {
               setJamSetupLock(null);
               return;
             }
+          }
+          if (
+            msg.type === "SET_INTERVAL" &&
+            msg.timing !== null &&
+            typeof msg.timing === "object" &&
+            typeof (msg.timing as KiteIntervalTiming).bpm === "number" &&
+            typeof (msg.timing as KiteIntervalTiming).chords === "number" &&
+            typeof (msg.timing as KiteIntervalTiming).timeSignatureTop === "number" &&
+            typeof (msg.timing as KiteIntervalTiming).timeSignatureBottom === "number"
+          ) {
+            const timing = msg.timing as KiteIntervalTiming;
+            const clockAnchorSec = typeof msg.clockAnchorSec === "number" ? msg.clockAnchorSec : 0;
+            const hasRetainedLoop = typeof msg.hasRetainedLoop === "boolean" ? msg.hasRetainedLoop : false;
+            applySetIntervalLocally(timing, clockAnchorSec, hasRetainedLoop);
+            return;
           }
           if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
             if (mountedRef.current) {
@@ -4024,6 +4399,15 @@ export default function StudioBridgePage() {
             // Keep queued packet for next successful send checkpoint.
           }
         }
+        if (transportIsHost) {
+          try {
+            const timing = deriveKiteTimingMetadata();
+            const hasRetainedLoop = retainedKiteLoopBufferRef.current !== null;
+            sendSetInterval(timing, hasRetainedLoop);
+          } catch {
+            // SET_INTERVAL is best-effort on connect; retained loop is preserved.
+          }
+        }
         if (connectTimeout !== null) {
           clearTimeout(connectTimeout);
           connectTimeout = null;
@@ -4151,6 +4535,100 @@ export default function StudioBridgePage() {
         studioAudioContextRef.current as AudioContext
       );
     };
+
+    const initNetworkSession = async () => {
+      if (bridgeInitInFlightRef.current) return;
+      bridgeInitInFlightRef.current = true;
+      try {
+        const url = new URL(window.location.href);
+        const forceRelay = url.searchParams.get("relay") === "true";
+        // Host only when `room` query is absent. `?room=` (empty) is a guest URL with invalid code.
+        const roomParamRaw = url.searchParams.get("room");
+        const isHost = roomParamRaw === null;
+        const sessionIdCandidate = isHost
+          ? randomSessionId()
+          : normalizeStudioSessionId(roomParamRaw ?? "").toUpperCase();
+        if (!isHost && sessionIdCandidate.length !== 6) {
+          throw new Error("Invalid room code. Expected 6 characters.");
+        }
+        const sessionId = sessionIdCandidate.toUpperCase();
+        const activeRole: Role = isHost ? "host" : "peer";
+        bridgeActiveRoleRef.current = activeRole;
+        setRole(activeRole);
+        const { data: authData } = await supabase.auth.getUser();
+        sessionUserId = authData.user?.id ?? null;
+
+        if (isHost) {
+          addLog("Phase 2: host full upsert studio_sessions");
+          setStatusNote("Room Created. Waiting in Lobby...");
+
+          console.log(
+            "DEBUG: Attempting Supabase Upsert for session (full row):",
+            sessionId.toUpperCase()
+          );
+          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
+            {
+              session_id: sessionId.toUpperCase(),
+              offer: null,
+              answer: null,
+              ice_candidates: [],
+            },
+            { onConflict: "session_id" }
+          );
+          if (insertErr) {
+            console.error("DEBUG: Upsert Failed (full row):", insertErr);
+            throw insertErr;
+          }
+        } else {
+          addLog("Phase 2: guest fetch studio_sessions");
+          setStatusNote("Room Joined. Waiting in Lobby...");
+
+          let { data: fetched, error: fetchErr } = await supabase
+            .from("studio_sessions")
+            .select("session_id, offer, answer, ice_candidates, host_user_id")
+            .eq("session_id", sessionId.toUpperCase())
+            .single<StudioSessionRow>();
+
+          if (fetchErr || !fetched) throw new Error("Room not found.");
+
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+          if (user?.id && fetched.host_user_id && user.id === fetched.host_user_id) {
+            localMicStreamRef.current?.getTracks().forEach((t) => t.stop());
+            localStreamRef.current = null;
+            if (localMonitorAudioRef.current) {
+              localMonitorAudioRef.current.srcObject = null;
+            }
+            if (mountedRef.current) {
+              setLocalMicStream(null);
+              setStatus("failed");
+              setStatusNote("You cannot join your own session as a guest.");
+              window.alert("You cannot join your own session as a guest.");
+            }
+            return;
+          }
+
+          existingRowRef.current = fetched;
+        }
+
+        if (cancelled || !mountedRef.current) {
+          localMicStreamRef.current?.getTracks().forEach((track) => track.stop());
+          localStreamRef.current = null;
+          if (mountedRef.current) setLocalMicStream(null);
+          return;
+        }
+
+        // —— Phase 3: Realtime + WebRTC ——
+        transportSessionId = sessionId;
+        transportActiveRole = activeRole;
+        transportIsHost = isHost;
+        transportForceRelay = forceRelay;
+      } finally {
+        bridgeInitInFlightRef.current = false;
+      }
+    };
+    initNetworkSessionRef.current = initNetworkSession;
 
     const init = async () => {
       if (bridgeInitInFlightRef.current) return;
@@ -4298,81 +4776,6 @@ export default function StudioBridgePage() {
           return;
         }
 
-        // —— Phase 2: database (after mic is live) ——
-        const activeRole: Role = isHost ? "host" : "peer";
-        bridgeActiveRoleRef.current = activeRole;
-        setRole(activeRole);
-        const { data: authData } = await supabase.auth.getUser();
-        sessionUserId = authData.user?.id ?? null;
-
-        if (isHost) {
-          addLog("Phase 2: host full upsert studio_sessions");
-          setStatusNote("Room Created. Waiting in Lobby...");
-
-          console.log(
-            "DEBUG: Attempting Supabase Upsert for session (full row):",
-            sessionId.toUpperCase()
-          );
-          const { error: insertErr } = await supabase.from("studio_sessions").upsert(
-            {
-              session_id: sessionId.toUpperCase(),
-              offer: null,
-              answer: null,
-              ice_candidates: [],
-            },
-            { onConflict: "session_id" }
-          );
-          if (insertErr) {
-            console.error("DEBUG: Upsert Failed (full row):", insertErr);
-            throw insertErr;
-          }
-        } else {
-          addLog("Phase 2: guest fetch studio_sessions");
-          setStatusNote("Room Joined. Waiting in Lobby...");
-
-          let { data: fetched, error: fetchErr } = await supabase
-            .from("studio_sessions")
-            .select("session_id, offer, answer, ice_candidates, host_user_id")
-            .eq("session_id", sessionId.toUpperCase())
-            .single<StudioSessionRow>();
-
-          if (fetchErr || !fetched) throw new Error("Room not found.");
-
-          const {
-            data: { user },
-          } = await supabase.auth.getUser();
-          if (user?.id && fetched.host_user_id && user.id === fetched.host_user_id) {
-            micStream?.getTracks().forEach((t) => t.stop());
-            micStream = null;
-            localStreamRef.current = null;
-            if (localMonitorAudioRef.current) {
-              localMonitorAudioRef.current.srcObject = null;
-            }
-            if (mountedRef.current) {
-              setLocalMicStream(null);
-              setStatus("failed");
-              setStatusNote("You cannot join your own session as a guest.");
-              window.alert("You cannot join your own session as a guest.");
-            }
-            return;
-          }
-
-          existingRowRef.current = fetched;
-        }
-
-        if (cancelled || !mountedRef.current) {
-          micStream.getTracks().forEach((track) => track.stop());
-          micStream = null;
-          localStreamRef.current = null;
-          if (mountedRef.current) setLocalMicStream(null);
-          return;
-        }
-
-        // —— Phase 3: Realtime + WebRTC ——
-        transportSessionId = sessionId;
-        transportActiveRole = activeRole;
-        transportIsHost = isHost;
-        transportForceRelay = forceRelay;
       } catch (error) {
         if (cancelled || !mountedRef.current) return;
         console.error("CRITICAL BRIDGE ERROR:", error);
@@ -4393,6 +4796,7 @@ export default function StudioBridgePage() {
       bridgeInitInFlightRef.current = false;
       bridgeTeardownRef.current = null;
       buildTransportRef.current = null;
+      initNetworkSessionRef.current = null;
       micStream?.getTracks().forEach((t) => t.stop());
       performTeardown();
     };
@@ -4819,7 +5223,7 @@ export default function StudioBridgePage() {
               <motion.button
                 type="button"
                 disabled={!canEnterStudio}
-                onClick={onEnterStudioClick}
+                onClick={handleEnterStudio}
                 className={`mt-8 w-full rounded-xl px-4 py-3.5 text-sm font-semibold transition ${
                   canEnterStudio
                     ? "border border-orange-500/40 text-stone-50 shadow-lg"
@@ -4839,24 +5243,27 @@ export default function StudioBridgePage() {
               </motion.button>
               <motion.button
                 type="button"
-                disabled={!canEnterStudio}
-                onClick={() => handleStartKiteSetup("lobby")}
+                disabled={!canPracticeAlone}
+                onClick={() => {
+                  setKiteMode("solo");
+                  setStudioUiPhase("studio");
+                }}
                 className={`mt-3 w-full rounded-xl px-4 py-3.5 text-sm font-semibold transition ${
-                  canEnterStudio
-                    ? "border border-emerald-500/40 text-stone-50 shadow-lg"
+                  canPracticeAlone
+                    ? "border border-slate-500/40 text-stone-50 shadow-lg"
                     : "cursor-not-allowed border border-stone-700 bg-stone-900/60 text-stone-500"
                 }`}
                 style={
-                  canEnterStudio
+                  canPracticeAlone
                     ? {
-                        background: `linear-gradient(135deg, rgba(34,197,94,0.2), rgba(255,69,0,0.14))`,
-                        boxShadow: `0 0 26px -8px ${EMERALD}77, 0 0 30px -10px ${ORANGE}55`,
+                        background: "linear-gradient(135deg, rgba(87,83,78,0.55), rgba(51,65,85,0.6))",
+                        boxShadow: "0 0 26px -8px rgba(120,113,108,0.45), 0 0 30px -10px rgba(71,85,105,0.45)",
                       }
                     : undefined
                 }
-                whileTap={canEnterStudio ? { scale: 0.97 } : undefined}
+                whileTap={canPracticeAlone ? { scale: 0.97 } : undefined}
               >
-                Start Kite Sync
+                Practice Solo
               </motion.button>
             </>
           ) : studioUiPhase === "kite-setup" ? (
@@ -5453,23 +5860,25 @@ export default function StudioBridgePage() {
                       </button>
                     ) : null}
                   </div>
-                  <div className="rounded-2xl border border-stone-800/90 bg-stone-950/45 p-6">
-                    <p className="text-[10px] font-semibold uppercase tracking-widest text-stone-500">
-                      Go Live
-                    </p>
-                    <h3 className="mt-2 text-lg font-bold text-stone-100">Invite Bandmate</h3>
-                    <p className="mt-2 text-sm font-medium leading-relaxed text-stone-400">
-                      Keep practicing here. When you are ready, invite a bandmate without
-                      rebuilding the Solo Looper.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={handleInviteBandmate}
-                      className="mt-6 w-full rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/15"
-                    >
-                      Invite Bandmate
-                    </button>
-                  </div>
+                  {kiteMode !== "solo" ? (
+                    <div className="rounded-2xl border border-stone-800/90 bg-stone-950/45 p-6">
+                      <p className="text-[10px] font-semibold uppercase tracking-widest text-stone-500">
+                        Go Live
+                      </p>
+                      <h3 className="mt-2 text-lg font-bold text-stone-100">Invite Bandmate</h3>
+                      <p className="mt-2 text-sm font-medium leading-relaxed text-stone-400">
+                        Keep practicing here. When you are ready, invite a bandmate without
+                        rebuilding the Solo Looper.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleInviteBandmate}
+                        className="mt-6 w-full rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/15"
+                      >
+                        Invite Bandmate
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               ) : status === "connected" ? (
                 <div className="relative">
@@ -5905,7 +6314,7 @@ export default function StudioBridgePage() {
               </div>
               ) : null}
 
-              {role === "host" && inviteLink ? (
+              {role === "host" && inviteLink && kiteMode !== "solo" ? (
                 <motion.button
                   type="button"
                   onClick={() => void copyInviteLink()}
@@ -5922,9 +6331,11 @@ export default function StudioBridgePage() {
                 </p>
               ) : null}
 
-              <p className="text-center text-xs text-stone-500">
-                {status === "connected" ? statusNote : (bridgeInitError ?? statusNote)}
-              </p>
+              {kiteMode !== "solo" ? (
+                <p className="text-center text-xs text-stone-500">
+                  {status === "connected" ? statusNote : (bridgeInitError ?? statusNote)}
+                </p>
+              ) : null}
             </motion.div>
           )}
 
