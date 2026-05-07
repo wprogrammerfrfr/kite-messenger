@@ -297,12 +297,23 @@ export async function probeStereoLane(
   }
 }
 
+/**
+ * Builds a per-device lane graph: splitter → per-lane gain/analyser → stereo merger → master destination.
+ *
+ * @param args.deviceVolumes — **Lane-keyed** fader values in percent (0–100), keys
+ *   `"<deviceId>:ch0"` and `"<deviceId>:ch1"` for the two physical merger inputs. Missing keys default to 100.
+ * @param args.kiteTapDestinationNode — When set, the same merged bus is also routed to this destination
+ *   (parallel to `destinationNode`) for Kite/P2P capture without replacing the VoIP master mix.
+ */
 export async function createLaneGraph(args: {
   deviceId: string;
   stream: MediaStream;
   audioCtx: AudioContext;
   destinationNode: MediaStreamAudioDestinationNode;
+  /** Lane-keyed volumes: `deviceId:ch0`, `deviceId:ch1` (see JSDoc on `createLaneGraph`). */
   deviceVolumes?: Record<string, number>;
+  /** Optional second bus fed from `mergerNode` alongside `destinationNode` (Kite tap). */
+  kiteTapDestinationNode?: MediaStreamAudioDestinationNode;
   probeOptions?: {
     sampleWindowMs?: number;
     hardTimeoutMs?: number;
@@ -341,7 +352,7 @@ export async function createLaneGraph(args: {
     gainNode.connect(analyserNode);
     analyserNode.connect(mergerNode, 0, channelIdx);
 
-    const volumePercent = args.deviceVolumes?.[deviceId] ?? 100;
+    const volumePercent = args.deviceVolumes?.[laneKey] ?? 100;
     gainNode.gain.value = toPerceptualGain(volumePercent);
 
     gainNodes.set(laneKey, gainNode);
@@ -350,6 +361,9 @@ export async function createLaneGraph(args: {
   }
 
   mergerNode.connect(destinationNode);
+  if (args.kiteTapDestinationNode) {
+    mergerNode.connect(args.kiteTapDestinationNode);
+  }
 
   const laneInfo = await probeStereoLane(
     audioCtx,
@@ -446,35 +460,100 @@ function normalizeFetchedIceServers(raw: unknown[]): RTCIceServer[] {
   return out;
 }
 
-export async function fetchTurnCredentials(): Promise<RTCIceServer[]> {
+export type TurnCredentialsBundle = {
+  iceServers: RTCIceServer[];
+  /** Seconds until expiry when the API provided a TTL field; otherwise null. */
+  ttlSeconds: number | null;
+  /** Approximate wall-clock expiry (ms since epoch) when known from API or derived from TTL. */
+  expiresAtEpochMs: number | null;
+};
+
+function parseTurnCredentialMetaFields(data: unknown): {
+  ttlSeconds: number | null;
+  expiresAtEpochMs: number | null;
+} {
+  if (!data || typeof data !== "object") {
+    return { ttlSeconds: null, expiresAtEpochMs: null };
+  }
+  const o = data as Record<string, unknown>;
+  const pickFiniteInt = (v: unknown): number | null => {
+    if (typeof v !== "number" || !Number.isFinite(v)) return null;
+    return Math.max(0, Math.floor(v));
+  };
+  const ttlSeconds =
+    pickFiniteInt(o.ttlSeconds) ??
+    pickFiniteInt(o.ttl) ??
+    pickFiniteInt(o.expiryInSeconds) ??
+    pickFiniteInt(o.expiresInSeconds);
+
+  let expiresAtEpochMs: number | null = null;
+  if (typeof o.expiresAtEpochMs === "number" && Number.isFinite(o.expiresAtEpochMs)) {
+    expiresAtEpochMs = Math.floor(o.expiresAtEpochMs);
+  } else if (typeof o.expiresAt === "number" && Number.isFinite(o.expiresAt)) {
+    expiresAtEpochMs = Math.floor(o.expiresAt);
+  } else if (typeof o.expiresAt === "string") {
+    const parsed = Date.parse(o.expiresAt);
+    if (!Number.isNaN(parsed)) expiresAtEpochMs = parsed;
+  }
+  if (expiresAtEpochMs === null && ttlSeconds !== null && ttlSeconds > 0) {
+    expiresAtEpochMs = Date.now() + ttlSeconds * 1000;
+  }
+  return { ttlSeconds: ttlSeconds ?? null, expiresAtEpochMs };
+}
+
+function turnCredentialsBundleFromApiJson(data: unknown): TurnCredentialsBundle | null {
+  if (!data || typeof data !== "object") return null;
+  const obj = data as Record<string, unknown>;
+  if (!Array.isArray(obj.iceServers) || obj.iceServers.length === 0) return null;
+  const meta = parseTurnCredentialMetaFields(data);
+  return {
+    iceServers: normalizeFetchedIceServers(obj.iceServers),
+    ttlSeconds: meta.ttlSeconds,
+    expiresAtEpochMs: meta.expiresAtEpochMs,
+  };
+}
+
+export async function fetchTurnCredentialsWithMeta(): Promise<TurnCredentialsBundle> {
   try {
     const res = await fetch("/api/turn-credentials");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    console.log("[Kite] TURN credentials loaded:", {
-      serverCount: data.iceServers?.length,
-      hasTurn: data.iceServers?.some((s: RTCIceServer) =>
-        (Array.isArray(s.urls) ? s.urls : [s.urls]).some((u: string) =>
-          u.startsWith("turn:")
-        )
-      ),
-    });
-    if (
-      !data.iceServers ||
-      !Array.isArray(data.iceServers) ||
-      data.iceServers.length === 0
-    ) {
+    const data: unknown = await res.json();
+    const bundle = turnCredentialsBundleFromApiJson(data);
+    if (!bundle) {
       console.error(
         "[Kite] TURN response missing or empty iceServers, using fallback:",
         data
       );
-      return STUDIO_ICE_SERVERS_FALLBACK;
+      return {
+        iceServers: STUDIO_ICE_SERVERS_FALLBACK,
+        ttlSeconds: null,
+        expiresAtEpochMs: null,
+      };
     }
-    return normalizeFetchedIceServers(data.iceServers);
+    console.log("[Kite] TURN credentials loaded:", {
+      serverCount: bundle.iceServers.length,
+      hasTurn: bundle.iceServers.some((s: RTCIceServer) =>
+        (Array.isArray(s.urls) ? s.urls : [s.urls]).some((u: string) =>
+          u.startsWith("turn:")
+        )
+      ),
+      ttlSeconds: bundle.ttlSeconds,
+      expiresAtEpochMs: bundle.expiresAtEpochMs,
+    });
+    return bundle;
   } catch (err) {
     console.error("[Kite] TURN fetch failed, using STUN only:", err);
-    return STUDIO_ICE_SERVERS_FALLBACK;
+    return {
+      iceServers: STUDIO_ICE_SERVERS_FALLBACK,
+      ttlSeconds: null,
+      expiresAtEpochMs: null,
+    };
   }
+}
+
+export async function fetchTurnCredentials(): Promise<RTCIceServer[]> {
+  const bundle = await fetchTurnCredentialsWithMeta();
+  return bundle.iceServers;
 }
 
 export function buildPeerConfig(

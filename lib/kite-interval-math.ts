@@ -23,6 +23,8 @@ export type KiteIntervalTiming = {
   localIntervalFrames: number;
 };
 
+export const KITE_TARGET_SAMPLE_RATE = 48000;
+
 const MIN_BPM = 20;
 const MAX_BPM = 320;
 const MIN_CHORDS = 1;

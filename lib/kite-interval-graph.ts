@@ -1,4 +1,4 @@
-import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
+import { KITE_TARGET_SAMPLE_RATE, type KiteIntervalTiming } from "@/lib/kite-interval-math";
 
 export type KiteIntervalInputStream = {
   id: string;
@@ -122,6 +122,13 @@ export async function buildKiteIntervalGraph(
 ): Promise<KiteIntervalGraph> {
   const ctx = options.audioContext;
   assertUsableAudioContext(ctx);
+  const contextSr = Math.round(ctx.sampleRate);
+  const timingSr = Math.round(options.timing.localSampleRate);
+  if (timingSr !== contextSr) {
+    throw new Error(
+      `Kite interval timing localSampleRate (${timingSr}) must match AudioContext.sampleRate (${contextSr}). Studio Kite nominal is ${KITE_TARGET_SAMPLE_RATE} Hz when the context supports it.`
+    );
+  }
   assertPreMasterInputs(options.inputStreams, options.destinationNode);
   await ensureKiteIntervalWorkletLoaded(ctx);
 
