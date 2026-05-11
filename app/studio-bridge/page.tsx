@@ -141,12 +141,28 @@ const KITE_SYNC_LOSS_STABLE_MS = 4000;
 /** Remote listen path: Web Audio boost to `AudioContext.destination` (muted `<audio>` keep-alive + gain-based mute). */
 const REMOTE_PLAYBACK_VOLUME_MIN = 0.5;
 const REMOTE_PLAYBACK_VOLUME_MAX = 4;
-const DEFAULT_REMOTE_PLAYBACK_VOLUME = 2;
+const DEFAULT_REMOTE_PLAYBACK_VOLUME = 1;
 const REMOTE_COMPRESSOR_THRESHOLD = -12;
 const REMOTE_COMPRESSOR_KNEE      = 6;
 const REMOTE_COMPRESSOR_RATIO     = 3;
 const REMOTE_COMPRESSOR_ATTACK    = 0.003;
 const REMOTE_COMPRESSOR_RELEASE   = 0.1;
+
+/** Linear fade for interface live-monitor duck / restore around Kite broadcast (avoid clicks). */
+const BROADCAST_INTERFACE_MONITOR_RAMP_SEC = 0.05;
+
+function rampLinearAudioGain(
+  gainParam: AudioParam,
+  ctx: AudioContext,
+  targetValue: number,
+  durationSec: number
+): void {
+  const t0 = ctx.currentTime;
+  const end = t0 + Math.max(0, durationSec);
+  gainParam.cancelScheduledValues(t0);
+  gainParam.setValueAtTime(gainParam.value, t0);
+  gainParam.linearRampToValueAtTime(targetValue, end);
+}
 
 /** Studio playback context: prefer 48 kHz + low latency; fall back if options unsupported. */
 function createStudioAudioContext(): AudioContext {
@@ -440,6 +456,7 @@ export default function StudioBridgePage() {
   /** One-way network latency estimate from ICE RTT (`currentRoundTripTime / 2`). */
   const [calculatedDelayMs, setCalculatedDelayMs] = useState<number | null>(null);
   const [kiteSyncEnabled, setKiteSyncEnabled] = useState(false);
+  const kiteSyncEnabledRef = useRef(kiteSyncEnabled);
   const [metronomeBpm, setMetronomeBpm] = useState(120);
   const [beatsPerInterval, setBeatsPerInterval] = useState(4);
   const [highPingTipOpen, setHighPingTipOpen] = useState(false);
@@ -529,7 +546,7 @@ export default function StudioBridgePage() {
   const [kiteSyncMetronomeResumeNonce, setKiteSyncMetronomeResumeNonce] = useState(0);
   /** True while metronome is stopped due to inbound loss hysteresis (UX hint). */
   const [kiteSyncNetworkMetronomePaused, setKiteSyncNetworkMetronomePaused] = useState(false);
-  const [metronomeVolume, setMetronomeVolume] = useState(1);
+  const [metronomeVolume, setMetronomeVolume] = useState(0.85);
   const isInStudioPhase = studioUiPhase === "studio";
 
   const micDeniedThisInitRef = useRef(false);
@@ -587,6 +604,8 @@ export default function StudioBridgePage() {
   const leaveSignalReceivedRef = useRef(false);
   /** Mirrors `activeRole` from bridge init so `performTeardown` can send `{ type, from }` over the data channel. */
   const bridgeActiveRoleRef = useRef<Role | null>(null);
+  /** Host: latest teardown when the P2P peer drops during Kite (avoids stale `buildTransport` closures). */
+  const hostExitKiteBroadcastOnPeerDisconnectRef = useRef<() => void>(() => {});
   const lostCountdownIntervalRef = useRef<number | null>(null);
   const sessionStartedAtRef = useRef<number | null>(null);
   const historySavedRef = useRef(false);
@@ -603,6 +622,9 @@ export default function StudioBridgePage() {
   const sessionBootstrapPromiseRef = useRef<Promise<void> | null>(null);
   const startP2PEngineRef = useRef<((timing: KiteIntervalTiming) => Promise<void>) | null>(null);
   const kiteIntervalTimingRef = useRef<KiteIntervalTiming | null>(null);
+  /** Timing last used to build the P2P interval graph; consumed when igniting the scheduler after count-in. */
+  const latestKiteIntervalTimingRef = useRef<KiteIntervalTiming | null>(null);
+  const startP2PIntervalSchedulerRef = useRef<((timing: KiteIntervalTiming) => void) | null>(null);
   const soloLooperEngineRef = useRef<SoloLooperEngine | null>(null);
   const kiteP2PEngineRef = useRef<KiteIntervalGraph | null>(null);
   const kiteP2PSchedulerWorkerRef = useRef<KiteSchedulerWorkerHandle | null>(null);
@@ -611,6 +633,8 @@ export default function StudioBridgePage() {
   const queuedRemoteKiteIntervalTimeoutRef = useRef<number | null>(null);
   const retryRetainedLoopSyncRef = useRef<(() => void) | null>(null);
   const kiteModeRef = useRef<KiteMode>("live");
+  /** Tracks prior `kiteMode` so we can ramp interface live monitors back after leaving broadcast. */
+  const prevKiteModeForBroadcastMonitorRef = useRef<KiteMode | null>(null);
   const broadcastStatusRef = useRef<BroadcastStatus>("idle");
   const isBroadcastConnectPendingRef = useRef(false);
   const retainedKiteLoopBufferRef = useRef<RetainedKiteLoopBuffer | null>(null);
@@ -657,7 +681,7 @@ export default function StudioBridgePage() {
   const remotePlaybackMeterSinkRef = useRef<GainNode | null>(null);
   const remotePlaybackCompressorRef = useRef<DynamicsCompressorNode | null>(null);
   const metronomeGainRef = useRef<GainNode | null>(null);
-  const metronomeVolumeRef = useRef(1);
+  const metronomeVolumeRef = useRef(0.85);
   const metronomeSchedulerRef = useRef<ReturnType<typeof createMetronomeScheduler> | null>(null);
   const metronomePumpRef = useRef<MetronomePumpHandle | null>(null);
   const metronomeBlinkQueueRef = useRef<{ startAt: number; isAccent: boolean }[]>([]);
@@ -704,6 +728,10 @@ export default function StudioBridgePage() {
   useEffect(() => {
     broadcastStatusRef.current = broadcastStatus;
   }, [broadcastStatus]);
+
+  useEffect(() => {
+    kiteSyncEnabledRef.current = kiteSyncEnabled;
+  }, [kiteSyncEnabled]);
 
   useEffect(() => {
     isRecordingArmedRef.current = isRecordingArmed;
@@ -935,6 +963,54 @@ export default function StudioBridgePage() {
       teardownInterfaceLiveMonitorGraph(deviceId);
     }
   }, [teardownInterfaceLiveMonitorGraph]);
+
+  const duckInterfaceLiveMonitorNodesForBroadcast = useCallback(() => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
+    for (const gainNode of Array.from(interfaceLiveMonitorGainNodesRef.current.values())) {
+      try {
+        rampLinearAudioGain(gainNode.gain, ctx, 0, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
+
+  const restoreInterfaceLiveMonitorNodesFromSliders = useCallback(() => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
+    for (const deviceId of Array.from(interfaceLiveMonitorGainNodesRef.current.keys())) {
+      const gainNode = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
+      if (!gainNode) continue;
+      const vols = deviceVolumesRef.current;
+      const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
+      const v0 = vols[`${deviceId}:ch0`] ?? 100;
+      const v1 = vols[`${deviceId}:ch1`] ?? 100;
+      const blended = chCount >= 2 ? (v0 + v1) / 2 : v0;
+      const targetLinear = Math.pow(Math.min(100, Math.max(0, blended)) / 100, 2);
+      try {
+        rampLinearAudioGain(gainNode.gain, ctx, targetLinear, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const prev = prevKiteModeForBroadcastMonitorRef.current;
+    prevKiteModeForBroadcastMonitorRef.current = kiteMode;
+    if (prev === "broadcast" && kiteMode !== "broadcast") {
+      restoreInterfaceLiveMonitorNodesFromSliders();
+    } else if (prev !== "broadcast" && kiteMode === "broadcast") {
+      duckInterfaceLiveMonitorNodesForBroadcast();
+    }
+  }, [duckInterfaceLiveMonitorNodesForBroadcast, kiteMode, restoreInterfaceLiveMonitorNodesFromSliders]);
+
+  useEffect(() => {
+    if (kiteMode === "broadcast") {
+      setDevicePanelOpen(false);
+    }
+  }, [kiteMode]);
 
   const clearInterfaceMonitorStateForDevice = useCallback((deviceId: string) => {
     interfaceInputDeviceFlagsRef.current = {
@@ -1388,16 +1464,24 @@ export default function StudioBridgePage() {
 
       const monitorGain = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
       if (monitorGain) {
-        const vols = deviceVolumesRef.current;
-        const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
-        const v0 =
-          laneKey === `${deviceId}:ch0` ? clampedVolume : vols[`${deviceId}:ch0`] ?? 100;
-        const v1 =
-          laneKey === `${deviceId}:ch1` ? clampedVolume : vols[`${deviceId}:ch1`] ?? 100;
-        const blended = chCount >= 2 ? (v0 + v1) / 2 : v0;
-        const monitorPerceptual = Math.pow(Math.min(100, Math.max(0, blended)) / 100, 2);
-        monitorGain.gain.cancelScheduledValues(ctx.currentTime);
-        monitorGain.gain.setTargetAtTime(monitorPerceptual, ctx.currentTime, 0.01);
+        if (kiteModeRef.current === "broadcast") {
+          rampLinearAudioGain(monitorGain.gain, ctx, 0, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+        } else {
+          const vols = deviceVolumesRef.current;
+          const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
+          const v0 =
+            laneKey === `${deviceId}:ch0` ? clampedVolume : vols[`${deviceId}:ch0`] ?? 100;
+          const v1 =
+            laneKey === `${deviceId}:ch1` ? clampedVolume : vols[`${deviceId}:ch1`] ?? 100;
+          const blended = chCount >= 2 ? (v0 + v1) / 2 : v0;
+          const monitorPerceptual = Math.pow(Math.min(100, Math.max(0, blended)) / 100, 2);
+          rampLinearAudioGain(
+            monitorGain.gain,
+            ctx,
+            monitorPerceptual,
+            BROADCAST_INTERFACE_MONITOR_RAMP_SEC
+          );
+        }
       }
     } catch {
       /* ignore slider updates during active teardown */
@@ -1422,7 +1506,14 @@ export default function StudioBridgePage() {
       const v0 = vols[`${deviceId}:ch0`] ?? 100;
       const v1 = vols[`${deviceId}:ch1`] ?? 100;
       const volume = chCount >= 2 ? (v0 + v1) / 2 : v0;
-      gainNode.gain.value = Math.pow(Math.min(100, Math.max(0, volume)) / 100, 2);
+      const targetLinear = Math.pow(Math.min(100, Math.max(0, volume)) / 100, 2);
+      const t0 = ctx.currentTime;
+      if (kiteModeRef.current === "broadcast") {
+        gainNode.gain.setValueAtTime(0, t0);
+      } else {
+        gainNode.gain.setValueAtTime(0, t0);
+        gainNode.gain.linearRampToValueAtTime(targetLinear, t0 + BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+      }
       sourceNode.connect(gainNode);
       gainNode.connect(ctx.destination);
       interfaceLiveMonitorSourceNodesRef.current.set(deviceId, sourceNode);
@@ -1703,6 +1794,8 @@ export default function StudioBridgePage() {
 
   const remoteIsLive = remoteLevel > 0.07;
   const syncCountInBlocksLive = kiteSyncCountInActive && kiteSyncEnabled;
+  /** UI/control lock during P2P broadcast (Stealth Lock — Phase 2). */
+  const stealthBroadcastUiLock = kiteMode === "broadcast";
 
   useEffect(() => {
     if (!kiteSyncEnabled) {
@@ -1732,6 +1825,10 @@ export default function StudioBridgePage() {
       const endAt = kiteSyncCountInEndAtContextSecRef.current;
       if (Number.isFinite(endAt) && ctx.currentTime >= endAt) {
         setKiteSyncCountInActive(false);
+        if (kiteSyncEnabledRef.current) {
+          broadcastStatusRef.current = "live";
+          setBroadcastStatus("live");
+        }
         if (metronomeGainRef.current) {
           metronomeGainRef.current.gain.value = metronomeVolumeRef.current;
         }
@@ -2398,8 +2495,9 @@ export default function StudioBridgePage() {
         const durationSec = 0.1;
         const stopAt = startAt + durationSec;
         osc.type = "sine";
+        const beatsPerBar = Math.max(1, Math.min(16, Math.round(kiteSetupTimeSignatureTop)));
         const frequency =
-          tick.beatIndex === 0 ? 1760 : tick.beatIndex % 4 === 0 ? 880 : 440;
+          tick.beatIndex === 0 ? 1760 : tick.beatIndex % beatsPerBar === 0 ? 880 : 440;
         osc.frequency.setValueAtTime(frequency, startAt);
         const targetNode = masterGainNode || ctx.destination;
         osc.connect(targetNode);
@@ -2414,7 +2512,7 @@ export default function StudioBridgePage() {
         });
       }
     },
-    []
+    [kiteSetupTimeSignatureTop]
   );
 
   const resetKiteSyncSessionRefs = useCallback(() => {
@@ -3026,7 +3124,7 @@ export default function StudioBridgePage() {
         oscillator.type = "sine";
         oscillator.frequency.setValueAtTime(isDownbeat ? 1500 : 1000, startAt);
         gain.gain.setValueAtTime(0.0001, startAt);
-        gain.gain.exponentialRampToValueAtTime(isDownbeat ? 0.16 : 0.1, startAt + 0.004);
+        gain.gain.exponentialRampToValueAtTime(isDownbeat ? 0.12 : 0.075, startAt + 0.004);
         gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.045);
         oscillator.connect(gain);
         gain.connect(ctx.destination);
@@ -3077,24 +3175,29 @@ export default function StudioBridgePage() {
       }
 
       const masterStream = mixerMasterDestinationRef.current?.stream ?? destinationNode.stream;
-      const tapStream = mixerKiteTapStreamRef.current;
-      const tapOk =
-        tapStream &&
-        tapStream.getAudioTracks().length > 0 &&
-        tapStream !== masterStream &&
-        tapStream !== destinationNode.stream;
-      const fallbackMic = localMicStreamRef.current;
-      const fallbackOk =
-        fallbackMic &&
-        fallbackMic.getAudioTracks().length > 0 &&
-        fallbackMic !== masterStream &&
-        fallbackMic !== destinationNode.stream;
-
-      const inputStream = (tapOk ? tapStream : null) ?? (fallbackOk ? fallbackMic : null);
+      let inputStream: MediaStream | null = null;
+      for (const deviceId of activeDeviceIdsRef.current) {
+        const stream = activeStreamsMapRef.current.get(deviceId) ?? null;
+        const hasLiveAudioTrack = stream
+          ? stream.getAudioTracks().some((track) => track.readyState === "live")
+          : false;
+        if (hasLiveAudioTrack) {
+          inputStream = stream;
+          break;
+        }
+      }
+      if (!inputStream) {
+        const fallbackMic = localMicStreamRef.current;
+        const fallbackOk =
+          fallbackMic &&
+          fallbackMic !== masterStream &&
+          fallbackMic !== destinationNode.stream &&
+          fallbackMic.getAudioTracks().some((track) => track.readyState === "live");
+        inputStream = fallbackOk ? fallbackMic : null;
+      }
       if (!inputStream || inputStream.getAudioTracks().length === 0) {
         throw new Error("Raw microphone stream is unavailable for Kite Sync.");
       }
-      // Reject only the VoIP master bus; the Kite tap is a separate `MediaStream` and is allowed.
       if (inputStream === destinationNode.stream || inputStream === masterStream) {
         throw new Error("Kite Sync input must be raw mic audio, not the master mix.");
       }
@@ -3200,6 +3303,132 @@ export default function StudioBridgePage() {
     }
   }, [replacePeerAudioTrack]);
 
+  useEffect(() => {
+    hostExitKiteBroadcastOnPeerDisconnectRef.current = () => {
+      if (!mountedRef.current) return;
+      restoreLiveVoipTrackAfterKite();
+      cleanupKiteEngine({ stopLocalTracks: false, isFull: false });
+      const rs = remoteStreamRef.current;
+      if (rs) buildRemotePlaybackGraph(rs);
+      setKiteSyncEnabled(false);
+      setBroadcastStatus("idle");
+      setKiteSyncCountInActive(false);
+    };
+  }, [buildRemotePlaybackGraph, cleanupKiteEngine, restoreLiveVoipTrackAfterKite]);
+
+  const startP2PIntervalScheduler = useCallback((timing: KiteIntervalTiming) => {
+    kiteP2PSchedulerWorkerRef.current?.terminate();
+    kiteP2PSchedulerWorkerRef.current = null;
+
+    const worker = createKiteSchedulerWorker((msg) => {
+      if (msg.type === "KITE_INTERVAL_TICK") {
+        console.log("[P2P SCHEDULER TICK] seq", msg.sequenceNumber, "interval", msg.intervalIndex);
+
+        const queued = queuedRemoteKiteIntervalRef.current;
+        if (queued && kiteP2PEngineRef.current) {
+          kiteP2PEngineRef.current.loadInterval({
+            intervalId: queued.intervalId,
+            intervalFrames: queued.intervalFrames,
+            channelCount: queued.channelCount,
+            sampleRate: queued.sampleRate,
+            buffer: queued.payload,
+          });
+          queuedRemoteKiteIntervalRef.current = null;
+          console.log(
+            "[P2P TICK] loaded remote interval",
+            queued.intervalId,
+            "at seq",
+            msg.sequenceNumber
+          );
+        } else if (msg.sequenceNumber > 1) {
+          console.warn(
+            "[P2P TICK] no remote interval queued at seq",
+            msg.sequenceNumber,
+            "— remote audio may be late or dropped"
+          );
+        }
+
+        if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
+          clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
+          queuedRemoteKiteIntervalTimeoutRef.current = null;
+        }
+        const intervalDurationMs = (msg.localIntervalFrames / msg.localSampleRate) * 1000;
+        queuedRemoteKiteIntervalTimeoutRef.current = window.setTimeout(() => {
+          queuedRemoteKiteIntervalTimeoutRef.current = null;
+          if (queuedRemoteKiteIntervalRef.current === null) {
+            console.warn(
+              "[P2P TIMEOUT] remote interval deadline missed before seq",
+              msg.sequenceNumber + 1,
+              "— packet may be lost or network is slow"
+            );
+          }
+        }, intervalDurationMs) as unknown as number;
+      } else if (msg.type === "KITE_SCHEDULER_ERROR") {
+        console.error("[P2P SCHEDULER ERROR]", msg.message);
+      }
+    });
+    worker.start({
+      loopDurationSeconds: timing.loopDurationSeconds,
+      localIntervalFrames: timing.localIntervalFrames,
+      localSampleRate: timing.localSampleRate,
+    });
+    kiteP2PSchedulerWorkerRef.current = worker;
+  }, []);
+
+  useEffect(() => {
+    startP2PIntervalSchedulerRef.current = startP2PIntervalScheduler;
+  }, [startP2PIntervalScheduler]);
+
+  const handleStartBroadcastCountIn = useCallback(() => {
+    if (role !== "host") return;
+    void (async () => {
+      const ctx = studioAudioContextRef.current ?? ensureStudioAudioContext();
+      await ctx.resume();
+      if (ctx.state !== "running") {
+        setAudioContextReady(false);
+        return;
+      }
+      setAudioContextReady(true);
+
+      flushAndSetRemoteGridTarget(ctx.currentTime + 0.01);
+
+      const countInOneBarSec =
+        (60 / metronomeBpm) * Math.max(1, Math.round(kiteSetupTimeSignatureTop));
+      if (!Number.isFinite(countInOneBarSec) || countInOneBarSec <= 0) {
+        return;
+      }
+
+      kiteSyncCountInEndAtContextSecRef.current = ctx.currentTime + countInOneBarSec;
+      if (metronomeGainRef.current) {
+        metronomeGainRef.current.gain.value = 0;
+      }
+      setKiteSyncCountInActive(true);
+
+      setKiteSyncEnabled(true);
+      setBroadcastStatus("syncing");
+      broadcastKiteSyncFromHost({ kiteSyncEnabled: true });
+
+      const timing =
+        latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
+      if (timing) {
+        startP2PIntervalSchedulerRef.current?.(timing);
+      } else {
+        console.warn("[Kite] Host scheduler ignite skipped — no timing ref");
+      }
+    })();
+  }, [
+    broadcastKiteSyncFromHost,
+    ensureStudioAudioContext,
+    flushAndSetRemoteGridTarget,
+    kiteSetupTimeSignatureTop,
+    metronomeBpm,
+    role,
+    setAudioContextReady,
+    setBroadcastStatus,
+    setKiteSyncCountInActive,
+    setKiteSyncEnabled,
+  ]);
+
   const startP2PEngine = useCallback(
     async (timing: KiteIntervalTiming): Promise<void> => {
       const ctx = ensureStudioAudioContext();
@@ -3254,10 +3483,8 @@ export default function StudioBridgePage() {
 
       const intervalId = `${sessionId ?? "p2p"}-p2p-${Date.now()}`;
 
-      // monitorDestination is intentionally omitted: the P2P engine must not
-      // self-monitor its mic input. Local playback is the interface live monitor's
-      // responsibility; routing the mic through an additional monitor here would
-      // duplicate audio for any user with interface monitoring enabled.
+      // Partner-only local monitor: worklet output is playback (remote intervals), not dry mic.
+      // Interface live monitor is ducked separately while kiteModeRef === "broadcast".
       const graph = await buildKiteIntervalGraph({
         audioContext: ctx,
         inputStreams: [{ id: "p2p-mic", stream: inputStream }],
@@ -3265,10 +3492,21 @@ export default function StudioBridgePage() {
         timing,
         intervalId,
         channelCount: 2,
+        monitorDestination: ctx.destination,
+        monitorGain: 1,
         onEvent: (event) => {
           if (event.type !== "INTERVAL_READY") return;
-          if (broadcastStatusRef.current !== "live") {
-            console.log("[P2P INTERVAL_READY] skipped — not live (status:", broadcastStatusRef.current, ")");
+          if (
+            kiteModeRef.current !== "broadcast" ||
+            broadcastStatusRef.current !== "live"
+          ) {
+            console.log(
+              "[P2P INTERVAL_READY] skipped — need broadcast mode and live status (kiteMode:",
+              kiteModeRef.current,
+              "broadcastStatus:",
+              broadcastStatusRef.current,
+              ")"
+            );
             return;
           }
           kiteP2PSequenceRef.current += 1;
@@ -3304,6 +3542,8 @@ export default function StudioBridgePage() {
         },
       });
       kiteP2PEngineRef.current = graph;
+      latestKiteIntervalTimingRef.current = timing;
+      kiteModeRef.current = "broadcast";
 
       const voipStream = localStreamRef.current;
       const liveVoipTrack = voipStream?.getAudioTracks()[0] ?? null;
@@ -3319,66 +3559,8 @@ export default function StudioBridgePage() {
 
       teardownRemotePlaybackGraph();
 
-      const worker = createKiteSchedulerWorker((msg) => {
-        if (msg.type === "KITE_INTERVAL_TICK") {
-          console.log("[P2P SCHEDULER TICK] seq", msg.sequenceNumber, "interval", msg.intervalIndex);
-
-          // Consume any queued remote interval and inject it into the engine for grid-aligned playback.
-          const queued = queuedRemoteKiteIntervalRef.current;
-          if (queued && kiteP2PEngineRef.current) {
-            kiteP2PEngineRef.current.loadInterval({
-              intervalId: queued.intervalId,
-              intervalFrames: queued.intervalFrames,
-              channelCount: queued.channelCount,
-              sampleRate: queued.sampleRate,
-              buffer: queued.payload,
-            });
-            queuedRemoteKiteIntervalRef.current = null;
-            console.log(
-              "[P2P TICK] loaded remote interval",
-              queued.intervalId,
-              "at seq",
-              msg.sequenceNumber
-            );
-          } else if (msg.sequenceNumber > 1) {
-            // Seq 1 is the very first tick; no remote interval is expected yet.
-            console.warn(
-              "[P2P TICK] no remote interval queued at seq",
-              msg.sequenceNumber,
-              "— remote audio may be late or dropped"
-            );
-          }
-
-          // Reset the per-interval deadline timeout.
-          if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
-            clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
-            queuedRemoteKiteIntervalTimeoutRef.current = null;
-          }
-          const intervalDurationMs = (msg.localIntervalFrames / msg.localSampleRate) * 1000;
-          queuedRemoteKiteIntervalTimeoutRef.current = window.setTimeout(() => {
-            queuedRemoteKiteIntervalTimeoutRef.current = null;
-            if (queuedRemoteKiteIntervalRef.current === null) {
-              console.warn(
-                "[P2P TIMEOUT] remote interval deadline missed before seq",
-                msg.sequenceNumber + 1,
-                "— packet may be lost or network is slow"
-              );
-            }
-          }, intervalDurationMs) as unknown as number;
-        } else if (msg.type === "KITE_SCHEDULER_ERROR") {
-          console.error("[P2P SCHEDULER ERROR]", msg.message);
-        }
-      });
-      worker.start({
-        loopDurationSeconds: timing.loopDurationSeconds,
-        localIntervalFrames: timing.localIntervalFrames,
-        localSampleRate: timing.localSampleRate,
-      });
-      kiteP2PSchedulerWorkerRef.current = worker;
-
-      kiteModeRef.current = "broadcast";
       setKiteMode("broadcast");
-      console.log("[P2P Engine] started", { bpm: timing.bpm, bpi: timing.bpi, intervalId });
+      console.log("[P2P Engine] prepared (scheduler not started)", { bpm: timing.bpm, bpi: timing.bpi, intervalId });
     },
     [
       ensureStudioAudioContext,
@@ -3408,8 +3590,11 @@ export default function StudioBridgePage() {
         setIsRecordingArmed(false);
         setRecordingArmedCountdown(null);
         setSoloLooperState("idle");
-        setKiteMode(kiteSetupMode === "sync" ? "sync" : "solo");
+        setKiteMode(kiteSetupMode === "sync" ? "broadcast" : "solo");
         setStudioUiPhase("studio");
+        if (kiteSetupOrigin === "connected") {
+          sendJamSetupLock("release");
+        }
         if (kiteSetupMode === "sync") {
           const timing = deriveKiteTimingMetadata();
           void startP2PEngine(timing);
@@ -3420,6 +3605,8 @@ export default function StudioBridgePage() {
           } catch {
             /* SET_INTERVAL notify peer is best-effort */
           }
+        } else if (kiteSetupMode === "solo") {
+          deriveKiteTimingMetadata();
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Could not start Kite Sync.";
@@ -3431,7 +3618,76 @@ export default function StudioBridgePage() {
         setSoloLooperState("idle");
       }
     })();
-  }, [deriveKiteTimingMetadata, kiteSetupMode, sendSetInterval, startP2PEngine]);
+  }, [
+    deriveKiteTimingMetadata,
+    kiteSetupMode,
+    kiteSetupOrigin,
+    sendJamSetupLock,
+    sendSetInterval,
+    startP2PEngine,
+  ]);
+
+  const BroadcastDashboard = () => {
+    const syncStatusLabel =
+      broadcastStatus === "idle"
+        ? "Ready"
+        : kiteSyncCountInActive
+          ? "Count-in"
+          : broadcastStatus === "live"
+            ? "Live"
+            : "Starting";
+    const phaseLabel =
+      visualBeatState === "downbeat"
+        ? "Downbeat"
+        : visualBeatState === "upbeat"
+          ? "Beat"
+          : "—";
+
+    return (
+      <div className="space-y-3 rounded-xl border border-stone-800/90 bg-stone-950/45 p-4">
+        <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-center">
+          <p className="font-mono text-sm text-stone-100">
+            <span className="text-stone-500">BPM</span>{" "}
+            <span className="font-semibold tabular-nums">{metronomeBpm}</span>
+          </p>
+          <p className="font-mono text-sm text-stone-100">
+            <span className="text-stone-500">Phase</span>{" "}
+            <span className="font-semibold">{phaseLabel}</span>
+          </p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400">{syncStatusLabel}</p>
+        </div>
+        {role === "host" && broadcastStatus === "idle" ? (
+          <button
+            type="button"
+            onClick={handleStartBroadcastCountIn}
+            className="w-full rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/15"
+          >
+            Start Count-In &amp; Jam
+          </button>
+        ) : null}
+        {role !== "host" && broadcastStatus === "idle" ? (
+          <p className="text-center text-xs text-stone-400">Waiting for host…</p>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => {
+            broadcastKiteSyncFromHost({ kiteSyncEnabled: false });
+            setKiteSyncEnabled(false);
+            cleanupKiteEngine({ stopLocalTracks: false, isFull: false });
+            restoreLiveVoipTrackAfterKite();
+            if (remoteStreamRef.current) {
+              buildRemotePlaybackGraph(remoteStreamRef.current);
+            }
+            setBroadcastStatus("idle");
+            setKiteSyncCountInActive(false);
+          }}
+          className="w-full rounded-xl border border-orange-500/40 bg-orange-500/10 px-4 py-3 text-sm font-semibold text-orange-200 transition hover:bg-orange-500/15"
+        >
+          Stop Kite Sync
+        </button>
+      </div>
+    );
+  };
 
   const handleRecordFirstLoop = useCallback(() => {
     void (async () => {
@@ -3494,7 +3750,12 @@ export default function StudioBridgePage() {
           soloLooperStateRef.current = "recording";
           setSoloLooperState("recording");
           hasCapturedFirstKiteLoopRef.current = false;
-          void startSoloLooper(timing);
+          void startSoloLooper(timing).catch((err) => {
+            soloLooperStateRef.current = "idle";
+            setSoloLooperState("idle");
+            hasCapturedFirstKiteLoopRef.current = false;
+            console.error("Solo looper failed to start:", err);
+          });
         }, beatsPerBar * beatSec * 1000);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Could not start recording.";
@@ -3542,6 +3803,7 @@ export default function StudioBridgePage() {
           return;
         }
         setAudioContextReady(true);
+        void rebuildMixerAndReplaceTrack();
 
         const masterDestination = mixerMasterDestinationRef.current;
         const masterTrack = masterDestination?.stream.getAudioTracks()[0] ?? null;
@@ -4584,6 +4846,16 @@ export default function StudioBridgePage() {
                   ctx.currentTime + countInOneBarSec;
                 if (metronomeGainRef.current) metronomeGainRef.current.gain.value = 0;
                 setKiteSyncCountInActive(true);
+
+                void queueMicrotask(() => {
+                  const timing =
+                    latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
+                  if (timing) {
+                    startP2PIntervalSchedulerRef.current?.(timing);
+                  } else {
+                    console.warn("[Kite] Guest scheduler ignite skipped — no timing ref");
+                  }
+                });
               }
             }
             console.log("KITE_SYNC received! Guest Target Start:", guestTargetSec);
@@ -4749,6 +5021,18 @@ export default function StudioBridgePage() {
         if (connectTimeout !== null) {
           clearTimeout(connectTimeout);
           connectTimeout = null;
+        }
+        if (transportIsHost) {
+          const inActiveKiteSession =
+            kiteModeRef.current === "broadcast" || kiteSyncEnabledRef.current;
+          if (inActiveKiteSession) {
+            addLog("Host: peer disconnected — exiting Kite Sync");
+            try {
+              hostExitKiteBroadcastOnPeerDisconnectRef.current();
+            } catch {
+              /* ignore teardown errors while peer is torn down */
+            }
+          }
         }
         if (!leaveSignalReceivedRef.current && statusRef.current !== "connected") {
           addLog("Peer closed");
@@ -5031,6 +5315,10 @@ export default function StudioBridgePage() {
           mediaStream.getTracks().forEach((track) => track.stop());
           throw new Error("Microphone stream has no audio tracks.");
         }
+        const deviceId = audioTracks[0]?.getSettings().deviceId || "default";
+        activeStreamsMapRef.current.set(deviceId, mediaStream);
+        setActiveDeviceIds((prev) => (prev.includes(deviceId) ? prev : [...prev, deviceId]));
+        void rebuildMixerAndReplaceTrack();
 
         micStream = mediaStream;
         if (!mixerMasterDestinationRef.current) {
@@ -5165,18 +5453,20 @@ export default function StudioBridgePage() {
 
   const renderVisualMetronomeControls = () => (
     <>
-      <button
-        type="button"
-        title="Use if you don't have headphones!"
-        onClick={() => setIsVisualMetronomeOnly(prev => !prev)}
-        className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
-          isVisualMetronomeOnly
-            ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/22"
-            : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
-        }`}
-      >
-        {isVisualMetronomeOnly ? "👁️ Visual Mode Active" : "🔊 Audio Metronome"}
-      </button>
+      {!stealthBroadcastUiLock ? (
+        <button
+          type="button"
+          title="Use if you don't have headphones!"
+          onClick={() => setIsVisualMetronomeOnly(prev => !prev)}
+          className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+            isVisualMetronomeOnly
+              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/22"
+              : "border-stone-700 bg-stone-900/60 text-stone-300 hover:bg-stone-800"
+          }`}
+        >
+          {isVisualMetronomeOnly ? "👁️ Visual Mode Active" : "🔊 Audio Metronome"}
+        </button>
+      ) : null}
       <div className="flex items-center gap-2">
         <div
           className={`h-4 w-4 rounded-full transition-all duration-75 ${
@@ -5428,7 +5718,8 @@ export default function StudioBridgePage() {
                     disabled={
                       !localMicStream ||
                       micPermissionDenied ||
-                      (syncCountInBlocksLive && isMicMuted)
+                      (syncCountInBlocksLive && isMicMuted) ||
+                      stealthBroadcastUiLock
                     }
                     onClick={toggleMic}
                     whileTap={{ scale: 0.97 }}
@@ -5457,7 +5748,7 @@ export default function StudioBridgePage() {
                     <motion.button
                       type="button"
                       disabled={
-                        !remoteStream || (syncCountInBlocksLive && isSpeakerMuted)
+                        !remoteStream || (syncCountInBlocksLive && isSpeakerMuted) || stealthBroadcastUiLock
                       }
                       onClick={toggleSpeaker}
                       whileTap={{ scale: 0.97 }}
@@ -5488,7 +5779,7 @@ export default function StudioBridgePage() {
                       step={0.1}
                       value={remotePlaybackVolume}
                       onChange={onRemotePlaybackVolumeChange}
-                      disabled={!remoteStream || syncCountInBlocksLive}
+                      disabled={!remoteStream || syncCountInBlocksLive || stealthBroadcastUiLock}
                       aria-label="Remote playback volume"
                       className="h-2 w-full min-w-0 accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                     />
@@ -5543,8 +5834,7 @@ export default function StudioBridgePage() {
                 type="button"
                 disabled={!canPracticeAlone}
                 onClick={() => {
-                  setKiteMode("solo");
-                  setStudioUiPhase("studio");
+                  handleStartKiteSetup("lobby");
                 }}
                 className={`mt-3 w-full rounded-xl px-4 py-3.5 text-sm font-semibold transition ${
                   canPracticeAlone
@@ -6179,6 +6469,9 @@ export default function StudioBridgePage() {
                 </div>
               ) : status === "connected" ? (
                 <div className="relative">
+                {kiteMode === "broadcast" ? (
+                  <BroadcastDashboard />
+                ) : (
                 <>
                   <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
                     <div className="w-full text-center">
@@ -6273,6 +6566,7 @@ export default function StudioBridgePage() {
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <button
                           type="button"
+                          disabled={stealthBroadcastUiLock}
                           onClick={() => {
                               const next = !kiteSyncEnabled;
                               console.log("Kite Sync Toggle Clicked. New State:", next);
@@ -6315,6 +6609,7 @@ export default function StudioBridgePage() {
                         </button>
                         <button
                           type="button"
+                          disabled={stealthBroadcastUiLock}
                           onClick={() => setIsBufferingEnabled((prev) => !prev)}
                           className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                             isBufferingEnabled
@@ -6327,6 +6622,7 @@ export default function StudioBridgePage() {
                         </button>
                         <button
                           type="button"
+                          disabled={stealthBroadcastUiLock}
                           onClick={() => setEchoSafetyMode((prev) => !prev)}
                           className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                             echoSafetyMode
@@ -6343,6 +6639,7 @@ export default function StudioBridgePage() {
                         {studioAudioContextRef.current?.state !== "running" ? (
                           <button
                             type="button"
+                            disabled={stealthBroadcastUiLock}
                             onClick={() => {
                               void (async () => {
                                 const ctx = studioAudioContextRef.current;
@@ -6359,7 +6656,7 @@ export default function StudioBridgePage() {
                                 setAudioContextReady(ctx.state === "running");
                               })();
                             }}
-                            className="rounded-md border border-orange-500/35 bg-orange-500/12 px-2.5 py-1 text-[11px] font-semibold text-orange-200 transition-colors hover:bg-orange-500/18"
+                            className="rounded-md border border-orange-500/35 bg-orange-500/12 px-2.5 py-1 text-[11px] font-semibold text-orange-200 transition-colors hover:bg-orange-500/18 disabled:cursor-not-allowed disabled:opacity-40"
                           >
                             🔊 Resume Audio
                           </button>
@@ -6367,24 +6664,33 @@ export default function StudioBridgePage() {
                         {renderVisualMetronomeControls()}
                         <label className="flex items-center gap-1 text-[11px] text-stone-300">
                           <span className="uppercase tracking-wider text-stone-500">BPM</span>
-                          <input
-                            type="number"
-                            min={40}
-                            max={240}
-                            value={metronomeBpm}
-                            onChange={(e) => {
-                              const next = Number(e.target.value);
-                              if (!Number.isFinite(next)) return;
-                              setMetronomeBpm((prev) => {
-                                const normalized = Math.max(40, Math.min(240, Math.round(next)));
-                                if (normalized === prev) return prev;
-                                broadcastKiteSyncFromHost({ bpm: normalized });
-                                return normalized;
-                              });
-                            }}
-                            className="w-16 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
-                            inputMode="numeric"
-                          />
+                          {stealthBroadcastUiLock ? (
+                            <span
+                              className="min-w-[4rem] rounded border border-stone-700 bg-stone-900/80 px-2 py-1 text-right text-[11px] text-stone-200 tabular-nums"
+                              aria-label={`Tempo ${metronomeBpm} BPM`}
+                            >
+                              {metronomeBpm}
+                            </span>
+                          ) : (
+                            <input
+                              type="number"
+                              min={40}
+                              max={240}
+                              value={metronomeBpm}
+                              onChange={(e) => {
+                                const next = Number(e.target.value);
+                                if (!Number.isFinite(next)) return;
+                                setMetronomeBpm((prev) => {
+                                  const normalized = Math.max(40, Math.min(240, Math.round(next)));
+                                  if (normalized === prev) return prev;
+                                  broadcastKiteSyncFromHost({ bpm: normalized });
+                                  return normalized;
+                                });
+                              }}
+                              className="w-16 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100"
+                              inputMode="numeric"
+                            />
+                          )}
                         </label>
                         <label className="flex w-full min-w-[12rem] flex-col gap-1.5 text-[11px] text-stone-300 sm:min-w-0 sm:max-w-xs">
                           <span className="uppercase tracking-wider text-stone-500">
@@ -6397,7 +6703,7 @@ export default function StudioBridgePage() {
                             step={0.1}
                             value={metronomeVolume}
                             onChange={onMetronomeVolumeChange}
-                            className="h-2 w-full min-w-0 accent-emerald-400"
+                            className="h-2 w-full min-w-0 accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                             aria-label="Metronome volume"
                           />
                         </label>
@@ -6437,12 +6743,13 @@ export default function StudioBridgePage() {
                             Safety
                             <button
                               type="button"
+                              disabled={stealthBroadcastUiLock}
                               onClick={() => setIsAutoBuffer(!isAutoBuffer)}
                               className={`ml-2 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${
                                 isAutoBuffer
                                   ? "border-emerald-500/50 bg-emerald-500/20 text-emerald-400"
                                   : "border-stone-700 bg-stone-800 text-stone-500"
-                              }`}
+                              } disabled:cursor-not-allowed disabled:opacity-40`}
                             >
                               {isAutoBuffer ? "Auto" : "Manual"}
                             </button>
@@ -6453,13 +6760,14 @@ export default function StudioBridgePage() {
                             max={19200}
                             step={120}
                             value={targetLeadFrames}
+                            disabled={stealthBroadcastUiLock}
                             onChange={(e) => {
                               const next = Number(e.target.value);
                               if (!Number.isFinite(next)) return;
                               setIsAutoBuffer(false);
                               setTargetLeadFrames(Math.max(0, Math.round(next)));
                             }}
-                            className={`w-28 accent-orange-400 ${isAutoBuffer ? "opacity-60" : ""}`}
+                            className={`w-28 accent-orange-400 ${isAutoBuffer ? "opacity-60" : ""} disabled:cursor-not-allowed disabled:opacity-30`}
                           />
                           <input
                             type="number"
@@ -6467,13 +6775,14 @@ export default function StudioBridgePage() {
                             max={19200}
                             step={120}
                             value={targetLeadFrames}
+                            disabled={stealthBroadcastUiLock}
                             onChange={(e) => {
                               const next = Number(e.target.value);
                               if (!Number.isFinite(next)) return;
                               setIsAutoBuffer(false);
                               setTargetLeadFrames(Math.max(0, Math.round(next)));
                             }}
-                            className={`w-20 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100 ${isAutoBuffer ? "opacity-60" : ""}`}
+                            className={`w-20 rounded border border-stone-700 bg-stone-900 px-2 py-1 text-right text-[11px] text-stone-100 ${isAutoBuffer ? "opacity-60" : ""} disabled:cursor-not-allowed disabled:opacity-30`}
                             inputMode="numeric"
                           />
                         </label>
@@ -6484,7 +6793,9 @@ export default function StudioBridgePage() {
                         type="button"
                         onClick={toggleMic}
                         disabled={
-                          !localMicStream || (syncCountInBlocksLive && isMicMuted)
+                          !localMicStream ||
+                          (syncCountInBlocksLive && isMicMuted) ||
+                          stealthBroadcastUiLock
                         }
                         className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
                           isMicMuted
@@ -6501,7 +6812,9 @@ export default function StudioBridgePage() {
                         type="button"
                         onClick={toggleSpeaker}
                         disabled={
-                          !remoteStream || (syncCountInBlocksLive && isSpeakerMuted)
+                          !remoteStream ||
+                          (syncCountInBlocksLive && isSpeakerMuted) ||
+                          stealthBroadcastUiLock
                         }
                         className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
                           isSpeakerMuted
@@ -6521,7 +6834,7 @@ export default function StudioBridgePage() {
                         step={0.1}
                         value={remotePlaybackVolume}
                         onChange={onRemotePlaybackVolumeChange}
-                        disabled={!remoteStream || syncCountInBlocksLive}
+                        disabled={!remoteStream || syncCountInBlocksLive || stealthBroadcastUiLock}
                         aria-label="Remote playback volume"
                         className="h-2 w-24 shrink-0 accent-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                       />
@@ -6615,6 +6928,7 @@ export default function StudioBridgePage() {
                     ) : null}
                   </div>
                 </>
+                )}
                 {kiteSyncCountInActive && kiteSyncEnabled ? (
                   <div
                     className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-xl bg-stone-950/86 px-4 py-6 text-center backdrop-blur-[2px]"
@@ -6724,6 +7038,7 @@ export default function StudioBridgePage() {
           )}
         </motion.div>
       </div>
+      {!stealthBroadcastUiLock ? (
       <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex flex-col items-end gap-2">
         <motion.button
           type="button"
@@ -6929,6 +7244,7 @@ export default function StudioBridgePage() {
           </div>
         ) : null}
       </div>
+      ) : null}
     </div>
   );
 }

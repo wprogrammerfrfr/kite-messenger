@@ -183,7 +183,11 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
         for (let channelIndex = 0; channelIndex < this.channelCount; channelIndex += 1) {
           this.writeRecordingSample(inputChannels, frameIndex, loopFrameIndex, channelIndex);
         }
-        this.fillSilence(outputChannels, frameIndex);
+        for (let channelIndex = 0; channelIndex < outputChannels.length; channelIndex += 1) {
+          const outputChannel = outputChannels[channelIndex];
+          if (!outputChannel) continue;
+          outputChannel[frameIndex] = 0;
+        }
 
         this.recordCursor += 1;
         if (this.recordCursor >= this.intervalFrames) {
