@@ -9,6 +9,20 @@ export type KiteSchedulerWorkerConfig = Pick<
   tickLookaheadMs?: number;
 };
 
+/**
+ * Wake-up tick emitted at a fixed interval from the worker; grid boundaries are computed on the
+ * main thread using {@link AudioContext} time (Phase 5B-3).
+ */
+export type KiteSchedulerWorkerPulse = {
+  type: "KITE_SCHEDULER_PULSE";
+  sequenceNumber: number;
+  postedAtPerformanceMs: number;
+};
+
+/**
+ * Legacy shape no longer emitted by `kite-scheduler-worker.js` after Phase 5B-1; kept for
+ * callers that still narrow on this type during migration.
+ */
 export type KiteSchedulerWorkerTick = {
   type: "KITE_INTERVAL_TICK";
   sequenceNumber: number;
@@ -28,6 +42,7 @@ export type KiteSchedulerWorkerStatus = {
 };
 
 export type KiteSchedulerWorkerMessage =
+  | KiteSchedulerWorkerPulse
   | KiteSchedulerWorkerTick
   | KiteSchedulerWorkerStatus
   | {

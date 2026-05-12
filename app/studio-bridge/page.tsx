@@ -629,7 +629,11 @@ export default function StudioBridgePage() {
   const kiteP2PEngineRef = useRef<KiteIntervalGraph | null>(null);
   const kiteP2PSchedulerWorkerRef = useRef<KiteSchedulerWorkerHandle | null>(null);
   const kiteP2PSequenceRef = useRef(0);
-  const queuedRemoteKiteIntervalRef = useRef<ReassembledLoadInterval | null>(null);
+  /** Next P2P grid boundary in `AudioContext` seconds; advanced from `KITE_SCHEDULER_PULSE` using audio clock. */
+  const p2pGridNextBoundaryContextSecRef = useRef<number | null>(null);
+  /** Monotonic count of audio-grid boundaries processed for this scheduler run (logging / warnings). */
+  const p2pGridIntervalIndexRef = useRef(0);
+  const queuedRemoteKiteIntervalRef = useRef<ReassembledLoadInterval[]>([]);
   const queuedRemoteKiteIntervalTimeoutRef = useRef<number | null>(null);
   const retryRetainedLoopSyncRef = useRef<(() => void) | null>(null);
   const kiteModeRef = useRef<KiteMode>("live");
@@ -2954,7 +2958,9 @@ export default function StudioBridgePage() {
         clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
         queuedRemoteKiteIntervalTimeoutRef.current = null;
       }
-      queuedRemoteKiteIntervalRef.current = null;
+      queuedRemoteKiteIntervalRef.current.length = 0;
+      p2pGridNextBoundaryContextSecRef.current = null;
+      p2pGridIntervalIndexRef.current = 0;
 
       // ── Chunk transfer ───────────────────────────────────────────────────────
       kiteLoopSendAbortControllerRef.current?.abort();
@@ -3320,49 +3326,87 @@ export default function StudioBridgePage() {
     kiteP2PSchedulerWorkerRef.current?.terminate();
     kiteP2PSchedulerWorkerRef.current = null;
 
+    const periodSec = timing.localIntervalFrames / timing.localSampleRate;
+    const ctxInit = studioAudioContextRef.current;
+    if (
+      ctxInit &&
+      ctxInit.state !== "closed" &&
+      Number.isFinite(periodSec) &&
+      periodSec > 0
+    ) {
+      p2pGridNextBoundaryContextSecRef.current = ctxInit.currentTime + periodSec;
+    } else {
+      p2pGridNextBoundaryContextSecRef.current = null;
+      console.warn(
+        "[P2P SCHEDULER] AudioContext missing/closed or invalid loop period; grid will arm on first pulse when context is ready."
+      );
+    }
+    p2pGridIntervalIndexRef.current = 0;
+
     const worker = createKiteSchedulerWorker((msg) => {
-      if (msg.type === "KITE_INTERVAL_TICK") {
-        console.log("[P2P SCHEDULER TICK] seq", msg.sequenceNumber, "interval", msg.intervalIndex);
+      if (msg.type === "KITE_SCHEDULER_PULSE") {
+        const ctxNow = studioAudioContextRef.current;
+        if (!ctxNow || ctxNow.state === "closed") return;
+        if (!Number.isFinite(periodSec) || periodSec <= 0) return;
 
-        const queued = queuedRemoteKiteIntervalRef.current;
-        if (queued && kiteP2PEngineRef.current) {
-          kiteP2PEngineRef.current.loadInterval({
-            intervalId: queued.intervalId,
-            intervalFrames: queued.intervalFrames,
-            channelCount: queued.channelCount,
-            sampleRate: queued.sampleRate,
-            buffer: queued.payload,
-          });
-          queuedRemoteKiteIntervalRef.current = null;
-          console.log(
-            "[P2P TICK] loaded remote interval",
-            queued.intervalId,
-            "at seq",
-            msg.sequenceNumber
-          );
-        } else if (msg.sequenceNumber > 1) {
-          console.warn(
-            "[P2P TICK] no remote interval queued at seq",
-            msg.sequenceNumber,
-            "— remote audio may be late or dropped"
-          );
+        let nextBoundary = p2pGridNextBoundaryContextSecRef.current;
+        if (nextBoundary == null || !Number.isFinite(nextBoundary)) {
+          p2pGridNextBoundaryContextSecRef.current = ctxNow.currentTime + periodSec;
+          return;
         }
 
-        if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
-          clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
-          queuedRemoteKiteIntervalTimeoutRef.current = null;
-        }
-        const intervalDurationMs = (msg.localIntervalFrames / msg.localSampleRate) * 1000;
-        queuedRemoteKiteIntervalTimeoutRef.current = window.setTimeout(() => {
-          queuedRemoteKiteIntervalTimeoutRef.current = null;
-          if (queuedRemoteKiteIntervalRef.current === null) {
+        const eps = ctxNow.sampleRate > 0 ? 2 / ctxNow.sampleRate : 0.00005;
+
+        while (ctxNow.currentTime + eps >= nextBoundary) {
+          p2pGridIntervalIndexRef.current += 1;
+          const tickSeq = p2pGridIntervalIndexRef.current;
+
+          const fifo = queuedRemoteKiteIntervalRef.current;
+          const peeked = fifo.length > 0 ? fifo[0] : null;
+          if (peeked && kiteP2PEngineRef.current) {
+            fifo.shift();
+            kiteP2PEngineRef.current.loadInterval({
+              intervalId: peeked.intervalId,
+              intervalFrames: peeked.intervalFrames,
+              channelCount: peeked.channelCount,
+              sampleRate: peeked.sampleRate,
+              buffer: peeked.payload,
+            });
+            console.log(
+              "[P2P TICK] loaded remote interval",
+              peeked.intervalId,
+              "tickSeq",
+              tickSeq,
+              "fifoRemaining",
+              fifo.length
+            );
+          } else if (tickSeq > 1) {
             console.warn(
-              "[P2P TIMEOUT] remote interval deadline missed before seq",
-              msg.sequenceNumber + 1,
-              "— packet may be lost or network is slow"
+              "[P2P TICK] no remote interval queued at tickSeq",
+              tickSeq,
+              "— remote audio may be late or dropped"
             );
           }
-        }, intervalDurationMs) as unknown as number;
+
+          if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
+            clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
+            queuedRemoteKiteIntervalTimeoutRef.current = null;
+          }
+          const intervalDurationMs = periodSec * 1000;
+          queuedRemoteKiteIntervalTimeoutRef.current = window.setTimeout(() => {
+            queuedRemoteKiteIntervalTimeoutRef.current = null;
+            if (queuedRemoteKiteIntervalRef.current.length === 0) {
+              console.warn(
+                "[P2P TIMEOUT] remote interval deadline missed after tickSeq",
+                tickSeq,
+                "— packet may be lost or network is slow"
+              );
+            }
+          }, intervalDurationMs) as unknown as number;
+
+          nextBoundary += periodSec;
+        }
+        p2pGridNextBoundaryContextSecRef.current = nextBoundary;
       } else if (msg.type === "KITE_SCHEDULER_ERROR") {
         console.error("[P2P SCHEDULER ERROR]", msg.message);
       }
@@ -3475,11 +3519,13 @@ export default function StudioBridgePage() {
       kiteP2PSchedulerWorkerRef.current?.terminate();
       kiteP2PSchedulerWorkerRef.current = null;
       kiteP2PSequenceRef.current = 0;
+      p2pGridNextBoundaryContextSecRef.current = null;
+      p2pGridIntervalIndexRef.current = 0;
       if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
         clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
         queuedRemoteKiteIntervalTimeoutRef.current = null;
       }
-      queuedRemoteKiteIntervalRef.current = null;
+      queuedRemoteKiteIntervalRef.current.length = 0;
 
       const intervalId = `${sessionId ?? "p2p"}-p2p-${Date.now()}`;
 
@@ -4661,7 +4707,7 @@ export default function StudioBridgePage() {
             const interval = result.interval;
             const isLive = interval.intervalId.startsWith("p2p-live-");
             if (isLive) {
-              queuedRemoteKiteIntervalRef.current = interval;
+              queuedRemoteKiteIntervalRef.current.push(interval);
               console.log(
                 "[P2P RX] live interval complete:",
                 interval.intervalId,

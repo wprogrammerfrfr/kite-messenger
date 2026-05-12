@@ -1,6 +1,8 @@
+/** Fixed-interval wake-up only; grid timing is owned by the main thread (AudioContext). */
+const PULSE_INTERVAL_MS = 10;
+
 let config = null;
-let timerId = null;
-let intervalIndex = 0;
+let pulseTimerId = null;
 
 function postStatus(state) {
   self.postMessage({
@@ -19,48 +21,27 @@ function postError(message) {
   });
 }
 
-function clearTimer() {
-  if (timerId !== null) {
-    clearTimeout(timerId);
-    timerId = null;
+function clearPulseTimer() {
+  if (pulseTimerId !== null) {
+    clearInterval(pulseTimerId);
+    pulseTimerId = null;
   }
 }
 
-function scheduleNextTick() {
-  clearTimer();
+function postPulse() {
   if (!config) return;
+  self.postMessage({
+    type: "KITE_SCHEDULER_PULSE",
+    sequenceNumber: config.sequenceNumber,
+    postedAtPerformanceMs: performance.now(),
+  });
+}
 
-  const intervalMs = config.loopDurationSeconds * 1000;
-  const now = performance.now();
-  while (
-    config.workerStartAtPerformanceMs + intervalIndex * intervalMs <
-    now - config.tickLookaheadMs
-  ) {
-    intervalIndex += 1;
-  }
-
-  const scheduledAtPerformanceMs = config.startAtPerformanceMs + intervalIndex * intervalMs;
-  const workerScheduledAtPerformanceMs =
-    config.workerStartAtPerformanceMs + intervalIndex * intervalMs;
-  const delayMs = Math.max(
-    0,
-    workerScheduledAtPerformanceMs - performance.now() - config.tickLookaheadMs
-  );
-  timerId = setTimeout(() => {
-    if (!config) return;
-    self.postMessage({
-      type: "KITE_INTERVAL_TICK",
-      sequenceNumber: config.sequenceNumber,
-      intervalIndex,
-      scheduledAtPerformanceMs,
-      postedAtPerformanceMs: performance.now(),
-      loopDurationSeconds: config.loopDurationSeconds,
-      localIntervalFrames: config.localIntervalFrames,
-      localSampleRate: config.localSampleRate,
-    });
-    intervalIndex += 1;
-    scheduleNextTick();
-  }, delayMs);
+function startPulsing() {
+  clearPulseTimer();
+  if (!config) return;
+  pulseTimerId = setInterval(postPulse, PULSE_INTERVAL_MS);
+  postPulse();
 }
 
 self.onmessage = (event) => {
@@ -68,9 +49,8 @@ self.onmessage = (event) => {
   if (!data || typeof data !== "object") return;
 
   if (data.type === "STOP") {
-    clearTimer();
+    clearPulseTimer();
     config = null;
-    intervalIndex = 0;
     self.postMessage({
       type: "KITE_SCHEDULER_STATUS",
       state: "stopped",
@@ -83,24 +63,16 @@ self.onmessage = (event) => {
   if (data.type === "START") {
     const startAtPerformanceMs =
       typeof data.startAtPerformanceMs === "number" ? data.startAtPerformanceMs : performance.now();
-    const commandPostedAtPerformanceMs =
-      typeof data.commandPostedAtPerformanceMs === "number"
-        ? data.commandPostedAtPerformanceMs
-        : startAtPerformanceMs;
-    const workerStartAtPerformanceMs =
-      performance.now() + (startAtPerformanceMs - commandPostedAtPerformanceMs);
     config = {
       loopDurationSeconds: data.loopDurationSeconds,
       localIntervalFrames: data.localIntervalFrames,
       localSampleRate: data.localSampleRate,
       sequenceNumber: data.sequenceNumber,
       startAtPerformanceMs,
-      workerStartAtPerformanceMs,
       tickLookaheadMs: data.tickLookaheadMs,
     };
-    intervalIndex = 0;
     postStatus("started");
-    scheduleNextTick();
+    startPulsing();
     return;
   }
 
@@ -109,17 +81,8 @@ self.onmessage = (event) => {
       postError("Cannot update Kite scheduler worker before START.");
       return;
     }
-    const patch = { ...data.patch };
-    if (typeof patch.startAtPerformanceMs === "number") {
-      const commandPostedAtPerformanceMs =
-        typeof data.commandPostedAtPerformanceMs === "number"
-          ? data.commandPostedAtPerformanceMs
-          : patch.startAtPerformanceMs;
-      patch.workerStartAtPerformanceMs =
-        performance.now() + (patch.startAtPerformanceMs - commandPostedAtPerformanceMs);
-    }
-    config = { ...config, ...patch };
+    config = { ...config, ...data.patch };
     postStatus("updated");
-    scheduleNextTick();
+    return;
   }
 };
