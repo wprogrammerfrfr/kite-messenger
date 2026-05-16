@@ -148,7 +148,7 @@ export function Auth() {
                 </span>
               ) : (
                 <Image
-                  src="/kite-mobile-icon.png"
+                  src="/kite-mobile-icon.svg"
                   alt=""
                   width={40}
                   height={40}

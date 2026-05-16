@@ -87,7 +87,7 @@ self.addEventListener("push", (event: PushEvent) => {
     actions?: ReadonlyArray<{ action: string; title: string }>;
   } = {
     body,
-    icon: "/kite-mobile-icon.png",
+    icon: "/kite-mobile-icon.svg",
     badge: "/icons/icon-192x192.png",
     tag: "kite-message",
     renotify: true,

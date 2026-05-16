@@ -1,0 +1,460 @@
+/**
+ * Kite Studio welcome landing — scoped styles only.
+ * Every rule is prefixed under .kite-studio-welcome to prevent bleed into /chat or /studio.
+ * Import from app/page.tsx only.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=DM+Mono:wght@300;400;500&display=swap");
+
+/* ── Design tokens (inherit to descendants; inline styles use var(--amber), etc.) ── */
+.kite-studio-welcome {
+  --bg: #000000;
+  --surface: #0b0f14;
+  --surface2: #060809;
+  --amber: #ff4500;
+  --amber-dim: #cc3700;
+  --teal: #1a9e8f;
+  --teal-dim: #136e63;
+  --text: #e6edf3;
+  --muted: rgba(230, 237, 243, 0.55);
+  --border: rgba(230, 237, 243, 0.08);
+  --text-primary: #e6edf3;
+
+  box-sizing: border-box;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Sora", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  position: relative;
+}
+
+.kite-studio-welcome *,
+.kite-studio-welcome *::before,
+.kite-studio-welcome *::after {
+  box-sizing: border-box;
+}
+
+.kite-studio-welcome ::-webkit-scrollbar {
+  width: 4px;
+}
+
+.kite-studio-welcome ::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+.kite-studio-welcome ::-webkit-scrollbar-thumb {
+  background: rgba(255, 69, 0, 0.3);
+  border-radius: 99px;
+}
+
+/* Below-fold sections: skip layout/paint until near viewport */
+.kite-studio-welcome .welcome-section-deferred {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 600px;
+}
+
+/* ── Range slider (marketing mock mixer only) ── */
+.kite-studio-welcome input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 28px;
+  height: 120px;
+}
+
+.kite-studio-welcome input[type="range"]::-webkit-slider-runnable-track {
+  background: rgba(230, 237, 243, 0.1);
+  border-radius: 99px;
+  width: 4px;
+}
+
+.kite-studio-welcome input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--amber);
+  margin-left: -7px;
+  box-shadow: 0 0 10px rgba(255, 69, 0, 0.5);
+  transition: box-shadow 0.2s;
+}
+
+.kite-studio-welcome input[type="range"]:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 20px rgba(255, 69, 0, 0.85);
+}
+
+/* ── VU meter (compositor-friendly scaleY, not height) ── */
+.kite-studio-welcome .vu-meter-bar,
+.kite-studio-welcome [class^="vu-bar-"],
+.kite-studio-welcome [class^="vu-metro-"] {
+  height: 100%;
+  transform-origin: bottom center;
+}
+
+@keyframes ks-vu-bounce-1 {
+  0%,
+  100% {
+    transform: scaleY(0.2);
+  }
+  20% {
+    transform: scaleY(0.75);
+  }
+  40% {
+    transform: scaleY(0.45);
+  }
+  60% {
+    transform: scaleY(0.88);
+  }
+  80% {
+    transform: scaleY(0.32);
+  }
+}
+
+@keyframes ks-vu-bounce-2 {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  15% {
+    transform: scaleY(0.6);
+  }
+  35% {
+    transform: scaleY(0.95);
+  }
+  55% {
+    transform: scaleY(0.4);
+  }
+  75% {
+    transform: scaleY(0.7);
+  }
+}
+
+@keyframes ks-vu-bounce-3 {
+  0%,
+  100% {
+    transform: scaleY(0.15);
+  }
+  25% {
+    transform: scaleY(0.5);
+  }
+  50% {
+    transform: scaleY(0.8);
+  }
+  75% {
+    transform: scaleY(0.35);
+  }
+}
+
+.kite-studio-welcome .vu-bar-1 {
+  animation: ks-vu-bounce-1 1.1s ease-in-out infinite;
+}
+
+.kite-studio-welcome .vu-bar-2 {
+  animation: ks-vu-bounce-2 0.9s ease-in-out infinite;
+}
+
+.kite-studio-welcome .vu-bar-3 {
+  animation: ks-vu-bounce-3 1.3s ease-in-out infinite;
+}
+
+.kite-studio-welcome .vu-bar-4 {
+  animation: ks-vu-bounce-1 0.8s ease-in-out infinite 0.2s;
+}
+
+.kite-studio-welcome .vu-bar-5 {
+  animation: ks-vu-bounce-2 1.05s ease-in-out infinite 0.4s;
+}
+
+.kite-studio-welcome .vu-bar-3-1 {
+  animation: ks-vu-bounce-3 1.2s ease-in-out infinite;
+}
+
+.kite-studio-welcome .vu-bar-3-2 {
+  animation: ks-vu-bounce-1 0.85s ease-in-out infinite 0.15s;
+}
+
+.kite-studio-welcome .vu-bar-3-3 {
+  animation: ks-vu-bounce-2 1s ease-in-out infinite 0.3s;
+}
+
+.kite-studio-welcome .vu-bar-3-4 {
+  animation: ks-vu-bounce-3 0.95s ease-in-out infinite 0.1s;
+}
+
+.kite-studio-welcome .vu-bar-3-5 {
+  animation: ks-vu-bounce-1 1.15s ease-in-out infinite 0.25s;
+}
+
+.kite-studio-welcome .vu-metro-1 {
+  animation: ks-vu-bounce-1 0.6s ease-in-out infinite;
+}
+
+.kite-studio-welcome .vu-metro-2 {
+  animation: ks-vu-bounce-2 0.6s ease-in-out infinite 0.1s;
+}
+
+.kite-studio-welcome .vu-metro-3 {
+  animation: ks-vu-bounce-3 0.6s ease-in-out infinite 0.2s;
+}
+
+.kite-studio-welcome .vu-metro-4 {
+  animation: ks-vu-bounce-1 0.6s ease-in-out infinite 0.05s;
+}
+
+.kite-studio-welcome .vu-metro-5 {
+  animation: ks-vu-bounce-2 0.6s ease-in-out infinite 0.15s;
+}
+
+/* ── Record pulse ── */
+@keyframes ks-rec-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.75);
+  }
+  50% {
+    box-shadow: 0 0 0 16px rgba(239, 68, 68, 0);
+  }
+}
+
+.kite-studio-welcome .rec-pulse {
+  animation: ks-rec-pulse 1s ease-in-out infinite;
+}
+
+/* ── Teal glow (hero) — opacity only ── */
+@keyframes ks-glow-breathe {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.kite-studio-welcome .teal-glow {
+  animation: ks-glow-breathe 3.5s ease-in-out infinite;
+}
+
+/* ── Nav: solid background (no backdrop-filter on scroll) ── */
+.kite-studio-welcome .nav-blur {
+  background: rgba(0, 0, 0, 0.92);
+}
+
+/* ── Feature card hover ── */
+.kite-studio-welcome .feature-card {
+  transition:
+    border-color 0.25s,
+    transform 0.25s,
+    box-shadow 0.25s;
+}
+
+.kite-studio-welcome .feature-card:hover {
+  border-color: rgba(255, 69, 0, 0.35) !important;
+  transform: translateY(-4px);
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.6);
+}
+
+/* ── Feature grid ── */
+.kite-studio-welcome .feature-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
+@media (max-width: 960px) {
+  .kite-studio-welcome .feature-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .kite-studio-welcome .feature-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── CTA shine sweep (hero only; animates on hover-capable devices) ── */
+@keyframes ks-btn-shine {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 200%;
+  }
+}
+
+.kite-studio-welcome .btn-shine::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.15),
+    transparent
+  );
+}
+
+@media (hover: hover) {
+  .kite-studio-welcome .btn-shine::after {
+    animation: ks-btn-shine 2.8s ease-in-out infinite;
+  }
+}
+
+/* ── Latency blink (slower) ── */
+@keyframes ks-latency-blink {
+  0%,
+  93%,
+  100% {
+    opacity: 1;
+  }
+  95% {
+    opacity: 0.25;
+  }
+}
+
+.kite-studio-welcome .latency-blink {
+  animation: ks-latency-blink 4s ease-in-out infinite;
+}
+
+/* ── Kite Chat header — static teal (no infinite shimmer) ── */
+.kite-studio-welcome .lock-shimmer {
+  color: var(--teal);
+  -webkit-text-fill-color: var(--teal);
+}
+
+/* ── Timer blink cursor ── */
+@keyframes ks-cursor-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.kite-studio-welcome .timer-cursor {
+  animation: ks-cursor-blink 1s step-end infinite;
+}
+
+/* Sammy note easter-egg FAB */
+.kite-studio-welcome .welcome-sammy-fab-root {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.kite-studio-welcome .welcome-sammy-fab,
+.kite-studio-welcome .welcome-sammy-popover {
+  pointer-events: auto;
+}
+
+.kite-studio-welcome .welcome-sammy-fab {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 69, 0, 0.45);
+  background: rgba(255, 69, 0, 0.92);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 8px 32px rgba(255, 69, 0, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.kite-studio-welcome .welcome-sammy-fab:hover {
+  transform: scale(1.06);
+  box-shadow: 0 10px 40px rgba(255, 69, 0, 0.5);
+}
+
+.kite-studio-welcome .welcome-sammy-popover {
+  position: relative;
+  width: min(340px, calc(100vw - 48px));
+  max-height: min(420px, calc(100vh - 120px));
+  overflow-y: auto;
+  padding: 24px 22px 20px;
+  border-radius: 16px;
+  border: 1px solid var(--amber);
+  background: rgba(11, 15, 20, 0.97);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.kite-studio-welcome .welcome-sammy-popover-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(230, 237, 243, 0.06);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.kite-studio-welcome .welcome-sammy-popover-close:hover {
+  color: var(--text);
+  background: rgba(230, 237, 243, 0.1);
+}
+
+.kite-studio-welcome .welcome-sammy-popover-title {
+  margin: 0 28px 14px 0;
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: 0.02em;
+}
+
+.kite-studio-welcome .welcome-sammy-popover-list {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  font-size: 14px;
+  color: rgba(230, 237, 243, 0.88);
+}
+
+.kite-studio-welcome .welcome-sammy-popover-list li {
+  margin-bottom: 8px;
+}
+
+.kite-studio-welcome .welcome-sammy-popover-list li:last-child {
+  margin-bottom: 0;
+}
+
+.kite-studio-welcome .welcome-sammy-popover-signoff {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-studio-welcome *,
+  .kite-studio-welcome *::before,
+  .kite-studio-welcome *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

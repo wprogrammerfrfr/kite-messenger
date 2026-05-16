@@ -6,7 +6,7 @@ import { ResilienceProvider } from "@/components/resilience-provider";
 import { InstallPromptProvider } from "@/components/install-prompt-provider";
 import GlobalNavShell from "@/components/GlobalNavShell";
 
-const siteTitle = "Kite | Secure Messaging";
+const siteTitle = "Kite";
 const siteDescription =
   "End-to-end encrypted messaging for musicians, therapists, and those who value privacy. Built by Sammy.";
 
@@ -20,9 +20,9 @@ export const metadata: Metadata = {
   },
   description: siteDescription,
   icons: {
-    icon: "/kite-mobile-icon.png",
-    shortcut: "/kite-mobile-icon.png",
-    apple: "/kite-mobile-icon.png",
+    icon: "/kite-mobile-icon.svg",
+    shortcut: "/kite-mobile-icon.svg",
+    apple: "/kite-mobile-icon.svg",
   },
   manifest: "/manifest.json",
   appleWebApp: {
@@ -36,13 +36,13 @@ export const metadata: Metadata = {
     siteName: "Kite",
     type: "website",
     locale: "en_US",
-    images: ["/kite-mobile-icon.png"],
+    images: ["/kite-mobile-icon.svg"],
   },
   twitter: {
     card: "summary_large_image",
     title: siteTitle,
     description: siteDescription,
-    images: ["/kite-mobile-icon.png"],
+    images: ["/kite-mobile-icon.svg"],
   },
 };
 

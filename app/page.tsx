@@ -1,3 +1,4 @@
+import "@/components/kite-studio/welcome-scoped.css";
 import type { Metadata } from "next";
 import WelcomePage from "@/components/WelcomePage";
 
@@ -14,7 +15,7 @@ export const metadata: Metadata = {
     type: "website",
     images: [
       {
-        url: "/kite-mobile-icon.png",
+        url: "/kite-mobile-icon.svg",
         width: 512,
         height: 512,
         alt: "Kite",
@@ -25,7 +26,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Kite | Welcome",
     description: homeDescription,
-    images: ["/kite-mobile-icon.png"],
+    images: ["/kite-mobile-icon.svg"],
   },
 };
 

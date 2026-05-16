@@ -1747,7 +1747,7 @@ export default function Home() {
                     const lang = languageRef.current;
                     new Notification(t(lang, "notificationNewMessageTitle"), {
                       body: t(lang, "notificationNewMessageBody"),
-                      icon: "/kite-mobile-icon.png",
+                      icon: "/kite-mobile-icon.svg",
                     });
                   }
                 } catch {
