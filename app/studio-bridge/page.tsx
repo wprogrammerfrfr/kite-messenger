@@ -499,6 +499,7 @@ export default function StudioBridgePage() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTimeMs, setRecordingTimeMs] = useState(0);
   const [recordedBlobUrl, setRecordedBlobUrl] = useState<string | null>(null);
+  const [recordedDownloadExt, setRecordedDownloadExt] = useState<"webm" | "m4a" | "aac" | "bin">("webm");
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [collaboratorLeft, setCollaboratorLeft] = useState(false);
   const [remoteParticipantName, setRemoteParticipantName] = useState<string | null>(null);
@@ -650,8 +651,11 @@ export default function StudioBridgePage() {
   const soloLooperStateRef = useRef<SoloLooperState>("idle");
   const loopProgressRafRef = useRef<number | null>(null);
   const isRecordingArmedRef = useRef(false);
-  const soloCountInIntervalRef = useRef<number | null>(null);
-  const soloCountInTimeoutRef = useRef<number | null>(null);
+  /** Solo looper pre-roll: AudioWorklet pump (~50ms); recording starts at soloCountInEndAtContextSecRef. */
+  const soloCountInPumpRef = useRef<MetronomePumpHandle | null>(null);
+  const soloCountInPumpGenerationRef = useRef(0);
+  const soloCountInEndAtContextSecRef = useRef(0);
+  const soloCountInBeatSecRef = useRef(0);
   const scheduledMetronomeOscillatorsRef = useRef<Set<OscillatorNode>>(new Set());
   const scheduledMetronomeTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const kiteLoopChunksRef = useRef<ReturnType<typeof createLoadIntervalChunks> | null>(null);
@@ -2800,6 +2804,7 @@ export default function StudioBridgePage() {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
+    setRecordedDownloadExt("webm");
   }, []);
 
   const startRecordingTimer = useCallback((recorder: TrackRecorder) => {
@@ -2841,10 +2846,13 @@ export default function StudioBridgePage() {
     clearRecordingInterval();
     localRecorderRef.current = null;
     try {
+      const ext = recorder.getDownloadExtension();
       const blob = await recorder.stop();
-      clearRecordedBlobUrl();
-      const url = URL.createObjectURL(blob);
-      setRecordedBlobUrl(url);
+      setRecordedBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      setRecordedDownloadExt(ext);
     } catch (err) {
       console.error("Failed to stop local recording:", err);
     } finally {
@@ -2917,6 +2925,14 @@ export default function StudioBridgePage() {
     [clearJamSetupLockTimer, localJamSetupOwnerId, localJamSetupOwnerName, scheduleJamSetupLockExpiry]
   );
 
+  const teardownSoloCountInPump = useCallback(() => {
+    soloCountInPumpGenerationRef.current += 1;
+    soloCountInPumpRef.current?.teardown();
+    soloCountInPumpRef.current = null;
+    soloCountInEndAtContextSecRef.current = 0;
+    soloCountInBeatSecRef.current = 0;
+  }, []);
+
   const cleanupKiteEngine = useCallback(
     ({ stopLocalTracks = false, isFull = false }: { stopLocalTracks?: boolean; isFull?: boolean } = {}) => {
       // ── Solo engine ──────────────────────────────────────────────────────────
@@ -2926,14 +2942,7 @@ export default function StudioBridgePage() {
         cancelAnimationFrame(loopProgressRafRef.current);
         loopProgressRafRef.current = null;
       }
-      if (soloCountInIntervalRef.current !== null) {
-        clearInterval(soloCountInIntervalRef.current);
-        soloCountInIntervalRef.current = null;
-      }
-      if (soloCountInTimeoutRef.current !== null) {
-        clearTimeout(soloCountInTimeoutRef.current);
-        soloCountInTimeoutRef.current = null;
-      }
+      teardownSoloCountInPump();
       kiteIntervalTimingRef.current = null;
       setSoloLooperState("idle");
       setLoopProgress(0);
@@ -3009,7 +3018,7 @@ export default function StudioBridgePage() {
         setLocalMicStream(null);
       }
     },
-    [stopMediaStreamTracks, teardownAllInterfaceLiveMonitorGraphs]
+    [stopMediaStreamTracks, teardownAllInterfaceLiveMonitorGraphs, teardownSoloCountInPump]
   );
 
   const handleStartKiteSetup = useCallback(
@@ -3770,15 +3779,6 @@ export default function StudioBridgePage() {
         cleanupKiteEngine({ stopLocalTracks: false });
         setKiteMode("solo");
 
-        if (soloCountInIntervalRef.current !== null) {
-          clearInterval(soloCountInIntervalRef.current);
-          soloCountInIntervalRef.current = null;
-        }
-        if (soloCountInTimeoutRef.current !== null) {
-          clearTimeout(soloCountInTimeoutRef.current);
-          soloCountInTimeoutRef.current = null;
-        }
-
         hasCapturedFirstKiteLoopRef.current = false;
         // intentional re-record clear
         retainedKiteLoopBufferRef.current = null;
@@ -3798,18 +3798,32 @@ export default function StudioBridgePage() {
           playSoloMetronomeClick(beatIndex === 0, startAt + beatIndex * beatSec, true);
         }
 
-        let remainingBeats = beatsPerBar;
-        soloCountInIntervalRef.current = window.setInterval(() => {
-          remainingBeats -= 1;
-          setRecordingArmedCountdown(remainingBeats > 0 ? remainingBeats : null);
-        }, beatSec * 1000);
+        soloCountInPumpGenerationRef.current += 1;
+        const gen = soloCountInPumpGenerationRef.current;
+        soloCountInEndAtContextSecRef.current = startAt + beatsPerBar * beatSec;
+        soloCountInBeatSecRef.current = beatSec;
 
-        soloCountInTimeoutRef.current = window.setTimeout(() => {
-          if (soloCountInIntervalRef.current !== null) {
-            clearInterval(soloCountInIntervalRef.current);
-            soloCountInIntervalRef.current = null;
-          }
-          soloCountInTimeoutRef.current = null;
+        const onSoloCountInPump = (): void => {
+          if (!mountedRef.current) return;
+          const ctxNow = studioAudioContextRef.current;
+          if (!ctxNow || ctxNow.state !== "running") return;
+
+          const endAt = soloCountInEndAtContextSecRef.current;
+          if (!Number.isFinite(endAt) || endAt <= 0) return;
+
+          const beatSecNow = soloCountInBeatSecRef.current;
+          if (!Number.isFinite(beatSecNow) || beatSecNow <= 0) return;
+
+          const beatsLeft = Math.ceil(Math.max(0, endAt - ctxNow.currentTime) / beatSecNow);
+          setRecordingArmedCountdown(beatsLeft > 0 ? beatsLeft : null);
+
+          const eps = ctxNow.sampleRate > 0 ? 1 / ctxNow.sampleRate : 0.001;
+          if (ctxNow.currentTime + eps < endAt) return;
+
+          soloCountInEndAtContextSecRef.current = 0;
+          soloCountInPumpRef.current?.teardown();
+          soloCountInPumpRef.current = null;
+
           isRecordingArmedRef.current = false;
           setIsRecordingArmed(false);
           setRecordingArmedCountdown(null);
@@ -3822,10 +3836,41 @@ export default function StudioBridgePage() {
             hasCapturedFirstKiteLoopRef.current = false;
             console.error("Solo looper failed to start:", err);
           });
-        }, beatsPerBar * beatSec * 1000);
+        };
+
+        try {
+          if (ctx.state !== "running") {
+            throw new Error("AudioContext is not running.");
+          }
+          const pump = await createMetronomePump(ctx, { pumpIntervalSec: 0.05 });
+          if (gen !== soloCountInPumpGenerationRef.current) {
+            pump.teardown();
+            isRecordingArmedRef.current = false;
+            setIsRecordingArmed(false);
+            setRecordingArmedCountdown(null);
+            return;
+          }
+          if (studioAudioContextRef.current?.state !== "running") {
+            pump.teardown();
+            isRecordingArmedRef.current = false;
+            setIsRecordingArmed(false);
+            setRecordingArmedCountdown(null);
+            return;
+          }
+          soloCountInPumpRef.current = pump;
+          pump.start(onSoloCountInPump);
+        } catch (pumpErr) {
+          console.error("[Solo count-in] AudioWorklet pump failed:", pumpErr);
+          teardownSoloCountInPump();
+          isRecordingArmedRef.current = false;
+          setIsRecordingArmed(false);
+          setRecordingArmedCountdown(null);
+          throw pumpErr;
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Could not start recording.";
         setKiteSetupError(message);
+        teardownSoloCountInPump();
         isRecordingArmedRef.current = false;
         setIsRecordingArmed(false);
         setRecordingArmedCountdown(null);
@@ -3837,6 +3882,7 @@ export default function StudioBridgePage() {
     ensureStudioAudioContext,
     playSoloMetronomeClick,
     startSoloLooper,
+    teardownSoloCountInPump,
   ]);
 
   const handleStopAndResetSoloLooper = useCallback(() => {
@@ -6981,7 +7027,7 @@ export default function StudioBridgePage() {
                       <div className="mt-3 flex items-center gap-2">
                         <a
                           href={recordedBlobUrl}
-                          download="my-track.webm"
+                          download={`my-track.${recordedDownloadExt}`}
                           className="flex-1 rounded-xl border border-emerald-500/35 bg-gradient-to-r from-emerald-500/15 to-stone-700/20 px-3 py-2 text-center text-sm font-semibold text-emerald-200 transition hover:from-emerald-500/25 hover:to-stone-700/30"
                         >
                           Download Track
