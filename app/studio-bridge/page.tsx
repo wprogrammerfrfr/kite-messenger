@@ -23,7 +23,6 @@ import {
 } from "@/lib/kite-interval-math";
 import { buildKiteIntervalGraph, type KiteIntervalGraph } from "@/lib/kite-interval-graph";
 import { buildSoloLooperEngine, type SoloLooperEngine } from "@/lib/solo-looper-engine";
-import { createKiteSchedulerWorker, type KiteSchedulerWorkerHandle } from "@/lib/kite-scheduler-worker";
 import {
   createLoadIntervalChunks,
   decodeLoadIntervalChunk,
@@ -627,9 +626,11 @@ export default function StudioBridgePage() {
   const startP2PIntervalSchedulerRef = useRef<((timing: KiteIntervalTiming) => void) | null>(null);
   const soloLooperEngineRef = useRef<SoloLooperEngine | null>(null);
   const kiteP2PEngineRef = useRef<KiteIntervalGraph | null>(null);
-  const kiteP2PSchedulerWorkerRef = useRef<KiteSchedulerWorkerHandle | null>(null);
+  const kiteP2PGridPumpRef = useRef<MetronomePumpHandle | null>(null);
+  /** Bumps when P2P grid pump is superseded or torn down so stale async loads cannot attach. */
+  const p2pGridPumpGenerationRef = useRef(0);
   const kiteP2PSequenceRef = useRef(0);
-  /** Next P2P grid boundary in `AudioContext` seconds; advanced from `KITE_SCHEDULER_PULSE` using audio clock. */
+  /** Next P2P grid boundary in `AudioContext` seconds; advanced from the grid AudioWorklet pump using audio clock. */
   const p2pGridNextBoundaryContextSecRef = useRef<number | null>(null);
   /** Monotonic count of audio-grid boundaries processed for this scheduler run (logging / warnings). */
   const p2pGridIntervalIndexRef = useRef(0);
@@ -700,7 +701,10 @@ export default function StudioBridgePage() {
   const lastAppliedGuestStartSecRef = useRef<number | null>(null);
   const lastSyncApplyAtMsRef = useRef<number | null>(null);
   const kiteSyncCountInEndAtContextSecRef = useRef(0);
-  const kiteSyncCountInRafIdRef = useRef<number | null>(null);
+  /** Mirrors `kiteSyncCountInActive` for metronome pump callbacks (avoids stale closures). */
+  const kiteSyncCountInActiveRef = useRef(false);
+  /** Prevents duplicate count-in completion when `pumpScheduler` runs multiple times past `endAt`. */
+  const kiteSyncCountInCompletionHandledRef = useRef(false);
   const kiteSyncLossPauseActiveRef = useRef(false);
   const kiteSyncLossRecoverySinceMsRef = useRef<number | null>(null);
   const applyKiteSyncLossGuardRef = useRef<(packetLossPercent: number | null) => void>(
@@ -736,6 +740,16 @@ export default function StudioBridgePage() {
   useEffect(() => {
     kiteSyncEnabledRef.current = kiteSyncEnabled;
   }, [kiteSyncEnabled]);
+
+  useEffect(() => {
+    kiteSyncCountInActiveRef.current = kiteSyncCountInActive;
+  }, [kiteSyncCountInActive]);
+
+  useEffect(() => {
+    if (kiteSyncCountInActive) {
+      kiteSyncCountInCompletionHandledRef.current = false;
+    }
+  }, [kiteSyncCountInActive]);
 
   useEffect(() => {
     isRecordingArmedRef.current = isRecordingArmed;
@@ -1803,53 +1817,10 @@ export default function StudioBridgePage() {
 
   useEffect(() => {
     if (!kiteSyncEnabled) {
+      kiteSyncCountInCompletionHandledRef.current = false;
       setKiteSyncCountInActive(false);
     }
   }, [kiteSyncEnabled]);
-
-  useEffect(() => {
-    if (!kiteSyncCountInActive || !kiteSyncEnabled) {
-      if (kiteSyncCountInRafIdRef.current !== null) {
-        cancelAnimationFrame(kiteSyncCountInRafIdRef.current);
-        kiteSyncCountInRafIdRef.current = null;
-      }
-      return;
-    }
-
-    const tick = () => {
-      if (!mountedRef.current) {
-        kiteSyncCountInRafIdRef.current = null;
-        return;
-      }
-      const ctx = studioAudioContextRef.current;
-      if (!ctx || ctx.state === "closed") {
-        kiteSyncCountInRafIdRef.current = requestAnimationFrame(tick);
-        return;
-      }
-      const endAt = kiteSyncCountInEndAtContextSecRef.current;
-      if (Number.isFinite(endAt) && ctx.currentTime >= endAt) {
-        setKiteSyncCountInActive(false);
-        if (kiteSyncEnabledRef.current) {
-          broadcastStatusRef.current = "live";
-          setBroadcastStatus("live");
-        }
-        if (metronomeGainRef.current) {
-          metronomeGainRef.current.gain.value = metronomeVolumeRef.current;
-        }
-        kiteSyncCountInRafIdRef.current = null;
-        return;
-      }
-      kiteSyncCountInRafIdRef.current = requestAnimationFrame(tick);
-    };
-
-    kiteSyncCountInRafIdRef.current = requestAnimationFrame(tick);
-    return () => {
-      if (kiteSyncCountInRafIdRef.current !== null) {
-        cancelAnimationFrame(kiteSyncCountInRafIdRef.current);
-        kiteSyncCountInRafIdRef.current = null;
-      }
-    };
-  }, [kiteSyncCountInActive, kiteSyncEnabled]);
 
   useEffect(() => {
     speakerMutedRef.current = isSpeakerMuted;
@@ -2600,10 +2571,8 @@ export default function StudioBridgePage() {
   const teardownKiteSyncTransport = useCallback(() => {
     stopKiteMetronome();
     setBroadcastStatus("idle");
-    if (kiteSyncCountInRafIdRef.current !== null) {
-      cancelAnimationFrame(kiteSyncCountInRafIdRef.current);
-      kiteSyncCountInRafIdRef.current = null;
-    }
+    kiteSyncCountInCompletionHandledRef.current = false;
+    kiteSyncCountInActiveRef.current = false;
     kiteSyncCountInEndAtContextSecRef.current = 0;
     kiteSyncLossPauseActiveRef.current = false;
     kiteSyncLossRecoverySinceMsRef.current = null;
@@ -2644,6 +2613,10 @@ export default function StudioBridgePage() {
       ensureMetronomeGainNode(ctx);
     }
     if (!metronomeGainRef.current) return undefined;
+    if (ctx.state !== "running") {
+      stopKiteMetronome();
+      return undefined;
+    }
     if (metronomePumpRef.current !== null && metronomeSchedulerRef.current) return undefined;
 
     const localStartAtSec = ctx.currentTime + 0.01;
@@ -2746,16 +2719,37 @@ export default function StudioBridgePage() {
       for (const tick of ticks) {
         playMetronomeClick(activeCtx, tick.atSec, tick, metronomeGainRef.current, isCountIn);
       }
+
+      if (
+        kiteSyncCountInActiveRef.current &&
+        !kiteSyncCountInCompletionHandledRef.current
+      ) {
+        const endAt = kiteSyncCountInEndAtContextSecRef.current;
+        if (Number.isFinite(endAt) && endAt > 0 && activeCtx.currentTime >= endAt) {
+          kiteSyncCountInCompletionHandledRef.current = true;
+          kiteSyncCountInActiveRef.current = false;
+          setKiteSyncCountInActive(false);
+          if (kiteSyncEnabledRef.current) {
+            broadcastStatusRef.current = "live";
+            setBroadcastStatus("live");
+          }
+          if (metronomeGainRef.current) {
+            metronomeGainRef.current.gain.value = metronomeVolumeRef.current;
+          }
+          kiteSyncCountInEndAtContextSecRef.current = 0;
+        }
+      }
     };
 
     pumpScheduler();
 
     void (async () => {
       try {
+        if (cancelled || ctx.state !== "running") return;
         const pump = await createMetronomePump(ctx, {
           pumpIntervalSec: scheduler.getLookaheadMs() / 1000,
         });
-        if (cancelled) {
+        if (cancelled || studioAudioContextRef.current?.state !== "running") {
           pump.teardown();
           return;
         }
@@ -2951,8 +2945,9 @@ export default function StudioBridgePage() {
       // ── P2P engine ───────────────────────────────────────────────────────────
       kiteP2PEngineRef.current?.teardown();
       kiteP2PEngineRef.current = null;
-      kiteP2PSchedulerWorkerRef.current?.terminate();
-      kiteP2PSchedulerWorkerRef.current = null;
+      p2pGridPumpGenerationRef.current += 1;
+      kiteP2PGridPumpRef.current?.teardown();
+      kiteP2PGridPumpRef.current = null;
       kiteP2PSequenceRef.current = 0;
       if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
         clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
@@ -3322,102 +3317,124 @@ export default function StudioBridgePage() {
     };
   }, [buildRemotePlaybackGraph, cleanupKiteEngine, restoreLiveVoipTrackAfterKite]);
 
-  const startP2PIntervalScheduler = useCallback((timing: KiteIntervalTiming) => {
-    kiteP2PSchedulerWorkerRef.current?.terminate();
-    kiteP2PSchedulerWorkerRef.current = null;
+  const advanceP2PGridBoundaries = useCallback((periodSec: number) => {
+    const ctxNow = studioAudioContextRef.current;
+    if (!ctxNow || ctxNow.state === "closed") return;
+    if (!Number.isFinite(periodSec) || periodSec <= 0) return;
 
-    const periodSec = timing.localIntervalFrames / timing.localSampleRate;
-    const ctxInit = studioAudioContextRef.current;
-    if (
-      ctxInit &&
-      ctxInit.state !== "closed" &&
-      Number.isFinite(periodSec) &&
-      periodSec > 0
-    ) {
-      p2pGridNextBoundaryContextSecRef.current = ctxInit.currentTime + periodSec;
-    } else {
-      p2pGridNextBoundaryContextSecRef.current = null;
-      console.warn(
-        "[P2P SCHEDULER] AudioContext missing/closed or invalid loop period; grid will arm on first pulse when context is ready."
-      );
+    let nextBoundary = p2pGridNextBoundaryContextSecRef.current;
+    if (nextBoundary == null || !Number.isFinite(nextBoundary)) {
+      p2pGridNextBoundaryContextSecRef.current = ctxNow.currentTime + periodSec;
+      return;
     }
-    p2pGridIntervalIndexRef.current = 0;
 
-    const worker = createKiteSchedulerWorker((msg) => {
-      if (msg.type === "KITE_SCHEDULER_PULSE") {
-        const ctxNow = studioAudioContextRef.current;
-        if (!ctxNow || ctxNow.state === "closed") return;
-        if (!Number.isFinite(periodSec) || periodSec <= 0) return;
+    const eps = ctxNow.sampleRate > 0 ? 2 / ctxNow.sampleRate : 0.00005;
 
-        let nextBoundary = p2pGridNextBoundaryContextSecRef.current;
-        if (nextBoundary == null || !Number.isFinite(nextBoundary)) {
-          p2pGridNextBoundaryContextSecRef.current = ctxNow.currentTime + periodSec;
-          return;
-        }
+    while (ctxNow.currentTime + eps >= nextBoundary) {
+      p2pGridIntervalIndexRef.current += 1;
+      const tickSeq = p2pGridIntervalIndexRef.current;
 
-        const eps = ctxNow.sampleRate > 0 ? 2 / ctxNow.sampleRate : 0.00005;
-
-        while (ctxNow.currentTime + eps >= nextBoundary) {
-          p2pGridIntervalIndexRef.current += 1;
-          const tickSeq = p2pGridIntervalIndexRef.current;
-
-          const fifo = queuedRemoteKiteIntervalRef.current;
-          const peeked = fifo.length > 0 ? fifo[0] : null;
-          if (peeked && kiteP2PEngineRef.current) {
-            fifo.shift();
-            kiteP2PEngineRef.current.loadInterval({
-              intervalId: peeked.intervalId,
-              intervalFrames: peeked.intervalFrames,
-              channelCount: peeked.channelCount,
-              sampleRate: peeked.sampleRate,
-              buffer: peeked.payload,
-            });
-            console.log(
-              "[P2P TICK] loaded remote interval",
-              peeked.intervalId,
-              "tickSeq",
-              tickSeq,
-              "fifoRemaining",
-              fifo.length
-            );
-          } else if (tickSeq > 1) {
-            console.warn(
-              "[P2P TICK] no remote interval queued at tickSeq",
-              tickSeq,
-              "— remote audio may be late or dropped"
-            );
-          }
-
-          if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
-            clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
-            queuedRemoteKiteIntervalTimeoutRef.current = null;
-          }
-          const intervalDurationMs = periodSec * 1000;
-          queuedRemoteKiteIntervalTimeoutRef.current = window.setTimeout(() => {
-            queuedRemoteKiteIntervalTimeoutRef.current = null;
-            if (queuedRemoteKiteIntervalRef.current.length === 0) {
-              console.warn(
-                "[P2P TIMEOUT] remote interval deadline missed after tickSeq",
-                tickSeq,
-                "— packet may be lost or network is slow"
-              );
-            }
-          }, intervalDurationMs) as unknown as number;
-
-          nextBoundary += periodSec;
-        }
-        p2pGridNextBoundaryContextSecRef.current = nextBoundary;
-      } else if (msg.type === "KITE_SCHEDULER_ERROR") {
-        console.error("[P2P SCHEDULER ERROR]", msg.message);
+      const fifo = queuedRemoteKiteIntervalRef.current;
+      const peeked = fifo.length > 0 ? fifo[0] : null;
+      if (peeked && kiteP2PEngineRef.current) {
+        fifo.shift();
+        kiteP2PEngineRef.current.loadInterval({
+          intervalId: peeked.intervalId,
+          intervalFrames: peeked.intervalFrames,
+          channelCount: peeked.channelCount,
+          sampleRate: peeked.sampleRate,
+          buffer: peeked.payload,
+        });
+        console.log(
+          "[P2P TICK] loaded remote interval",
+          peeked.intervalId,
+          "tickSeq",
+          tickSeq,
+          "fifoRemaining",
+          fifo.length
+        );
+      } else if (tickSeq > 1) {
+        console.warn(
+          "[P2P TICK] no remote interval queued at tickSeq",
+          tickSeq,
+          "— remote audio may be late or dropped"
+        );
       }
-    });
-    worker.start({
-      loopDurationSeconds: timing.loopDurationSeconds,
-      localIntervalFrames: timing.localIntervalFrames,
-      localSampleRate: timing.localSampleRate,
-    });
-    kiteP2PSchedulerWorkerRef.current = worker;
+
+      if (queuedRemoteKiteIntervalTimeoutRef.current !== null) {
+        clearTimeout(queuedRemoteKiteIntervalTimeoutRef.current);
+        queuedRemoteKiteIntervalTimeoutRef.current = null;
+      }
+      const intervalDurationMs = periodSec * 1000;
+      queuedRemoteKiteIntervalTimeoutRef.current = window.setTimeout(() => {
+        queuedRemoteKiteIntervalTimeoutRef.current = null;
+        if (queuedRemoteKiteIntervalRef.current.length === 0) {
+          console.warn(
+            "[P2P TIMEOUT] remote interval deadline missed after tickSeq",
+            tickSeq,
+            "— packet may be lost or network is slow"
+          );
+        }
+      }, intervalDurationMs) as unknown as number;
+
+      nextBoundary += periodSec;
+    }
+    p2pGridNextBoundaryContextSecRef.current = nextBoundary;
   }, []);
+
+  const startP2PIntervalScheduler = useCallback(
+    (timing: KiteIntervalTiming) => {
+      p2pGridPumpGenerationRef.current += 1;
+      const gen = p2pGridPumpGenerationRef.current;
+      kiteP2PGridPumpRef.current?.teardown();
+      kiteP2PGridPumpRef.current = null;
+
+      const periodSec = timing.localIntervalFrames / timing.localSampleRate;
+      const ctxInit = studioAudioContextRef.current;
+      if (
+        ctxInit &&
+        ctxInit.state !== "closed" &&
+        Number.isFinite(periodSec) &&
+        periodSec > 0
+      ) {
+        p2pGridNextBoundaryContextSecRef.current = ctxInit.currentTime + periodSec;
+      } else {
+        p2pGridNextBoundaryContextSecRef.current = null;
+        console.warn(
+          "[P2P SCHEDULER] AudioContext missing/closed or invalid loop period; grid will arm on first pulse when context is ready."
+        );
+      }
+      p2pGridIntervalIndexRef.current = 0;
+
+      const ctx = studioAudioContextRef.current;
+      if (!ctx || ctx.state === "closed" || ctx.state !== "running") {
+        console.warn(
+          "[P2P GRID PUMP] AudioContext is not running; grid pump not started. Resume audio first."
+        );
+        return;
+      }
+
+      void (async () => {
+        try {
+          const pump = await createMetronomePump(ctx, { pumpIntervalSec: 0.01 });
+          if (
+            gen !== p2pGridPumpGenerationRef.current ||
+            studioAudioContextRef.current?.state !== "running"
+          ) {
+            pump.teardown();
+            return;
+          }
+          kiteP2PGridPumpRef.current = pump;
+          pump.start(() => {
+            advanceP2PGridBoundaries(periodSec);
+          });
+        } catch (err) {
+          console.error("[P2P GRID PUMP] AudioWorklet pump failed:", err);
+        }
+      })();
+    },
+    [advanceP2PGridBoundaries]
+  );
 
   useEffect(() => {
     startP2PIntervalSchedulerRef.current = startP2PIntervalScheduler;
@@ -3447,6 +3464,8 @@ export default function StudioBridgePage() {
         metronomeGainRef.current.gain.value = 0;
       }
       setKiteSyncCountInActive(true);
+      kiteSyncCountInActiveRef.current = true;
+      kiteSyncCountInCompletionHandledRef.current = false;
 
       setKiteSyncEnabled(true);
       setBroadcastStatus("syncing");
@@ -3516,8 +3535,9 @@ export default function StudioBridgePage() {
       // Tear down any existing P2P graph and worker before rebuilding.
       kiteP2PEngineRef.current?.teardown();
       kiteP2PEngineRef.current = null;
-      kiteP2PSchedulerWorkerRef.current?.terminate();
-      kiteP2PSchedulerWorkerRef.current = null;
+      p2pGridPumpGenerationRef.current += 1;
+      kiteP2PGridPumpRef.current?.teardown();
+      kiteP2PGridPumpRef.current = null;
       kiteP2PSequenceRef.current = 0;
       p2pGridNextBoundaryContextSecRef.current = null;
       p2pGridIntervalIndexRef.current = 0;
@@ -4892,6 +4912,8 @@ export default function StudioBridgePage() {
                   ctx.currentTime + countInOneBarSec;
                 if (metronomeGainRef.current) metronomeGainRef.current.gain.value = 0;
                 setKiteSyncCountInActive(true);
+                kiteSyncCountInActiveRef.current = true;
+                kiteSyncCountInCompletionHandledRef.current = false;
 
                 void queueMicrotask(() => {
                   const timing =
@@ -6628,6 +6650,8 @@ export default function StudioBridgePage() {
                                       metronomeGainRef.current.gain.value = 0;
                                     }
                                     setKiteSyncCountInActive(true);
+                                    kiteSyncCountInActiveRef.current = true;
+                                    kiteSyncCountInCompletionHandledRef.current = false;
                                   }
                                 }
                               } else {
