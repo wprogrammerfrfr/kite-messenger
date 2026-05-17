@@ -97,6 +97,21 @@ type KiteSyncMessage = {
   enabled: boolean;
   serverTimestamp: number;
   sequenceNumber: number;
+  initiatorId: string;
+  studioRevision: number;
+};
+type StudioParamMessage = {
+  type: "STUDIO_PARAM";
+  originatorId: string;
+  studioRevision: number;
+  patch: {
+    bpm?: number;
+    bpi?: number;
+    kiteSetupTempo?: number;
+    kiteSetupTimeSignatureTop?: number;
+    kiteSetupTimeSignatureBottom?: number;
+    kiteSetupChordCount?: number;
+  };
 };
 type SessionControlMessage = SessionLeaveMessage | KiteSyncMessage;
 
@@ -544,6 +559,8 @@ export default function StudioBridgePage() {
   });
   /** One-bar count-in after Kite Sync enables; blocks unmute and playback level changes until the grid stabilizes. */
   const [kiteSyncCountInActive, setKiteSyncCountInActive] = useState(false);
+  /** User id (or stable fallback) of the peer that started the current Kite Sync session. */
+  const [syncInitiatorId, setSyncInitiatorId] = useState<string | null>(null);
   /** Bumps when resuming metronome after network-loss pause (forces scheduler re-init). */
   const [kiteSyncMetronomeResumeNonce, setKiteSyncMetronomeResumeNonce] = useState(0);
   /** True while metronome is stopped due to inbound loss hysteresis (UX hint). */
@@ -580,6 +597,10 @@ export default function StudioBridgePage() {
   /** Parallel bus to the master VoIP mix; P2P / Kite capture reads this stream, not `mixerMasterDestinationRef`. */
   const mixerKiteTapDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const mixerKiteTapStreamRef = useRef<MediaStream | null>(null);
+  /** Raw primary mic → gain → destination; WebRTC sender uses this stream only (never the multi-input master mix). */
+  const voipOutgoingDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const voipOutgoingGainRef = useRef<GainNode | null>(null);
+  const voipOutgoingSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const activeDeviceIdsRef = useRef<string[]>([]);
   const interfaceInputDeviceFlagsRef = useRef<DeviceFlagMap>({});
   const interfaceLiveMonitorEnabledFlagsRef = useRef<DeviceFlagMap>({});
@@ -704,6 +725,11 @@ export default function StudioBridgePage() {
   const kiteSyncSequenceRef = useRef(0);
   const pendingKiteSyncRef = useRef<KiteSyncMessage | null>(null);
   const lastAcceptedKiteSyncSeqRef = useRef(0);
+  const syncInitiatorIdRef = useRef<string | null>(null);
+  const studioRevisionRef = useRef(0);
+  const lastAcceptedStudioRevisionRef = useRef(0);
+  const studioParamPendingPatchRef = useRef<StudioParamMessage["patch"]>({});
+  const studioParamDebounceTimerRef = useRef<number | null>(null);
   const lastAppliedGuestStartSecRef = useRef<number | null>(null);
   const lastSyncApplyAtMsRef = useRef<number | null>(null);
   const kiteSyncCountInEndAtContextSecRef = useRef(0);
@@ -1239,6 +1265,24 @@ export default function StudioBridgePage() {
 
   const teardownMasterDestinationNode = useCallback(() => {
     try {
+      voipOutgoingSourceRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    voipOutgoingSourceRef.current = null;
+    try {
+      voipOutgoingGainRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    voipOutgoingGainRef.current = null;
+    try {
+      voipOutgoingDestinationRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    voipOutgoingDestinationRef.current = null;
+    try {
       mixerMasterDestinationRef.current?.disconnect();
     } catch {
       /* ignore */
@@ -1279,6 +1323,22 @@ export default function StudioBridgePage() {
     return destinationNode;
   }, []);
 
+  const ensureVoipOutgoingDestination = useCallback((audioCtx: AudioContext): MediaStreamAudioDestinationNode | null => {
+    if (!audioCtx || audioCtx.state === "closed") return null;
+    let dest = voipOutgoingDestinationRef.current;
+    if (!dest) {
+      dest = audioCtx.createMediaStreamDestination();
+      voipOutgoingDestinationRef.current = dest;
+    }
+    if (!voipOutgoingGainRef.current) {
+      const gain = audioCtx.createGain();
+      gain.gain.value = 1;
+      gain.connect(dest);
+      voipOutgoingGainRef.current = gain;
+    }
+    return dest;
+  }, []);
+
   const rebuildMixerAndReplaceTrack = useCallback(async () => {
     if (mixerRebuildInFlightRef.current) return;
     mixerRebuildInFlightRef.current = true;
@@ -1289,6 +1349,30 @@ export default function StudioBridgePage() {
     }
 
     try {
+      if (
+        voipOutgoingDestinationRef.current &&
+        voipOutgoingDestinationRef.current.context !== ctx
+      ) {
+        try {
+          voipOutgoingSourceRef.current?.disconnect();
+        } catch {
+          /* ignore */
+        }
+        voipOutgoingSourceRef.current = null;
+        try {
+          voipOutgoingGainRef.current?.disconnect();
+        } catch {
+          /* ignore */
+        }
+        voipOutgoingGainRef.current = null;
+        try {
+          voipOutgoingDestinationRef.current?.disconnect();
+        } catch {
+          /* ignore */
+        }
+        voipOutgoingDestinationRef.current = null;
+      }
+
       const inputs = Array.from(activeStreamsMapRef.current.entries()).map(([deviceId, stream]) => ({
         deviceId,
         stream,
@@ -1297,6 +1381,12 @@ export default function StudioBridgePage() {
       disconnectMixerLaneNodes();
       const destinationNode = ensureMasterDestinationNode();
       if (!destinationNode || inputs.length === 0) {
+        try {
+          voipOutgoingSourceRef.current?.disconnect();
+        } catch {
+          /* ignore */
+        }
+        voipOutgoingSourceRef.current = null;
         setDeviceInputChannelCount({});
         return;
       }
@@ -1306,6 +1396,12 @@ export default function StudioBridgePage() {
         if (process.env.NODE_ENV !== "production") {
           console.assert(false, "[Kite][Invariant] kite tap destination must exist with master");
         }
+        try {
+          voipOutgoingSourceRef.current?.disconnect();
+        } catch {
+          /* ignore */
+        }
+        voipOutgoingSourceRef.current = null;
         setDeviceInputChannelCount({});
         return;
       }
@@ -1350,17 +1446,50 @@ export default function StudioBridgePage() {
       const masterTrack = destinationNode.stream.getAudioTracks()[0] ?? null;
       if (!masterTrack) return;
 
-      const prevStream = localStreamRef.current;
-      const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
-      replacePeerAudioTrack(prevTrack, masterTrack, prevStream ?? null, destinationNode.stream);
-      masterTrack.enabled = !isMicMutedRef.current;
-      localStreamRef.current = destinationNode.stream;
       setLocalMicStream(destinationNode.stream);
       const localEl = localMonitorAudioRef.current;
       if (localEl) {
         localEl.srcObject = destinationNode.stream;
         localEl.muted = true;
         void localEl.play().catch(() => {});
+      }
+
+      const voipDest = ensureVoipOutgoingDestination(ctx);
+      const voipGain = voipOutgoingGainRef.current;
+      const primaryDeviceId = activeDeviceIdsRef.current[0] ?? "";
+      const rawStream = primaryDeviceId
+        ? activeStreamsMapRef.current.get(primaryDeviceId) ?? null
+        : null;
+      const hasLivePrimary =
+        rawStream !== null &&
+        rawStream.getAudioTracks().some((t) => t.readyState === "live");
+
+      try {
+        voipOutgoingSourceRef.current?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      voipOutgoingSourceRef.current = null;
+
+      if (rawStream && voipDest && voipGain && hasLivePrimary) {
+        try {
+          const voipSource = ctx.createMediaStreamSource(rawStream);
+          voipSource.connect(voipGain);
+          voipOutgoingSourceRef.current = voipSource;
+        } catch (err) {
+          console.warn("[Studio] VoIP outgoing MediaStreamSource failed:", err);
+        }
+      }
+
+      const voipTrack = voipDest?.stream.getAudioTracks()[0] ?? null;
+      const prevStream = localStreamRef.current;
+      const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
+      if (voipTrack && voipOutgoingSourceRef.current && voipDest) {
+        if (prevTrack) {
+          replacePeerAudioTrack(prevTrack, voipTrack, prevStream ?? null, voipDest.stream);
+        }
+        voipTrack.enabled = !isMicMutedRef.current;
+        localStreamRef.current = voipDest.stream;
       }
 
       if (process.env.NODE_ENV !== "production") {
@@ -1390,7 +1519,13 @@ export default function StudioBridgePage() {
     } finally {
       mixerRebuildInFlightRef.current = false;
     }
-  }, [disconnectMixerLaneNodes, ensureMasterDestinationNode, replacePeerAudioTrack, setDeviceInputChannelCount]);
+  }, [
+    disconnectMixerLaneNodes,
+    ensureMasterDestinationNode,
+    ensureVoipOutgoingDestination,
+    replacePeerAudioTrack,
+    setDeviceInputChannelCount,
+  ]);
 
   const toggleAudioDevice = useCallback(
     async (deviceId: string) => {
@@ -1841,6 +1976,8 @@ export default function StudioBridgePage() {
   const showLobbyControls = studioUiPhase === "lobby";
   const localJamSetupOwnerId = user?.id ?? `${role ?? "unknown"}:${sessionId ?? "local"}`;
   const localJamSetupOwnerName = role === "host" ? "Host" : "Bandmate";
+  const canControlStop = !syncInitiatorId || syncInitiatorId === localJamSetupOwnerId;
+  const canStartSync = broadcastStatus === "idle" && Boolean(remoteStream);
   const jamSetupLockedByRemote =
     Boolean(jamSetupLock) &&
     jamSetupLock!.ownerId !== localJamSetupOwnerId &&
@@ -2310,6 +2447,7 @@ export default function StudioBridgePage() {
       latestKiteIntervalTimingRef.current?.bpi ??
       beatsPerInterval;
     kiteSyncSequenceRef.current += 1;
+    studioRevisionRef.current += 1;
     console.log("Broadcasting KITE_SYNC packet...", {
       bpm: nextBpm,
       bpi: nextBpi,
@@ -2322,8 +2460,10 @@ export default function StudioBridgePage() {
       enabled: nextEnabled,
       serverTimestamp: Date.now(),
       sequenceNumber: kiteSyncSequenceRef.current,
+      initiatorId: syncInitiatorIdRef.current ?? localJamSetupOwnerId,
+      studioRevision: studioRevisionRef.current,
     };
-  }, [beatsPerInterval, kiteSyncEnabled, metronomeBpm]);
+  }, [beatsPerInterval, kiteSyncEnabled, localJamSetupOwnerId, metronomeBpm]);
 
   const sendOrQueueKiteSyncPacket = useCallback((packet: KiteSyncMessage): void => {
     const peer = peerRef.current;
@@ -2340,12 +2480,11 @@ export default function StudioBridgePage() {
     }
   }, []);
 
-  const broadcastKiteSyncFromHost = useCallback((overrides?: {
+  const broadcastKiteSync = useCallback((overrides?: {
     kiteSyncEnabled?: boolean;
     bpm?: number;
     bpi?: number;
   }): void => {
-    if (role !== "host") return;
     const packet = buildKiteSyncPacket({
       kiteSyncEnabled: overrides?.kiteSyncEnabled,
       bpm: overrides?.bpm,
@@ -2353,7 +2492,49 @@ export default function StudioBridgePage() {
     });
     if (!packet) return;
     sendOrQueueKiteSyncPacket(packet);
-  }, [buildKiteSyncPacket, kiteSyncEnabled, role, sendOrQueueKiteSyncPacket]);
+  }, [buildKiteSyncPacket, sendOrQueueKiteSyncPacket]);
+
+  const flushStudioParamBroadcast = useCallback(() => {
+    studioParamDebounceTimerRef.current = null;
+    const peer = peerRef.current;
+    const patch = { ...studioParamPendingPatchRef.current };
+    studioParamPendingPatchRef.current = {};
+    if (Object.keys(patch).length === 0) return;
+    if (!peer || peer.destroyed || peer.connected !== true) return;
+    studioRevisionRef.current += 1;
+    const payload: StudioParamMessage = {
+      type: "STUDIO_PARAM",
+      originatorId: localJamSetupOwnerId,
+      studioRevision: studioRevisionRef.current,
+      patch,
+    };
+    try {
+      peer.send(JSON.stringify(payload));
+    } catch {
+      /* coalesce — next edit will re-send merged patch */
+    }
+  }, [localJamSetupOwnerId]);
+
+  const broadcastStudioParam = useCallback((partial: StudioParamMessage["patch"]) => {
+    studioParamPendingPatchRef.current = {
+      ...studioParamPendingPatchRef.current,
+      ...partial,
+    };
+    if (studioParamDebounceTimerRef.current !== null) {
+      window.clearTimeout(studioParamDebounceTimerRef.current);
+    }
+    studioParamDebounceTimerRef.current = window.setTimeout(() => {
+      flushStudioParamBroadcast();
+    }, 24);
+  }, [flushStudioParamBroadcast]);
+
+  const broadcastWizardStudioParam = useCallback(
+    (partial: StudioParamMessage["patch"]) => {
+      if (kiteSetupOrigin !== "connected") return;
+      broadcastStudioParam(partial);
+    },
+    [broadcastStudioParam, kiteSetupOrigin]
+  );
 
   /**
    * Send P2P timing metadata to the connected peer so both sides can agree on the
@@ -2543,9 +2724,20 @@ export default function StudioBridgePage() {
   );
 
   const resetKiteSyncSessionRefs = useCallback(() => {
+    if (studioParamDebounceTimerRef.current !== null) {
+      window.clearTimeout(studioParamDebounceTimerRef.current);
+      studioParamDebounceTimerRef.current = null;
+    }
+    studioParamPendingPatchRef.current = {};
     pendingKiteSyncRef.current = null;
     lastAcceptedKiteSyncSeqRef.current = 0;
     kiteSyncSequenceRef.current = 0;
+    syncInitiatorIdRef.current = null;
+    if (mountedRef.current) {
+      setSyncInitiatorId(null);
+    }
+    studioRevisionRef.current = 0;
+    lastAcceptedStudioRevisionRef.current = 0;
     lastAppliedGuestStartSecRef.current = null;
     lastSyncApplyAtMsRef.current = null;
     audioBaseLatencySecRef.current = 0;
@@ -3134,8 +3326,10 @@ export default function StudioBridgePage() {
     if (!Number.isFinite(avgMs) || avgMs <= 0) return;
 
     const nextBpm = Math.round(60000 / avgMs);
-    setKiteSetupTempo(Math.max(40, Math.min(240, nextBpm)));
-  }, []);
+    const clamped = Math.max(40, Math.min(240, nextBpm));
+    setKiteSetupTempo(clamped);
+    broadcastWizardStudioParam({ kiteSetupTempo: clamped, bpm: clamped });
+  }, [broadcastWizardStudioParam]);
 
   const deriveKiteTimingMetadata = useCallback((): KiteIntervalTiming => {
     const localSampleRate = getStudioKiteSampleRate();
@@ -3189,16 +3383,28 @@ export default function StudioBridgePage() {
       const shouldPlayAudio =
         ctx.state === "running" && (forceAudio || !isVisualMetronomeOnlyRef.current);
       if (shouldPlayAudio) {
+        const metronomeParent = ensureMetronomeGainNode(ctx);
+        const countInLocksBroadcastSilence = kiteSyncCountInActiveRef.current;
+        const bypassMetronomeGain =
+          Boolean(forceAudio) && countInLocksBroadcastSilence;
+        const metronomeVol = metronomeVolumeRef.current;
+
         const oscillator = ctx.createOscillator();
         scheduledMetronomeOscillatorsRef.current.add(oscillator);
         const gain = ctx.createGain();
         oscillator.type = "sine";
         oscillator.frequency.setValueAtTime(isDownbeat ? 1500 : 1000, startAt);
+        const peakBase = isDownbeat ? 0.12 : 0.075;
+        const peakEnv = bypassMetronomeGain ? peakBase * metronomeVol : peakBase;
         gain.gain.setValueAtTime(0.0001, startAt);
-        gain.gain.exponentialRampToValueAtTime(isDownbeat ? 0.12 : 0.075, startAt + 0.004);
+        gain.gain.exponentialRampToValueAtTime(peakEnv, startAt + 0.004);
         gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.045);
         oscillator.connect(gain);
-        gain.connect(ctx.destination);
+        if (bypassMetronomeGain) {
+          gain.connect(ctx.destination);
+        } else {
+          gain.connect(metronomeParent);
+        }
         oscillator.start(startAt);
         oscillator.stop(startAt + 0.05);
         oscillator.onended = () => {
@@ -3208,7 +3414,7 @@ export default function StudioBridgePage() {
         };
       }
     },
-    []
+    [ensureMetronomeGainNode]
   );
 
   const cancelScheduledMetronomeClicks = useCallback(() => {
@@ -3511,7 +3717,6 @@ export default function StudioBridgePage() {
   }, [startP2PIntervalScheduler]);
 
   const handleStartBroadcastCountIn = useCallback(() => {
-    if (role !== "host") return;
     void (async () => {
       const ctx = studioAudioContextRef.current ?? ensureStudioAudioContext();
       await ctx.resume();
@@ -3539,7 +3744,11 @@ export default function StudioBridgePage() {
 
       setKiteSyncEnabled(true);
       setBroadcastStatus("syncing");
-      broadcastKiteSyncFromHost({ kiteSyncEnabled: true });
+      syncInitiatorIdRef.current = localJamSetupOwnerId;
+      if (mountedRef.current) {
+        setSyncInitiatorId(localJamSetupOwnerId);
+      }
+      broadcastKiteSync({ kiteSyncEnabled: true });
 
       const timing =
         latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
@@ -3550,12 +3759,12 @@ export default function StudioBridgePage() {
       }
     })();
   }, [
-    broadcastKiteSyncFromHost,
+    broadcastKiteSync,
     ensureStudioAudioContext,
     flushAndSetRemoteGridTarget,
     kiteSetupTimeSignatureTop,
+    localJamSetupOwnerId,
     metronomeBpm,
-    role,
     setAudioContextReady,
     setBroadcastStatus,
     setKiteSyncCountInActive,
@@ -3754,6 +3963,10 @@ export default function StudioBridgePage() {
           } catch {
             /* SET_INTERVAL notify peer is best-effort */
           }
+          syncInitiatorIdRef.current = localJamSetupOwnerId;
+          if (mountedRef.current) {
+            setSyncInitiatorId(localJamSetupOwnerId);
+          }
         } else if (kiteSetupMode === "solo") {
           deriveKiteTimingMetadata();
         }
@@ -3771,6 +3984,7 @@ export default function StudioBridgePage() {
     deriveKiteTimingMetadata,
     kiteSetupMode,
     kiteSetupOrigin,
+    localJamSetupOwnerId,
     sendJamSetupLock,
     sendSetInterval,
     startP2PEngine,
@@ -3792,6 +4006,15 @@ export default function StudioBridgePage() {
           ? "Beat"
           : "—";
 
+    const partnerSessionLabel =
+      remoteParticipantName?.trim() || "Partner";
+    const jamAnchorMessage =
+      syncInitiatorId === localJamSetupOwnerId
+        ? "You're leading this sync."
+        : syncInitiatorId
+          ? `Synced by ${partnerSessionLabel}`
+          : "Active jam session";
+
     return (
       <div className="space-y-3 rounded-xl border border-stone-800/90 bg-stone-950/45 p-4">
         <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-center">
@@ -3805,7 +4028,7 @@ export default function StudioBridgePage() {
           </p>
           <p className="text-xs font-semibold uppercase tracking-wide text-stone-400">{syncStatusLabel}</p>
         </div>
-        {role === "host" && broadcastStatus === "idle" ? (
+        {canStartSync ? (
           <button
             type="button"
             onClick={handleStartBroadcastCountIn}
@@ -3814,13 +4037,16 @@ export default function StudioBridgePage() {
             Start Count-In &amp; Jam
           </button>
         ) : null}
-        {role !== "host" && broadcastStatus === "idle" ? (
-          <p className="text-center text-xs text-stone-400">Waiting for host…</p>
+        {broadcastStatus !== "idle" || kiteSyncEnabled ? (
+          <p className="text-center text-xs font-medium text-stone-400">{jamAnchorMessage}</p>
         ) : null}
         <button
           type="button"
+          disabled={!canControlStop}
+          aria-disabled={!canControlStop}
           onClick={() => {
-            broadcastKiteSyncFromHost({ kiteSyncEnabled: false });
+            if (!canControlStop) return;
+            broadcastKiteSync({ kiteSyncEnabled: false });
             setKiteSyncEnabled(false);
             cleanupKiteEngine({ stopLocalTracks: false, isFull: false });
             restoreLiveVoipTrackAfterKite();
@@ -3829,8 +4055,16 @@ export default function StudioBridgePage() {
             }
             setBroadcastStatus("idle");
             setKiteSyncCountInActive(false);
+            syncInitiatorIdRef.current = null;
+            if (mountedRef.current) {
+              setSyncInitiatorId(null);
+            }
           }}
-          className="w-full rounded-xl border border-orange-500/40 bg-orange-500/10 px-4 py-3 text-sm font-semibold text-orange-200 transition hover:bg-orange-500/15"
+          className={`w-full rounded-xl border px-4 py-3 text-sm font-semibold transition ${
+            canControlStop
+              ? "border-orange-500/40 bg-orange-500/10 text-orange-200 hover:bg-orange-500/15"
+              : "cursor-not-allowed border-stone-700/80 bg-stone-900/50 text-stone-500 opacity-60"
+          }`}
         >
           Stop Kite Sync
         </button>
@@ -4881,6 +5115,10 @@ export default function StudioBridgePage() {
             enabled?: boolean;
             serverTimestamp?: number;
             sequenceNumber?: number;
+            initiatorId?: string;
+            studioRevision?: number;
+            originatorId?: string;
+            patch?: unknown;
             from?: Role;
             action?: JamSetupLockAction;
             ownerId?: string;
@@ -4897,6 +5135,10 @@ export default function StudioBridgePage() {
             leaveSignalReceivedRef.current = true;
             setKiteSyncEnabled(false);
             setBroadcastStatus("idle");
+            syncInitiatorIdRef.current = null;
+            if (mountedRef.current) {
+              setSyncInitiatorId(null);
+            }
             stopKiteMetronome();
             clearLostCountdown();
             setCollaboratorLeft(true);
@@ -4959,6 +5201,42 @@ export default function StudioBridgePage() {
             }
             return;
           }
+          if (msg.type === "STUDIO_PARAM") {
+            if (
+              typeof msg.originatorId !== "string" ||
+              typeof msg.studioRevision !== "number" ||
+              msg.patch === null ||
+              typeof msg.patch !== "object"
+            ) {
+              return;
+            }
+            if (msg.studioRevision <= lastAcceptedStudioRevisionRef.current) return;
+            lastAcceptedStudioRevisionRef.current = msg.studioRevision;
+            const p = msg.patch as StudioParamMessage["patch"];
+            if (typeof p.kiteSetupTempo === "number") {
+              setKiteSetupTempo(Math.max(20, Math.min(320, Math.round(p.kiteSetupTempo))));
+            }
+            if (typeof p.kiteSetupTimeSignatureTop === "number") {
+              setKiteSetupTimeSignatureTop(
+                Math.max(1, Math.min(16, Math.round(p.kiteSetupTimeSignatureTop)))
+              );
+            }
+            if (typeof p.kiteSetupTimeSignatureBottom === "number") {
+              setKiteSetupTimeSignatureBottom(
+                Math.max(1, Math.min(32, Math.round(p.kiteSetupTimeSignatureBottom)))
+              );
+            }
+            if (typeof p.kiteSetupChordCount === "number") {
+              setKiteSetupChordCount(Math.max(1, Math.min(64, Math.round(p.kiteSetupChordCount))));
+            }
+            if (typeof p.bpm === "number") {
+              setMetronomeBpm(Math.max(40, Math.min(240, Math.round(p.bpm))));
+            }
+            if (typeof p.bpi === "number") {
+              setBeatsPerInterval(Math.max(1, Math.round(p.bpi)));
+            }
+            return;
+          }
           if (msg.type === "presence" && typeof msg.name === "string" && msg.name.trim().length > 0) {
             if (mountedRef.current) {
               const incomingName = msg.name.trim();
@@ -4983,10 +5261,21 @@ export default function StudioBridgePage() {
             typeof msg.enabled === "boolean"
           ) {
             if (msg.sequenceNumber <= lastAcceptedKiteSyncSeqRef.current) return;
-            lastAcceptedKiteSyncSeqRef.current = msg.sequenceNumber;
-            setKiteSyncEnabled(msg.enabled);
-            setBroadcastStatus(msg.enabled ? "syncing" : "idle");
+
             if (!msg.enabled) {
+              const packetInitiator = typeof msg.initiatorId === "string" ? msg.initiatorId : null;
+              if (packetInitiator !== null) {
+                if (packetInitiator !== syncInitiatorIdRef.current) return;
+              } else if (syncInitiatorIdRef.current !== null) {
+                return;
+              }
+              lastAcceptedKiteSyncSeqRef.current = msg.sequenceNumber;
+              setKiteSyncEnabled(false);
+              setBroadcastStatus("idle");
+              syncInitiatorIdRef.current = null;
+              if (mountedRef.current) {
+                setSyncInitiatorId(null);
+              }
               cleanupKiteEngine({ stopLocalTracks: false, isFull: false });
 
               restoreLiveVoipTrackAfterKite();
@@ -4996,6 +5285,28 @@ export default function StudioBridgePage() {
                 buildRemotePlaybackGraph(remoteStream);
               }
               return;
+            }
+
+            lastAcceptedKiteSyncSeqRef.current = msg.sequenceNumber;
+
+            setKiteSyncEnabled(true);
+            setBroadcastStatus("syncing");
+
+            if (typeof msg.initiatorId === "string") {
+              syncInitiatorIdRef.current = msg.initiatorId;
+              if (mountedRef.current) {
+                setSyncInitiatorId(msg.initiatorId);
+              }
+            }
+
+            const incomingRev = typeof msg.studioRevision === "number" ? msg.studioRevision : null;
+            let applyBpmBpi = true;
+            if (incomingRev !== null) {
+              if (incomingRev < lastAcceptedStudioRevisionRef.current) {
+                applyBpmBpi = false;
+              } else {
+                lastAcceptedStudioRevisionRef.current = incomingRev;
+              }
             }
 
             const receivedAtMs = Date.now();
@@ -5008,8 +5319,10 @@ export default function StudioBridgePage() {
 
             lastAppliedGuestStartSecRef.current = guestTargetSec;
             lastSyncApplyAtMsRef.current = receivedAtMs;
-            setMetronomeBpm(msg.bpm);
-            setBeatsPerInterval(msg.bpi);
+            if (applyBpmBpi) {
+              setMetronomeBpm(msg.bpm);
+              setBeatsPerInterval(msg.bpi);
+            }
             const ctx = studioAudioContextRef.current;
             if (ctx) {
               const sixteenthSec = 60 / msg.bpm / 4;
@@ -5145,7 +5458,7 @@ export default function StudioBridgePage() {
         } catch {
           // Presence payload is best-effort; keep connect flow unchanged on send failures.
         }
-        if (transportIsHost && kiteSyncEnabled && pendingKiteSyncRef.current) {
+        if (kiteSyncEnabled && pendingKiteSyncRef.current) {
           try {
             peer.send(JSON.stringify(pendingKiteSyncRef.current));
             pendingKiteSyncRef.current = null;
@@ -5153,14 +5466,12 @@ export default function StudioBridgePage() {
             // Keep queued packet for next successful send checkpoint.
           }
         }
-        if (transportIsHost) {
-          try {
-            const timing = deriveKiteTimingMetadata();
-            const hasRetainedLoop = retainedKiteLoopBufferRef.current !== null;
-            sendSetInterval(timing, hasRetainedLoop);
-          } catch {
-            // SET_INTERVAL is best-effort on connect; retained loop is preserved.
-          }
+        try {
+          const timing = deriveKiteTimingMetadata();
+          const hasRetainedLoop = retainedKiteLoopBufferRef.current !== null;
+          sendSetInterval(timing, hasRetainedLoop);
+        } catch {
+          // SET_INTERVAL is best-effort on connect; retained loop is preserved.
         }
         if (connectTimeout !== null) {
           clearTimeout(connectTimeout);
@@ -6151,6 +6462,12 @@ export default function StudioBridgePage() {
                               setKiteSetupTimeSignatureTop(option.top);
                               setKiteSetupTimeSignatureBottom(option.bottom);
                               setKiteSetupIsSwing(option.swing);
+                              const bpi = Math.max(1, Math.round(kiteSetupChordCount * option.top));
+                              broadcastWizardStudioParam({
+                                kiteSetupTimeSignatureTop: option.top,
+                                kiteSetupTimeSignatureBottom: option.bottom,
+                                bpi,
+                              });
                             }}
                             className={`rounded-xl border px-4 py-4 text-left transition ${
                               selected
@@ -6213,6 +6530,10 @@ export default function StudioBridgePage() {
                           onClick={() => {
                             setKiteSetupUsesCustomChords(false);
                             setKiteSetupChordCount(option.count);
+                            broadcastWizardStudioParam({
+                              kiteSetupChordCount: option.count,
+                              bpi: Math.max(1, Math.round(option.count * kiteSetupTimeSignatureTop)),
+                            });
                           }}
                           className={`rounded-xl border px-3 py-4 text-center transition ${
                             !kiteSetupUsesCustomChords && kiteSetupChordCount === option.count
@@ -6248,7 +6569,12 @@ export default function StudioBridgePage() {
                           onChange={(event) => {
                             const next = Number(event.target.value);
                             if (!Number.isFinite(next)) return;
-                            setKiteSetupChordCount(Math.max(1, Math.min(64, Math.round(next))));
+                            const clamped = Math.max(1, Math.min(64, Math.round(next)));
+                            setKiteSetupChordCount(clamped);
+                            broadcastWizardStudioParam({
+                              kiteSetupChordCount: clamped,
+                              bpi: Math.max(1, Math.round(clamped * kiteSetupTimeSignatureTop)),
+                            });
                           }}
                           placeholder="e.g. 10"
                           className="w-32 rounded-lg border border-stone-700 bg-stone-900 px-4 py-3 text-sm font-semibold text-stone-100 placeholder:text-stone-500"
@@ -6279,7 +6605,13 @@ export default function StudioBridgePage() {
                         <button
                           key={option.label}
                           type="button"
-                          onClick={() => setKiteSetupTempo(option.bpm)}
+                          onClick={() => {
+                            setKiteSetupTempo(option.bpm);
+                            broadcastWizardStudioParam({
+                              kiteSetupTempo: option.bpm,
+                              bpm: option.bpm,
+                            });
+                          }}
                           className="rounded-full border border-stone-600 bg-stone-800/60 px-4 py-2 text-sm font-semibold text-stone-300 transition hover:bg-stone-700"
                         >
                           {option.label}
@@ -6293,7 +6625,11 @@ export default function StudioBridgePage() {
                         max={240}
                         step={1}
                         value={kiteSetupTempo}
-                        onChange={(event) => setKiteSetupTempo(Number(event.target.value))}
+                        onChange={(event) => {
+                          const v = Number(event.target.value);
+                          setKiteSetupTempo(v);
+                          broadcastWizardStudioParam({ kiteSetupTempo: v, bpm: v });
+                        }}
                         className="h-2 flex-1 accent-stone-300"
                         aria-label="Kite Sync tempo"
                       />
@@ -6529,7 +6865,11 @@ export default function StudioBridgePage() {
                         max={240}
                         step={1}
                         value={kiteSetupTempo}
-                        onChange={(event) => setKiteSetupTempo(Number(event.target.value))}
+                        onChange={(event) => {
+                          const v = Number(event.target.value);
+                          setKiteSetupTempo(v);
+                          broadcastWizardStudioParam({ kiteSetupTempo: v, bpm: v });
+                        }}
                         disabled={isRecordingArmed || soloLooperState !== "idle"}
                         className={`h-2 w-full accent-stone-300 ${
                           isRecordingArmed || soloLooperState !== "idle"
@@ -6550,7 +6890,13 @@ export default function StudioBridgePage() {
                                 key={option.label}
                                 type="button"
                                 disabled={isTimingLocked}
-                                onClick={() => setKiteSetupTempo(option.bpm)}
+                                onClick={() => {
+                                  setKiteSetupTempo(option.bpm);
+                                  broadcastWizardStudioParam({
+                                    kiteSetupTempo: option.bpm,
+                                    bpm: option.bpm,
+                                  });
+                                }}
                                 className={`rounded-full border border-stone-600 bg-stone-800/60 px-3 py-1.5 text-xs font-semibold text-stone-300 transition ${
                                   isTimingLocked
                                     ? "cursor-not-allowed opacity-50"
@@ -6594,6 +6940,12 @@ export default function StudioBridgePage() {
                                     setKiteSetupTimeSignatureTop(option.top);
                                     setKiteSetupTimeSignatureBottom(option.bottom);
                                     setKiteSetupIsSwing(option.swing);
+                                    const bpi = Math.max(1, Math.round(kiteSetupChordCount * option.top));
+                                    broadcastWizardStudioParam({
+                                      kiteSetupTimeSignatureTop: option.top,
+                                      kiteSetupTimeSignatureBottom: option.bottom,
+                                      bpi,
+                                    });
                                   }}
                                   className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
                                     isTimingLocked
@@ -6778,7 +7130,12 @@ export default function StudioBridgePage() {
                                     kiteSyncCountInCompletionHandledRef.current = false;
                                   }
                                 }
+                                syncInitiatorIdRef.current = localJamSetupOwnerId;
+                                if (mountedRef.current) {
+                                  setSyncInitiatorId(localJamSetupOwnerId);
+                                }
                               } else {
+                                if (!canControlStop) return;
                                 cleanupKiteEngine({ stopLocalTracks: false, isFull: false });
 
                                 restoreLiveVoipTrackAfterKite();
@@ -6787,10 +7144,14 @@ export default function StudioBridgePage() {
                                 if (remoteStream) {
                                   buildRemotePlaybackGraph(remoteStream);
                                 }
+                                syncInitiatorIdRef.current = null;
+                                if (mountedRef.current) {
+                                  setSyncInitiatorId(null);
+                                }
                               }
                               setKiteSyncEnabled(next);
                               setBroadcastStatus(next ? "syncing" : "idle");
-                              broadcastKiteSyncFromHost({ kiteSyncEnabled: next });
+                              broadcastKiteSync({ kiteSyncEnabled: next });
                             }}
                           className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                             kiteSyncEnabled
@@ -6877,7 +7238,7 @@ export default function StudioBridgePage() {
                                 setMetronomeBpm((prev) => {
                                   const normalized = Math.max(40, Math.min(240, Math.round(next)));
                                   if (normalized === prev) return prev;
-                                  broadcastKiteSyncFromHost({ bpm: normalized });
+                                  broadcastStudioParam({ bpm: normalized });
                                   return normalized;
                                 });
                               }}
