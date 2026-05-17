@@ -2670,8 +2670,7 @@ export default function StudioBridgePage() {
     let node = metronomeGainRef.current;
     if (!node) {
       node = ctx.createGain();
-      // Safety default: no metronome output until Kite Sync is explicitly enabled.
-      node.gain.value = 0;
+      node.gain.value = metronomeVolumeRef.current;
       node.connect(ctx.destination);
       metronomeGainRef.current = node;
     }
@@ -2760,7 +2759,6 @@ export default function StudioBridgePage() {
     if (gain && ctx && ctx.state !== "closed") {
       try {
         gain.gain.cancelScheduledValues(ctx.currentTime);
-        gain.gain.setValueAtTime(0, ctx.currentTime);
       } catch {
         /* ignore */
       }
@@ -2834,8 +2832,8 @@ export default function StudioBridgePage() {
     const gainNode = metronomeGainRef.current;
     if (!gainNode) return;
     if (kiteSyncCountInActive) return;
-    gainNode.gain.value = kiteSyncEnabled ? metronomeVolumeRef.current : 0;
-  }, [kiteSyncEnabled, kiteSyncCountInActive]);
+    gainNode.gain.value = metronomeVolumeRef.current;
+  }, [kiteSyncCountInActive]);
 
   useEffect(() => {
     let cancelled = false;
