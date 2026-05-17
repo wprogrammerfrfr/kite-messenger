@@ -16,8 +16,10 @@ import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { TrackRecorder } from "@/lib/track-recorder";
 import {
+  calcInputNudgeFrames,
   calcIntervalFrames,
   calcLoopDurationSeconds,
+  KITE_DEFAULT_INPUT_LATENCY_MS,
   KITE_TARGET_SAMPLE_RATE,
   type KiteIntervalTiming,
 } from "@/lib/kite-interval-math";
@@ -705,10 +707,16 @@ export default function StudioBridgePage() {
   const lastAppliedGuestStartSecRef = useRef<number | null>(null);
   const lastSyncApplyAtMsRef = useRef<number | null>(null);
   const kiteSyncCountInEndAtContextSecRef = useRef(0);
+  /** Permanent downbeat anchor in `AudioContext` seconds; set once at count-in → live. */
+  const kiteGridAnchorContextSecRef = useRef<number | null>(null);
   /** Mirrors `kiteSyncCountInActive` for metronome pump callbacks (avoids stale closures). */
   const kiteSyncCountInActiveRef = useRef(false);
   /** Prevents duplicate count-in completion when `pumpScheduler` runs multiple times past `endAt`. */
   const kiteSyncCountInCompletionHandledRef = useRef(false);
+  /** `AudioContext.baseLatency` captured at studio context creation (seconds). */
+  const audioBaseLatencySecRef = useRef(0);
+  /** `AudioContext.outputLatency` captured at studio context creation (seconds). */
+  const audioOutputLatencySecRef = useRef(0);
   const kiteSyncLossPauseActiveRef = useRef(false);
   const kiteSyncLossRecoverySinceMsRef = useRef<number | null>(null);
   const applyKiteSyncLossGuardRef = useRef<(packetLossPercent: number | null) => void>(
@@ -991,9 +999,11 @@ export default function StudioBridgePage() {
     if (!ctx || ctx.state === "closed") return;
     for (const gainNode of Array.from(interfaceLiveMonitorGainNodesRef.current.values())) {
       try {
-        rampLinearAudioGain(gainNode.gain, ctx, 0, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+        gainNode.gain.cancelScheduledValues(ctx.currentTime);
+        gainNode.gain.setValueAtTime(0, ctx.currentTime);
+        gainNode.disconnect();
       } catch {
-        /* ignore */
+        /* ignore — node may already be disconnected */
       }
     }
   }, []);
@@ -1003,6 +1013,7 @@ export default function StudioBridgePage() {
     if (!ctx || ctx.state === "closed") return;
     for (const deviceId of Array.from(interfaceLiveMonitorGainNodesRef.current.keys())) {
       const gainNode = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
+      const sourceNode = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
       if (!gainNode) continue;
       const vols = deviceVolumesRef.current;
       const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
@@ -1011,6 +1022,18 @@ export default function StudioBridgePage() {
       const blended = chCount >= 2 ? (v0 + v1) / 2 : v0;
       const targetLinear = Math.pow(Math.min(100, Math.max(0, blended)) / 100, 2);
       try {
+        if (sourceNode) {
+          try {
+            sourceNode.connect(gainNode);
+          } catch {
+            /* already connected */
+          }
+        }
+        try {
+          gainNode.connect(ctx.destination);
+        } catch {
+          /* ignore */
+        }
         rampLinearAudioGain(gainNode.gain, ctx, targetLinear, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
       } catch {
         /* ignore */
@@ -1380,6 +1403,13 @@ export default function StudioBridgePage() {
       if (!ctx) {
         ctx = createStudioAudioContext();
         studioAudioContextRef.current = ctx;
+        audioBaseLatencySecRef.current = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
+        audioOutputLatencySecRef.current = Number.isFinite(ctx.outputLatency)
+          ? ctx.outputLatency
+          : 0;
+        console.log(
+          `[HAL] base=${audioBaseLatencySecRef.current} output=${audioOutputLatencySecRef.current}`
+        );
         workletLoadedContextRef.current = null;
         workletLoadPromiseRef.current = null;
         setIsWorkletLoaded(false);
@@ -1537,7 +1567,9 @@ export default function StudioBridgePage() {
         gainNode.gain.linearRampToValueAtTime(targetLinear, t0 + BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
       }
       sourceNode.connect(gainNode);
-      gainNode.connect(ctx.destination);
+      if (kiteModeRef.current !== "broadcast") {
+        gainNode.connect(ctx.destination);
+      }
       interfaceLiveMonitorSourceNodesRef.current.set(deviceId, sourceNode);
       interfaceLiveMonitorGainNodesRef.current.set(deviceId, gainNode);
     } catch (error) {
@@ -2152,6 +2184,13 @@ export default function StudioBridgePage() {
     if (!ctx) {
       ctx = createStudioAudioContext();
       studioAudioContextRef.current = ctx;
+      audioBaseLatencySecRef.current = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
+      audioOutputLatencySecRef.current = Number.isFinite(ctx.outputLatency)
+        ? ctx.outputLatency
+        : 0;
+      console.log(
+        `[HAL] base=${audioBaseLatencySecRef.current} output=${audioOutputLatencySecRef.current}`
+      );
       workletLoadedContextRef.current = null;
       workletLoadPromiseRef.current = null;
       setIsWorkletLoaded(false);
@@ -2265,7 +2304,11 @@ export default function StudioBridgePage() {
     if (!ctx) return null;
     const nextEnabled = overrides?.kiteSyncEnabled ?? kiteSyncEnabled;
     const nextBpm = overrides?.bpm ?? metronomeBpm;
-    const nextBpi = overrides?.bpi ?? beatsPerInterval;
+    const nextBpi =
+      overrides?.bpi ??
+      kiteIntervalTimingRef.current?.bpi ??
+      latestKiteIntervalTimingRef.current?.bpi ??
+      beatsPerInterval;
     kiteSyncSequenceRef.current += 1;
     console.log("Broadcasting KITE_SYNC packet...", {
       bpm: nextBpm,
@@ -2360,6 +2403,8 @@ export default function StudioBridgePage() {
     setKiteSetupTimeSignatureTop(Math.max(1, Math.min(16, Math.round(timing.timeSignatureTop))));
     setKiteSetupTimeSignatureBottom(Math.max(1, Math.min(32, Math.round(timing.timeSignatureBottom))));
     setKiteSetupChordCount(Math.max(1, Math.min(64, Math.round(timing.chords))));
+    setBeatsPerInterval(Math.round(timing.bpi));
+    setMetronomeBpm(timing.bpm);
     console.log("[SET_INTERVAL] local timing synced from host", {
       bpm: timing.bpm,
       chords: timing.chords,
@@ -2465,7 +2510,10 @@ export default function StudioBridgePage() {
       if (ctx.state !== "running") return;
       console.log("🎵 TICK scheduled for:", time, "Downbeat:", tick.isAccent);
       console.log("DEBUG: Creating Oscillator at time:", time);
-      const startAt = Math.max(time, ctx.currentTime);
+      const halSec =
+        audioBaseLatencySecRef.current + audioOutputLatencySecRef.current;
+      const compensated = time - halSec;
+      const startAt = Math.max(compensated, ctx.currentTime);
       metronomeBlinkQueueRef.current.push({ startAt, isAccent: tick.isAccent });
       if (metronomeBlinkQueueRef.current.length > 20) metronomeBlinkQueueRef.current.shift();
       const shouldPlayAudio = forceAudio || !isVisualMetronomeOnlyRef.current;
@@ -2500,6 +2548,9 @@ export default function StudioBridgePage() {
     kiteSyncSequenceRef.current = 0;
     lastAppliedGuestStartSecRef.current = null;
     lastSyncApplyAtMsRef.current = null;
+    audioBaseLatencySecRef.current = 0;
+    audioOutputLatencySecRef.current = 0;
+    kiteGridAnchorContextSecRef.current = null;
   }, []);
 
   const stopKiteMetronome = useCallback(() => {
@@ -2640,9 +2691,13 @@ export default function StudioBridgePage() {
       }
     }
 
+    const timing =
+      latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
+    const schedulerBpi = Math.max(1, Math.round(timing?.bpi ?? beatsPerInterval));
+
     const scheduler = createMetronomeScheduler(ctx, {
       bpm: metronomeBpm,
-      beatsPerInterval,
+      beatsPerInterval: schedulerBpi,
       subdivision: 1,
       lookaheadMs: 25,
       scheduleAheadSec: 0.12,
@@ -2740,7 +2795,11 @@ export default function StudioBridgePage() {
           if (metronomeGainRef.current) {
             metronomeGainRef.current.gain.value = metronomeVolumeRef.current;
           }
-          kiteSyncCountInEndAtContextSecRef.current = 0;
+          const anchorSec = activeCtx.currentTime;
+          kiteGridAnchorContextSecRef.current = anchorSec;
+          if (anchorSec != null && Number.isFinite(anchorSec)) {
+            kiteP2PEngineRef.current?.alignPhase(anchorSec);
+          }
         }
       }
     };
@@ -3102,6 +3161,8 @@ export default function StudioBridgePage() {
       localIntervalFrames,
     };
     kiteIntervalTimingRef.current = timing;
+    setBeatsPerInterval(bpi);
+    setMetronomeBpm(bpm);
     return timing;
   }, [
     getStudioKiteSampleRate,
@@ -3560,6 +3621,12 @@ export default function StudioBridgePage() {
 
       // Partner-only local monitor: worklet output is playback (remote intervals), not dry mic.
       // Interface live monitor is ducked separately while kiteModeRef === "broadcast".
+      const inputLatencyMs = KITE_DEFAULT_INPUT_LATENCY_MS;
+      const inputNudgeFrames = calcInputNudgeFrames(
+        inputLatencyMs,
+        timing.localSampleRate,
+        timing.localIntervalFrames
+      );
       const graph = await buildKiteIntervalGraph({
         audioContext: ctx,
         inputStreams: [{ id: "p2p-mic", stream: inputStream }],
@@ -3567,6 +3634,7 @@ export default function StudioBridgePage() {
         timing,
         intervalId,
         channelCount: 2,
+        inputLatencyMs,
         monitorDestination: ctx.destination,
         monitorGain: 1,
         onEvent: (event) => {
@@ -3619,6 +3687,12 @@ export default function StudioBridgePage() {
       kiteP2PEngineRef.current = graph;
       latestKiteIntervalTimingRef.current = timing;
       kiteModeRef.current = "broadcast";
+      console.log("[P2P Engine] record input nudge", {
+        inputLatencyMs,
+        inputNudgeFrames,
+        sampleRate: timing.localSampleRate,
+        intervalFrames: timing.localIntervalFrames,
+      });
 
       const voipStream = localStreamRef.current;
       const liveVoipTrack = voipStream?.getAudioTracks()[0] ?? null;
@@ -4950,9 +5024,13 @@ export default function StudioBridgePage() {
                   Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) * sixteenthSec;
               }
               flushAndSetRemoteGridTarget(nextGridSec);
-              // One-bar count-in: KITE_SYNC does not carry timeSignatureTop, so 4 (4/4 default)
-              // is used here. SET_INTERVAL will deliver the real beatsPerBar in a later step.
-              const countInOneBarSec = (60 / msg.bpm) * 4;
+              const timing =
+                latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
+              const beatsPerBar = Math.max(
+                1,
+                Math.round(timing?.beatsPerBar ?? timing?.timeSignatureTop ?? 4)
+              );
+              const countInOneBarSec = (60 / msg.bpm) * beatsPerBar;
               if (Number.isFinite(countInOneBarSec) && countInOneBarSec > 0) {
                 kiteSyncCountInEndAtContextSecRef.current =
                   ctx.currentTime + countInOneBarSec;

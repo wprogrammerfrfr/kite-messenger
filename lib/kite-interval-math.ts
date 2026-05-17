@@ -25,6 +25,59 @@ export type KiteIntervalTiming = {
 
 export const KITE_TARGET_SAMPLE_RATE = 48000;
 
+/**
+ * Stopwatch-measured one-way hardware capture delay (typ. 50–80 ms).
+ * Not `AudioContext.baseLatency` (output HAL).
+ */
+export const KITE_DEFAULT_INPUT_LATENCY_MS = 65;
+
+/** Log when D/N exceeds this fraction — seam skew may be audible on short loops. */
+export const KITE_INPUT_NUDGE_BOUNDARY_WARN_RATIO = 0.01;
+
+/**
+ * Convert measured input latency (ms) to record write nudge in samples.
+ * Guards: floor, 0 <= D < intervalFrames.
+ */
+export function calcInputNudgeFrames(
+  inputLatencyMs: number,
+  sampleRate: number,
+  intervalFrames: number
+): number {
+  const safeMs = sanitizeNumber(inputLatencyMs, KITE_DEFAULT_INPUT_LATENCY_MS);
+  const safeSr = sanitizeSampleRate(sampleRate, "sampleRate");
+  const safeN = Math.max(1, Math.floor(intervalFrames));
+  const requested = Math.max(0, Math.floor((safeMs / 1000) * safeSr));
+  if (safeN <= 1) return 0;
+  return Math.min(requested, safeN - 1);
+}
+
+/** Record write index: place late-arriving input at acoustic grid time (c - D) mod N. */
+export function calcRecordWriteFrameIndex(
+  frameCursor: number,
+  inputNudgeFrames: number,
+  intervalFrames: number
+): number {
+  const N = Math.max(1, Math.floor(intervalFrames));
+  const c = Math.floor(frameCursor) % N;
+  const D = Math.max(0, Math.min(Math.floor(inputNudgeFrames), N - 1));
+  if (D === 0) return c;
+  return (c - D + N) % N;
+}
+
+export function inputNudgeBoundaryRatio(inputNudgeFrames: number, intervalFrames: number): number {
+  const N = Math.max(1, Math.floor(intervalFrames));
+  if (N <= 0) return 0;
+  return Math.max(0, Math.floor(inputNudgeFrames)) / N;
+}
+
+export function shouldWarnInputNudgeBoundary(
+  inputNudgeFrames: number,
+  intervalFrames: number,
+  warnRatio = KITE_INPUT_NUDGE_BOUNDARY_WARN_RATIO
+): boolean {
+  return inputNudgeBoundaryRatio(inputNudgeFrames, intervalFrames) > warnRatio;
+}
+
 const MIN_BPM = 20;
 const MAX_BPM = 320;
 const MIN_CHORDS = 1;

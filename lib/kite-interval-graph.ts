@@ -1,4 +1,10 @@
-import { KITE_TARGET_SAMPLE_RATE, type KiteIntervalTiming } from "@/lib/kite-interval-math";
+import {
+  calcInputNudgeFrames,
+  KITE_DEFAULT_INPUT_LATENCY_MS,
+  shouldWarnInputNudgeBoundary,
+  KITE_TARGET_SAMPLE_RATE,
+  type KiteIntervalTiming,
+} from "@/lib/kite-interval-math";
 
 export type KiteIntervalInputStream = {
   id: string;
@@ -37,6 +43,8 @@ export type BuildKiteIntervalGraphOptions = {
   channelCount?: 1 | 2;
   monitorDestination?: AudioNode;
   monitorGain?: number;
+  /** One-way capture delay (ms); stopwatch-calibrated, not baseLatency. */
+  inputLatencyMs?: number;
   onEvent?: (event: KiteIntervalGraphEvent) => void;
 };
 
@@ -56,6 +64,8 @@ export type KiteIntervalGraph = {
   outputGain: GainNode;
   monitorGainNode: GainNode | null;
   loadInterval(options: LoadKiteIntervalOptions): void;
+  alignPhase(anchorContextSec: number): void;
+  setInputNudge(inputNudgeFrames: number): void;
   reset(): void;
   teardown(): void;
 };
@@ -177,6 +187,25 @@ export async function buildKiteIntervalGraph(
     monitorGainNode.connect(options.monitorDestination);
   }
 
+  const inputLatencyMs = options.inputLatencyMs ?? KITE_DEFAULT_INPUT_LATENCY_MS;
+  const inputNudgeFrames = calcInputNudgeFrames(
+    inputLatencyMs,
+    timingSr,
+    options.timing.localIntervalFrames
+  );
+  if (
+    shouldWarnInputNudgeBoundary(inputNudgeFrames, options.timing.localIntervalFrames)
+  ) {
+    console.warn(
+      "[Kite interval] input nudge is large relative to loop length; P2P seam skew may be audible.",
+      {
+        inputNudgeFrames,
+        intervalFrames: options.timing.localIntervalFrames,
+        inputLatencyMs,
+      }
+    );
+  }
+
   workletNode.port.postMessage({
     type: "SET_INTERVAL",
     intervalId: options.intervalId,
@@ -184,6 +213,7 @@ export async function buildKiteIntervalGraph(
     sampleRate: options.timing.localSampleRate,
     channelCount,
     sequenceNumber: options.sequenceNumber ?? 0,
+    inputNudgeFrames,
   });
 
   const graph: KiteIntervalGraph = {
@@ -206,6 +236,21 @@ export async function buildKiteIntervalGraph(
         },
         transferListForBuffer(loadOptions.buffer)
       );
+    },
+    alignPhase(anchorContextSec: number): void {
+      if (tornDown) return;
+      if (!Number.isFinite(anchorContextSec)) return;
+      workletNode.port.postMessage({
+        type: "ALIGN_PHASE",
+        anchorContextSec,
+      });
+    },
+    setInputNudge(nudgeFrames: number): void {
+      if (tornDown) return;
+      workletNode.port.postMessage({
+        type: "SET_INPUT_NUDGE",
+        inputNudgeFrames: nudgeFrames,
+      });
     },
     reset(): void {
       if (tornDown) return;
