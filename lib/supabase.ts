@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import { createBrowserClient } from "@supabase/ssr";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -10,16 +10,11 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 /**
- * Supabase client for browser and server. Use for sending and receiving
- * messages (e.g. realtime channels, table queries, RPC).
- * PWA / offline: persist session in localStorage so getSession works offline until refresh fails.
+ * Browser Supabase client (cookie-based auth for PKCE/OAuth).
+ * Server code exchange runs in app/auth/callback/route.ts.
  */
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = createBrowserClient(supabaseUrl, supabaseAnonKey, {
   auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-    storage:
-      typeof window !== "undefined" ? window.localStorage : undefined,
+    detectSessionInUrl: false,
   },
 });

@@ -4,24 +4,31 @@ import { NextResponse } from "next/server";
 
 /**
  * Email confirmation / OAuth: exchanges `code` for a session and sets auth cookies.
- * Configure Supabase Auth redirect URL to: {SITE_URL}/auth/callback
- * Set NEXT_PUBLIC_SITE_URL=https://kite-messenger-omega.vercel.app (or your prod URL).
+ * Configure Supabase Auth redirect URL to: {APP_URL}/auth/callback
+ * Set NEXT_PUBLIC_APP_URL=https://kite-messenger-omega.vercel.app (or your prod URL).
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const nextPath = url.searchParams.get("next") ?? "/chat";
 
-  const siteUrl =
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ??
-    url.origin;
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ?? url.origin;
 
-  const errorRedirect = NextResponse.redirect(
-    new URL(`/chat?error=auth_callback`, siteUrl)
-  );
+  function errorRedirect(description?: string) {
+    const target = new URL("/chat", appUrl);
+    target.searchParams.set("error", "auth_callback");
+    if (description) {
+      target.searchParams.set(
+        "error_description",
+        description.slice(0, 200)
+      );
+    }
+    return NextResponse.redirect(target);
+  }
 
   if (!code) {
-    return errorRedirect;
+    return errorRedirect();
   }
 
   const cookieStore = cookies();
@@ -54,9 +61,9 @@ export async function GET(request: Request) {
 
   const { error } = await supabase.auth.exchangeCodeForSession(code);
   if (error) {
-    return errorRedirect;
+    return errorRedirect(error.message);
   }
 
   const safeNext = nextPath.startsWith("/") ? nextPath : `/${nextPath}`;
-  return NextResponse.redirect(new URL(safeNext, siteUrl));
+  return NextResponse.redirect(new URL(safeNext, appUrl));
 }

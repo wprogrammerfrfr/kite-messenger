@@ -76,9 +76,9 @@ export function Auth() {
       } else {
         const redirectBase =
           (typeof process !== "undefined" &&
-            process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "")) ||
+            process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "")) ||
           (typeof window !== "undefined" ? window.location.origin : "");
-        const { error: signUpError } = await supabase.auth.signUp({
+        const { data, error: signUpError } = await supabase.auth.signUp({
           email,
           password,
           options: {
@@ -91,6 +91,13 @@ export function Auth() {
 
         if (signUpError) {
           setError(signUpError.message);
+        } else if (
+          data?.user &&
+          (!data.user.identities || data.user.identities.length === 0)
+        ) {
+          setError(
+            "An account with this email already exists. Please sign in."
+          );
         } else {
           setMessage("Check your email to confirm your account.");
         }
@@ -138,7 +145,7 @@ export function Auth() {
     setLoading(true);
     try {
       const redirectBase =
-        process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ||
+        process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ||
         window.location.origin;
       const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider: "google",
@@ -172,7 +179,20 @@ export function Auth() {
       if (m === "signup") setMode("signup");
       if (m === "login") setMode("login");
       if (params.get("error") === "auth_callback") {
-        setError("Sign-in failed. Please try again.");
+        const description = params.get("error_description");
+        setError(
+          description
+            ? description.slice(0, 200)
+            : "Sign-in failed. Please try again."
+        );
+        try {
+          const clean = new URL(window.location.href);
+          clean.searchParams.delete("error");
+          clean.searchParams.delete("error_description");
+          window.history.replaceState({}, "", clean.pathname + clean.search);
+        } catch {
+          // ignore
+        }
       }
     } catch {
       // ignore
