@@ -750,6 +750,7 @@ export default function StudioBridgePage() {
   );
   const tapBeatTimestampsRef = useRef<number[]>([]);
   const echoModeApplyingRef = useRef(false);
+  const previousEchoSafetyModeRef = useRef(echoSafetyMode);
   const isMicMutedRef = useRef(isMicMuted);
   const isBufferingEnabledRef = useRef(isBufferingEnabled);
   const isWorkletLoadedRef = useRef(isWorkletLoaded);
@@ -1572,7 +1573,10 @@ export default function StudioBridgePage() {
       });
 
       try {
-        const nextStream = await acquireStudioMicStream({ deviceId: requestedDeviceId });
+        const nextStream = await acquireStudioMicStream({
+          deviceId: requestedDeviceId,
+          echoSafetyMode,
+        });
         if (!mountedRef.current) {
           nextStream.getTracks().forEach((track) => track.stop());
           return;
@@ -1628,7 +1632,13 @@ export default function StudioBridgePage() {
         void refreshAudioInputDevices();
       }
     },
-    [rebuildMixerAndReplaceTrack, refreshAudioInputDevices, removeAndCleanupDevice, clearMixerDeviceVolumeState]
+    [
+      echoSafetyMode,
+      rebuildMixerAndReplaceTrack,
+      refreshAudioInputDevices,
+      removeAndCleanupDevice,
+      clearMixerDeviceVolumeState,
+    ]
   );
 
   const handleVolumeChange = useCallback((laneKey: string, newVolume: number) => {
@@ -2361,54 +2371,88 @@ export default function StudioBridgePage() {
 
   useEffect(() => {
     if (!isInStudioPhase) return;
-    const currentStream = localStreamRef.current;
-    if (!currentStream || echoModeApplyingRef.current) return;
+    if (soloLooperStateRef.current === "recording") return;
+    if (previousEchoSafetyModeRef.current === echoSafetyMode) return;
+    if (echoModeApplyingRef.current) return;
+    if (activeStreamsMapRef.current.size === 0 && !localStreamRef.current) return;
+
     echoModeApplyingRef.current = true;
 
     void (async () => {
       try {
-        // Preserve the Phase-1 singleton mixer destination: echo mode changes must flow
-        // through lane rebuild, never by swapping in a raw single-mic stream.
-        if (mixerMasterDestinationRef.current) {
-          await rebuildMixerAndReplaceTrack();
-          return;
-        }
+        previousEchoSafetyModeRef.current = echoSafetyMode;
 
-        const nextStream = await acquireStudioMicStream({ echoSafetyMode });
-        if (!mountedRef.current) {
-          nextStream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        const nextTrack = nextStream.getAudioTracks()[0] ?? null;
-        if (!nextTrack) {
-          nextStream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        const prevStream = localStreamRef.current;
-        const prevTrack = prevStream?.getAudioTracks()[0] ?? null;
-        replacePeerAudioTrack(prevTrack, nextTrack, prevStream ?? null, nextStream);
+        const entries = Array.from(activeStreamsMapRef.current.entries());
 
-        nextTrack.enabled = !isMicMutedRef.current;
-        localStreamRef.current = nextStream;
-        setLocalMicStream(nextStream);
-
-        const localEl = localMonitorAudioRef.current;
-        if (localEl) {
-          localEl.srcObject = nextStream;
-          localEl.muted = true;
-          await localEl.play().catch(() => {});
-        }
-
-        if (prevStream && prevStream !== nextStream) {
+        if (entries.length > 0) {
+          for (const [deviceId, oldStream] of entries) {
+            if (!activeDeviceIdsRef.current.includes(deviceId)) {
+              removeAndCleanupDevice(deviceId);
+              continue;
+            }
+            oldStream.getTracks().forEach((track) => track.stop());
+            const nextStream = await acquireStudioMicStream({ deviceId, echoSafetyMode });
+            if (!mountedRef.current) {
+              nextStream.getTracks().forEach((track) => track.stop());
+              return;
+            }
+            const stillIntended = activeDeviceIdsRef.current.includes(deviceId);
+            if (!stillIntended) {
+              nextStream.getTracks().forEach((track) => track.stop());
+              removeAndCleanupDevice(deviceId);
+              continue;
+            }
+            if ((nextStream.getAudioTracks()[0] ?? null) === null) {
+              nextStream.getTracks().forEach((track) => track.stop());
+              continue;
+            }
+            activeStreamsMapRef.current.set(deviceId, nextStream);
+            nextStream.getTracks().forEach((track) => {
+              track.onended = () => {
+                if (!activeDeviceIdsRef.current.includes(deviceId)) return;
+                setActiveDeviceIds((prev) => prev.filter((id) => id !== deviceId));
+                removeAndCleanupDevice(deviceId);
+                clearMixerDeviceVolumeState(deviceId);
+              };
+            });
+          }
+        } else if (localStreamRef.current) {
+          const prevStream = localStreamRef.current;
+          const prevTrack = prevStream.getAudioTracks()[0] ?? null;
+          const deviceId =
+            prevTrack?.getSettings().deviceId?.trim() ||
+            activeDeviceIdsRef.current[0] ||
+            "default";
           prevStream.getTracks().forEach((track) => track.stop());
+          const nextStream = await acquireStudioMicStream({ deviceId, echoSafetyMode });
+          if (!mountedRef.current) {
+            nextStream.getTracks().forEach((track) => track.stop());
+            return;
+          }
+          if ((nextStream.getAudioTracks()[0] ?? null) === null) {
+            nextStream.getTracks().forEach((track) => track.stop());
+            return;
+          }
+          activeStreamsMapRef.current.set(deviceId, nextStream);
+          nextStream.getTracks().forEach((track) => {
+            track.onended = () => {
+              if (!activeDeviceIdsRef.current.includes(deviceId)) return;
+              setActiveDeviceIds((prev) => prev.filter((id) => id !== deviceId));
+              removeAndCleanupDevice(deviceId);
+              clearMixerDeviceVolumeState(deviceId);
+            };
+          });
+          setActiveDeviceIds((prev) => (prev.includes(deviceId) ? prev : [...prev, deviceId]));
         }
+
+        await rebuildMixerAndReplaceTrack();
       } catch (err) {
         console.error("Failed to re-acquire microphone for echo safety mode:", err);
       } finally {
         echoModeApplyingRef.current = false;
       }
     })();
-  }, [echoSafetyMode, isInStudioPhase, rebuildMixerAndReplaceTrack, replacePeerAudioTrack]);
+  }, [echoSafetyMode, rebuildMixerAndReplaceTrack, replacePeerAudioTrack]);
 
   useEffect(() => {
     if (isAutoBufferRef.current) return;

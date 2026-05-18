@@ -141,17 +141,53 @@ export function parseSelectedCandidatePairRttMs(
   return rttMs === null ? null : { rttMs };
 }
 
-/** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
-// WARNING: Echo cancellation is disabled. Headphones are MANDATORY to prevent feedback loops.
-export function getStudioAudioConstraints(
-  echoSafetyMode = false
-): boolean | MediaTrackConstraints {
+/** Same constraint object as historical desktop (zero drift for non-mobile paths). */
+function desktopStudioAudioConstraints(echoSafetyMode: boolean): MediaTrackConstraints {
   return {
     echoCancellation: echoSafetyMode,
     noiseSuppression: echoSafetyMode,
     autoGainControl: false,
     ...({ latency: { ideal: 0.05 } } as unknown as MediaTrackConstraints),
     channelCount: 2,
+    sampleRate: { ideal: 48000 },
+  };
+}
+
+/**
+ * True for phones/tablets, including iPadOS reporting "Macintosh" (touch-screen trap).
+ */
+export function isMobileDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent ?? "";
+  const uaData = (navigator as Navigator & { userAgentData?: { mobile?: boolean } })
+    .userAgentData;
+  const uaDataMobile = uaData?.mobile === true;
+  const regexMobile = /iPhone|iPad|iPod|Android/i.test(ua);
+  const iPadOsMacintoshTrap =
+    /Macintosh/i.test(ua) && (navigator.maxTouchPoints ?? 0) > 1;
+  return uaDataMobile || regexMobile || iPadOsMacintoshTrap;
+}
+
+/** Mic capture tuned for conversational low-latency (Pro Audio toggles can relax these later). */
+// WARNING: Echo cancellation is disabled. Headphones are MANDATORY to prevent feedback loops.
+export function getStudioAudioConstraints(
+  echoSafetyMode = false
+): boolean | MediaTrackConstraints {
+  if (!isMobileDevice()) {
+    return desktopStudioAudioConstraints(echoSafetyMode);
+  }
+  if (echoSafetyMode) {
+    return {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: false,
+      sampleRate: { ideal: 48000 },
+    };
+  }
+  return {
+    echoCancellation: { exact: false },
+    noiseSuppression: { exact: false },
+    autoGainControl: false,
     sampleRate: { ideal: 48000 },
   };
 }
@@ -167,14 +203,33 @@ export async function acquireStudioMicStream(options?: {
     throw new Error("getUserMedia is not available.");
   }
   const requestedDeviceId = options?.deviceId?.trim();
-  const audioConstraints: MediaTrackConstraints = {
-    ...(getStudioAudioConstraints(options?.echoSafetyMode) as MediaTrackConstraints),
+  const echoSafetyMode = options?.echoSafetyMode ?? false;
+
+  const buildAudioConstraints = (base: MediaTrackConstraints): MediaTrackConstraints => ({
+    ...base,
     ...(requestedDeviceId ? { deviceId: { exact: requestedDeviceId } } : {}),
-  };
-  return navigator.mediaDevices.getUserMedia({
-    audio: audioConstraints,
-    video: false,
   });
+
+  const primary = buildAudioConstraints(
+    getStudioAudioConstraints(echoSafetyMode) as MediaTrackConstraints
+  );
+
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: primary,
+      video: false,
+    });
+  } catch (err) {
+    const isOverconstrained =
+      err instanceof DOMException && err.name === "OverconstrainedError";
+    if (isMobileDevice() && !echoSafetyMode && isOverconstrained) {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: buildAudioConstraints(desktopStudioAudioConstraints(echoSafetyMode)),
+        video: false,
+      });
+    }
+    throw err;
+  }
 }
 
 export type MixerInputStream = {
