@@ -4811,11 +4811,7 @@ export default function StudioBridgePage() {
   };
 
   const handleRecordFirstLoop = useCallback(() => {
-    if (
-      isRecordingArmedRef.current ||
-      soloLooperStateRef.current === "recording" ||
-      isMasterPausedRef.current
-    ) {
+    if (isRecordingArmedRef.current || soloLooperStateRef.current === "recording") {
       return;
     }
     applyPedalFocus(1);
@@ -4848,6 +4844,7 @@ export default function StudioBridgePage() {
         masterLoopIntervalFramesRef.current = null;
         isMasterPausedRef.current = false;
         setIsMasterPaused(false);
+        soloLooperEngineRef.current?.setPaused(false);
         soloMetronomeAnchorContextSecRef.current = null;
         soloLooperActiveRecordTrackIndexRef.current = null;
         soloLooperLiveLoopIdRef.current = null;
@@ -4855,6 +4852,7 @@ export default function StudioBridgePage() {
         soloTrackSlotUiLatestRef.current = null;
         isMasterPausedRef.current = false;
         setIsMasterPaused(false);
+        soloLooperEngineRef.current?.setPaused(false);
         soloMetronomeAnchorContextSecRef.current = null;
         setSoloTrackVolumes([1, 1, 1, 1]);
         setSoloMasterLoopFrames(null);
@@ -5181,6 +5179,9 @@ export default function StudioBridgePage() {
       setLoopProgress(0);
       soloLooperStateRef.current = "idle";
       setSoloLooperState("idle");
+      isMasterPausedRef.current = false;
+      setIsMasterPaused(false);
+      engine.setPaused(false);
       soloOverdubArmedTrackIndexRef.current = null;
       setSoloOverdubArmedTrackIndex(null);
       setSoloTrackSlotUi((prev) =>

@@ -346,6 +346,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
         this.resetSlotToIdle(this.trackSlots[i]);
         this.postTrackState("TRACK_RESET", i + 1);
       }
+      this.isPaused = false;
       this.postPlaybackUiState();
       return;
     }
