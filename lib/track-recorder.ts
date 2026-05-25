@@ -92,7 +92,7 @@ export class TrackRecorder {
 
   stop(): Promise<Blob> {
     const recorder = this.mediaRecorder;
-    if (!recorder || recorder.state !== "recording") {
+    if (!recorder || recorder.state === "inactive") {
       return Promise.reject(new Error("TrackRecorder is not recording."));
     }
 
@@ -130,6 +130,24 @@ export class TrackRecorder {
       recorder.addEventListener("error", handleError as EventListener);
       recorder.stop();
     });
+  }
+
+  pause(): void {
+    const recorder = this.mediaRecorder;
+    if (recorder && recorder.state === "recording") {
+      recorder.pause();
+    }
+  }
+
+  resume(): void {
+    const recorder = this.mediaRecorder;
+    if (recorder && recorder.state === "paused") {
+      recorder.resume();
+    }
+  }
+
+  getState(): RecordingState | "inactive" {
+    return this.mediaRecorder?.state ?? "inactive";
   }
 
   getTimestamp(): number {
