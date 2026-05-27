@@ -4057,14 +4057,14 @@ export default function StudioBridgePage() {
 
     try {
       const engine = await ensureSoloLooperEngineBootstrapped();
-      const stationStream = engine.getSessionStationMixStream();
-      if (stationStream.getAudioTracks().length === 0) {
-        throw new Error("Loop-station audio stream is unavailable.");
+      const recordingStream = engine.getSessionRecordingStream();
+      if (recordingStream.getAudioTracks().length === 0) {
+        throw new Error("Session recording audio stream is unavailable.");
       }
 
       const combinedStream = new MediaStream([
         ...displayStream.getVideoTracks(),
-        ...stationStream.getAudioTracks(),
+        ...recordingStream.getAudioTracks(),
       ]);
 
       soloSessionChunksRef.current = [];
