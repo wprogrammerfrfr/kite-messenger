@@ -115,8 +115,11 @@ export type BuildSoloLooperEngineOptions = {
   /** Target track 1–4 for initial `CONFIGURE_LOOP` (optional; worklet defaults active track). */
   trackIndex?: number;
   outputGain?: number;
+  inputGain?: number;
   monitorDestination?: AudioNode;
   monitorGain?: number;
+  /** Shared master metronome gain (headphone-only; never routes to recordingDestination). */
+  metronomeGainNode?: GainNode | null;
   onEvent?: (event: SoloLooperEngineEvent) => void;
 };
 
@@ -141,6 +144,8 @@ export type SoloLooperStartRecordingParams = {
   loopMode?: "free" | "grid";
   targetLengthFrames?: number;
   latencyOffsetFrames?: number;
+  /** AudioContext.currentTime at which the worklet should declare the recording downbeat. */
+  recordStartContextSec?: number;
 };
 
 export type SoloLooperStopRecordingParams = {
@@ -156,6 +161,7 @@ export type SoloLooperEngine = {
   workletNode: AudioWorkletNode;
   sourceNode: MediaStreamAudioSourceNode;
   inputGain: GainNode;
+  inputAnalyserNode: AnalyserNode;
   outputGain: GainNode;
   recordingDestination: MediaStreamAudioDestinationNode;
   /** Loop-station playback only (no raw mic tap) for session export. */
@@ -184,8 +190,10 @@ export type SoloLooperEngine = {
   /** Reset one track; Track 1 reset cascades in the processor to avoid orphan overdubs. */
   resetTrack(trackIndex: number): void;
   /** Headphone-only click track for Track 1 recording; never routes to recordingDestination. */
-  startAudibleMetronome(bpm: number): void;
+  startAudibleMetronome(bpm: number, anchorSec?: number): void;
   stopAudibleMetronome(): void;
+  /** Wire shared metronome volume GainNode for audible clicks during recording. */
+  setMetronomeGainNode(node: GainNode | null): void;
   /** Arm overdub on track 2–4; downbeat start is worklet-owned. */
   armOverdub(params: SoloLooperArmOverdubParams): void;
   /** Disarm overdub; optional trackIndex must match armed track (worklet A4). */
@@ -289,6 +297,9 @@ export async function buildSoloLooperEngine(
   const inputGain = ctx.createGain();
   preserveDiscreteInputChannels(inputGain);
 
+  const inputAnalyserNode = ctx.createAnalyser();
+  inputAnalyserNode.fftSize = 256;
+
   const outputGain = ctx.createGain();
   const recordingDestination = ctx.createMediaStreamDestination();
   const stationMixDestination = ctx.createMediaStreamDestination();
@@ -306,12 +317,13 @@ export async function buildSoloLooperEngine(
   preserveDiscreteInputChannels(workletNode);
 
   let tornDown = false;
+  let metronomeGainNodeRef: GainNode | null = options.metronomeGainNode ?? null;
   let metronomeTimer: ReturnType<typeof setTimeout> | null = null;
   let metronomeNextTickSec = 0;
   let metronomeBeatIndex = 0;
   const scheduledMetronomeNodes = new Set<AudioScheduledSourceNode>();
 
-  inputGain.gain.value = 1;
+  inputGain.gain.value = clampGain(options.inputGain ?? 1);
   outputGain.gain.value = clampGain(options.outputGain);
   recordingMicGainNode.gain.value = 1;
   if (monitorGainNode) {
@@ -341,7 +353,8 @@ export async function buildSoloLooperEngine(
   };
 
   sourceNode.connect(inputGain);
-  inputGain.connect(workletNode);
+  inputGain.connect(inputAnalyserNode);
+  inputAnalyserNode.connect(workletNode);
   workletNode.connect(outputGain);
   outputGain.connect(options.destinationNode);
   outputGain.connect(recordingDestination);
@@ -415,7 +428,7 @@ export async function buildSoloLooperEngine(
 
     oscillator.connect(gain);
     // Headphone-only metronome: never connect this click branch to recordingDestination.
-    gain.connect(ctx.destination);
+    gain.connect(metronomeGainNodeRef ?? ctx.destination);
     oscillator.start(atSec);
     oscillator.stop(atSec + 0.05);
     oscillator.onended = () => {
@@ -429,13 +442,17 @@ export async function buildSoloLooperEngine(
     };
   };
 
-  const startAudibleMetronome = (bpm: number): void => {
+  const startAudibleMetronome = (bpm: number, anchorSec?: number): void => {
     stopAudibleMetronome();
     const normalizedBpm = Number.isFinite(bpm) ? Math.max(30, Math.min(300, bpm)) : 120;
     const beatSec = 60 / normalizedBpm;
     const lookaheadSec = 0.12;
     const scheduleEveryMs = 25;
-    metronomeNextTickSec = Math.max(ctx.currentTime + 0.01, ctx.currentTime);
+    const anchor =
+      anchorSec !== undefined && Number.isFinite(anchorSec) && anchorSec >= ctx.currentTime
+        ? anchorSec
+        : null;
+    metronomeNextTickSec = anchor !== null ? anchor : Math.max(ctx.currentTime + 0.01, ctx.currentTime);
     metronomeBeatIndex = 0;
 
     const pump = (): void => {
@@ -459,6 +476,7 @@ export async function buildSoloLooperEngine(
     workletNode,
     sourceNode,
     inputGain,
+    inputAnalyserNode,
     outputGain,
     recordingDestination,
     stationMixDestination,
@@ -529,12 +547,15 @@ export async function buildSoloLooperEngine(
       assertValidTrackIndex(trackIndex);
       workletNode.port.postMessage({ type: "RESET_TRACK", trackIndex });
     },
-    startAudibleMetronome(bpm: number): void {
+    startAudibleMetronome(bpm: number, anchorSec?: number): void {
       if (tornDown) return;
-      startAudibleMetronome(bpm);
+      startAudibleMetronome(bpm, anchorSec);
     },
     stopAudibleMetronome(): void {
       stopAudibleMetronome();
+    },
+    setMetronomeGainNode(node: GainNode | null): void {
+      metronomeGainNodeRef = node;
     },
     armOverdub(params: SoloLooperArmOverdubParams): void {
       if (tornDown) return;
@@ -576,6 +597,9 @@ export async function buildSoloLooperEngine(
           : {}),
         ...(params?.latencyOffsetFrames !== undefined
           ? { latencyOffsetFrames: params.latencyOffsetFrames }
+          : {}),
+        ...(params?.recordStartContextSec !== undefined
+          ? { recordStartContextSec: params.recordStartContextSec }
           : {}),
       });
     },

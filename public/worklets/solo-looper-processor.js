@@ -9,6 +9,10 @@ const CALIBRATION_THRESHOLD = 0.05;
 const CALIBRATION_TIMEOUT_FRAMES = 24000;
 const CALIBRATION_CLICK_AMPLITUDE = 0.95;
 const CALIBRATION_BURST_FRAMES = 10;
+const CALIBRATION_ENERGY_WINDOW = 8;
+const CALIBRATION_ENERGY_THRESHOLD = 0.04;
+/** Ignore near-field electrical returns before arming acoustic threshold detection. */
+const CALIBRATION_BLANKING_FRAMES = Math.max(1, Math.floor(sampleRate * 0.030));
 
 /**
  * Must stay identical to `lib/looper-math.ts` `snapToMasterMultiple`.
@@ -54,6 +58,8 @@ function createEmptySlot() {
     stopTargetFrames: null,
     /** Options captured at stop time for the deferred finalizeRecordingSlot call. */
     stopOptions: null,
+    /** Absolute frame clock target before arming recording (grid downbeat gate). */
+    pendingStartFrame: null,
   };
 }
 
@@ -92,6 +98,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       clickInjected: false,
       clickFrame: null,
       burstFramesEmitted: 0,
+      energyAccumulator: new Float32Array(CALIBRATION_ENERGY_WINDOW),
+      energyAccumulatorIdx: 0,
     };
 
     this.port.onmessage = (event) => {
@@ -221,6 +229,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     slot.latencyOffsetFrames = 0;
     slot.stopTargetFrames = null;
     slot.stopOptions = null;
+    slot.pendingStartFrame = null;
     this.freeSlotBuffers(slot);
   }
 
@@ -314,6 +323,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.calibration.clickInjected = false;
     this.calibration.clickFrame = null;
     this.calibration.burstFramesEmitted = 0;
+    this.calibration.energyAccumulator.fill(0);
+    this.calibration.energyAccumulatorIdx = 0;
   }
 
   finishCalibration(latencyFrames) {
@@ -330,6 +341,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.calibration.clickInjected = false;
     this.calibration.clickFrame = null;
     this.calibration.burstFramesEmitted = 0;
+    this.calibration.energyAccumulator.fill(0);
+    this.calibration.energyAccumulatorIdx = 0;
   }
 
   resetTrack(data) {
@@ -399,9 +412,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
         return Math.max(1, Math.min(Math.floor(rawTargetFrames), this.maxRecordingFrames));
       }
 
-      const framesPerBeat = sampleRate * (60 / effectiveBpm);
+      const framesPerBeat = Math.round(sampleRate * (60 / effectiveBpm));
       const beatsRounded = Math.max(1, Math.round(rawTargetFrames / framesPerBeat));
-      const quantizedFrames = Math.round(beatsRounded * framesPerBeat);
+      const quantizedFrames = beatsRounded * framesPerBeat;
       return Math.max(1, Math.min(quantizedFrames, this.maxRecordingFrames));
     }
 
@@ -583,22 +596,20 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     const endOffsetIndex = (readStartFrame + copyFrames) * channels;
     playback.set(slot.recordingBuffer.subarray(startOffsetIndex, endOffsetIndex));
 
-    if (targetTrackIndex !== 1) {
-      const crossfadeSamples = Math.min(LOOP_CROSSFADE_SAMPLES, Math.floor(n / 2));
-      if (crossfadeSamples >= 2 && recorded > 0) {
-        const fadeOutStart = n - crossfadeSamples;
-        const denom = crossfadeSamples - 1;
-        for (let i = 0; i < crossfadeSamples; i += 1) {
-          const theta = (i / denom) * (Math.PI / 2);
-          const tailGain = Math.cos(theta);
-          const headGain = Math.sin(theta);
-          const tailBase = (fadeOutStart + i) * channels;
-          const headBase = i * channels;
-          for (let c = 0; c < channels; c += 1) {
-            const tail = playback[tailBase + c];
-            const head = playback[headBase + c];
-            playback[tailBase + c] = tail * tailGain + head * headGain;
-          }
+    const crossfadeSamples = Math.min(LOOP_CROSSFADE_SAMPLES, Math.floor(n / 2));
+    if (crossfadeSamples >= 2 && recorded > 0) {
+      const fadeOutStart = n - crossfadeSamples;
+      const denom = crossfadeSamples - 1;
+      for (let i = 0; i < crossfadeSamples; i += 1) {
+        const theta = (i / denom) * (Math.PI / 2);
+        const tailGain = Math.cos(theta);
+        const headGain = Math.sin(theta);
+        const tailBase = (fadeOutStart + i) * channels;
+        const headBase = i * channels;
+        for (let c = 0; c < channels; c += 1) {
+          const tail = playback[tailBase + c];
+          const head = playback[headBase + c];
+          playback[tailBase + c] = tail * tailGain + head * headGain;
         }
       }
     }
@@ -706,8 +717,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       // Extend the provision cap so the recording loop doesn't hit it prematurely.
       slot.intervalFrames =
         (slot.recordingEpochFrames || 0) +
-        nextIntervalFrames +
-        (slot.latencyOffsetFrames || 0);
+        nextIntervalFrames;
       return;
     }
 
@@ -983,12 +993,31 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     slot.mode = "recording";
     slot.playbackCursor = 0;
     slot.recordWriteOffsetInBlock = 0;
+    slot.recordingBuffer = null;
+    slot.playbackBuffer = null;
+    slot.recordingEpochFrames = 0;
+    slot.atProvisionCap = false;
+    slot.pendingStartFrame = null;
+
+    const anchorSec = Number(data.recordStartContextSec);
+    if (Number.isFinite(anchorSec)) {
+      slot.pendingStartFrame = Math.max(0, Math.round(anchorSec * sampleRate));
+      this.reportState("RECORDING");
+      return;
+    }
+
+    this.armRecordingSlot(slot);
+    this.reportState("RECORDING");
+  }
+
+  /** Allocate buffer, apply pre-roll, and declare recording epoch at the downbeat frame. */
+  armRecordingSlot(slot) {
     slot.recordingBuffer = new Float32Array(slot.intervalFrames * slot.channelCount);
     slot.playbackBuffer = null;
     this.applyPreRollToSlot(slot);
     slot.recordingEpochFrames = slot.recordCursor;
     slot.atProvisionCap = false;
-    this.reportState("RECORDING");
+    slot.pendingStartFrame = null;
   }
 
   stopLoop() {
@@ -1191,11 +1220,27 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
 
         const canListen =
           this.calibration.clickFrame !== null &&
-          this.calibration.elapsedFrames >= this.calibration.clickFrame;
+          this.calibration.elapsedFrames - this.calibration.clickFrame >=
+            CALIBRATION_BLANKING_FRAMES;
 
-        if (canListen && Math.abs(monoSample) >= CALIBRATION_THRESHOLD) {
-          const measuredFrames = this.calibration.elapsedFrames - this.calibration.clickFrame;
-          this.finishCalibration(measuredFrames);
+        if (canListen) {
+          const idx = this.calibration.energyAccumulatorIdx % CALIBRATION_ENERGY_WINDOW;
+          this.calibration.energyAccumulator[idx] = monoSample * monoSample;
+          this.calibration.energyAccumulatorIdx += 1;
+          let rmsSum = 0;
+          for (let i = 0; i < CALIBRATION_ENERGY_WINDOW; i += 1) {
+            rmsSum += this.calibration.energyAccumulator[i];
+          }
+          const rms = Math.sqrt(rmsSum / CALIBRATION_ENERGY_WINDOW);
+          if (rms >= CALIBRATION_ENERGY_THRESHOLD) {
+            const measuredFrames = this.calibration.elapsedFrames - this.calibration.clickFrame;
+            this.finishCalibration(measuredFrames);
+          } else if (this.calibration.active) {
+            this.calibration.elapsedFrames += 1;
+            if (this.calibration.elapsedFrames >= CALIBRATION_TIMEOUT_FRAMES) {
+              this.finishCalibration(null);
+            }
+          }
         } else if (this.calibration.active) {
           this.calibration.elapsedFrames += 1;
           if (this.calibration.elapsedFrames >= CALIBRATION_TIMEOUT_FRAMES) {
@@ -1206,6 +1251,15 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
 
       let slotJustFinished = null;
       const active = this.getActiveSlot();
+      if (!this.isPaused && active.mode === "recording") {
+        if (
+          active.pendingStartFrame !== null &&
+          !active.recordingBuffer &&
+          currentFrame + frameIndex >= active.pendingStartFrame
+        ) {
+          this.armRecordingSlot(active);
+        }
+      }
       if (!this.isPaused && active.mode === "recording" && active.recordingBuffer) {
         if (frameIndex >= active.recordWriteOffsetInBlock && active.recordCursor < active.intervalFrames) {
           const loopFrameIndex = active.recordCursor;
@@ -1217,8 +1271,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
             active.targetLengthFrames !== null &&
             active.recordCursor >=
               (active.recordingEpochFrames || 0) +
-              active.targetLengthFrames +
-              (active.latencyOffsetFrames || 0)
+              active.targetLengthFrames
           ) {
             const targetFrames = active.targetLengthFrames;
             const latencyOffsetFrames = active.latencyOffsetFrames;
@@ -1239,8 +1292,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
             active.stopTargetFrames !== null &&
             active.recordCursor >=
               (active.recordingEpochFrames || 0) +
-              active.stopTargetFrames +
-              (active.latencyOffsetFrames || 0)
+              active.stopTargetFrames
           ) {
             // Deferred (post-roll) finalization: we have now recorded up to the quantized boundary.
             const tf = active.stopTargetFrames;

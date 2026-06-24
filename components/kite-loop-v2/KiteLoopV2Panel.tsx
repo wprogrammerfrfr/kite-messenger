@@ -31,6 +31,8 @@ export type KiteLoopV2PanelProps = {
   barCount: number;
   latencyMs: number;
   visualMetronomeControls: ReactNode;
+  metronomeVolume: number;
+  onMetronomeVolumeChange: (value: number) => void;
   onLoopModeChange: (value: SoloLooperMode) => void;
   onBarCountChange: (value: number) => void;
   onLatencyMsChange: (value: number) => void;
@@ -70,6 +72,8 @@ export function KiteLoopV2Panel({
   barCount,
   latencyMs,
   visualMetronomeControls,
+  metronomeVolume,
+  onMetronomeVolumeChange,
   onLoopModeChange,
   onBarCountChange,
   onLatencyMsChange,
@@ -288,6 +292,8 @@ export function KiteLoopV2Panel({
             isSwing={kiteSetupIsSwing}
             timingLocked={isTimingLocked}
             visualMetronomeControls={visualMetronomeControls}
+            metronomeVolume={metronomeVolume}
+            onMetronomeVolumeChange={onMetronomeVolumeChange}
             onSelectTimeSignature={onSelectTimeSignature}
           />
         </motion.div>

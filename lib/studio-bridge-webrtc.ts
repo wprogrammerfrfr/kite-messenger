@@ -585,9 +585,15 @@ export async function fetchTurnCredentialsWithMeta(): Promise<TurnCredentialsBun
         expiresAtEpochMs: null,
       };
     }
+    const iceServers = normalizeFetchedIceServers([
+      ...bundle.iceServers,
+      ...STUDIO_ICE_SERVERS_FALLBACK,
+    ]);
     console.log("[Kite] TURN credentials loaded:", {
-      serverCount: bundle.iceServers.length,
-      hasTurn: bundle.iceServers.some((s: RTCIceServer) =>
+      serverCount: iceServers.length,
+      meteredCount: bundle.iceServers.length,
+      fallbackAppended: STUDIO_ICE_SERVERS_FALLBACK.length,
+      hasTurn: iceServers.some((s: RTCIceServer) =>
         (Array.isArray(s.urls) ? s.urls : [s.urls]).some((u: string) =>
           u.startsWith("turn:")
         )
@@ -595,7 +601,10 @@ export async function fetchTurnCredentialsWithMeta(): Promise<TurnCredentialsBun
       ttlSeconds: bundle.ttlSeconds,
       expiresAtEpochMs: bundle.expiresAtEpochMs,
     });
-    return bundle;
+    return {
+      ...bundle,
+      iceServers,
+    };
   } catch (err) {
     console.error("[Kite] TURN fetch failed, using STUN only:", err);
     return {

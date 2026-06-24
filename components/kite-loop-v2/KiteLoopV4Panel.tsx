@@ -86,11 +86,14 @@ export type KiteLoopV4InputDevicesProps = {
   onSetInterfaceLiveMonitor: (deviceId: string, enabled: boolean) => void;
   registerMixerMeterElement: (laneKey: string, el: HTMLDivElement | null) => void;
   registerMasterLiveMeterElement: (el: HTMLDivElement | null) => void;
+  recTrimSlot?: React.ReactNode;
 };
 
 export type KiteLoopV4MetronomeProps = {
   visualMetronomeControls: ReactNode;
   currentBeatIndex: number | null;
+  metronomeVolume: number;
+  onMetronomeVolumeChange: (value: number) => void;
 };
 
 export type KiteLoopV4PanelProps = {
@@ -106,6 +109,25 @@ export type KiteLoopV4PanelProps = {
 
 const ORANGE = "#ff4500";
 const EMERALD = "#22c55e";
+const SLIDER_TRACK_EMPTY = "rgba(255,255,255,0.08)";
+
+const INLINE_LABEL: React.CSSProperties = {
+  color: "rgba(255,255,255,0.28)",
+  fontSize: 9,
+};
+
+const RESET_BTN: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  letterSpacing: "0.1em",
+  textTransform: "uppercase",
+  color: ORANGE,
+  background: "none",
+  border: "none",
+  cursor: "pointer",
+  padding: "4px 8px",
+  flexShrink: 0,
+};
 
 const MAX_ACTIVE_INPUT_DEVICES = 3;
 const CALIBRATION_DISMISSED_STORAGE_KEY = "kite_calibration_dismissed";
@@ -195,14 +217,14 @@ function HSlider({
   disabled = false,
   title,
 }: HSliderProps): React.JSX.Element {
+  const fillPct = max === min ? 0 : ((value - min) / (max - min)) * 100;
+
   return (
     <div title={title} style={{ display: "flex", alignItems: "center", gap: 8 }}>
       {label ? (
         <span
           style={{
-            color: "rgba(255,255,255,0.35)",
-            fontSize: 9,
-            fontFamily: "monospace",
+            ...INLINE_LABEL,
             minWidth: 36,
           }}
         >
@@ -224,7 +246,7 @@ function HSlider({
           cursor: disabled ? "not-allowed" : "pointer",
           opacity: disabled ? 0.45 : 1,
           accentColor: accent,
-          background: `linear-gradient(to right,${accent} ${value}%,rgba(255,255,255,0.08) ${value}%)`,
+          background: `linear-gradient(to right,${accent} ${fillPct}%,${SLIDER_TRACK_EMPTY} ${fillPct}%)`,
           WebkitAppearance: "none",
           appearance: "none",
         }}
@@ -772,6 +794,8 @@ type SettingsModalProps = {
   cfg: KiteLoopV4LooperConfig;
   handlers: KiteLoopV4LooperHandlers;
   metronomeVisualOnly: ReactNode;
+  metronomeVolume: number;
+  onMetronomeVolumeChange: (value: number) => void;
   runwayVisualOnly: boolean;
 };
 
@@ -790,6 +814,8 @@ function SettingsModal({
   cfg,
   handlers,
   metronomeVisualOnly,
+  metronomeVolume,
+  onMetronomeVolumeChange,
   runwayVisualOnly,
 }: SettingsModalProps): React.JSX.Element {
   const [showAdvancedLatency, setShowAdvancedLatency] = useState(false);
@@ -812,13 +838,13 @@ function SettingsModal({
         : "rgba(255,255,255,0.5)";
   const selectedWarning =
     calibrationMode === "acoustic"
-      ? "Take off your headphones and turn your speakers up."
+      ? "RTL CALIBRATION\n\n1. Keep your wired headphones plugged in.\n2. Find your laptop's built-in mic (usually a tiny hole next to the webcam or near the keyboard).\n3. Hold one headphone earcup directly against the mic.\n4. Hold it steady, then click OK to fire the ping."
       : "Unplug your instrument. Plug a standard audio cable directly from your interface's Output into its Input. Turn the input gain up.";
 
   const triggerCalibration = (mode: "acoustic" | "interface"): void => {
     const warningText =
       mode === "acoustic"
-        ? "Take off your headphones and turn your speakers up."
+        ? "RTL CALIBRATION\n\n1. Keep your wired headphones plugged in.\n2. Find your laptop's built-in mic (usually a tiny hole next to the webcam or near the keyboard).\n3. Hold one headphone earcup directly against the mic.\n4. Hold it steady, then click OK to fire the ping."
         : "Unplug your instrument. Plug a standard audio cable directly from your interface's Output into its Input. Turn the input gain up.";
     if (!window.confirm(`${warningText}\n\nStart calibration now?`)) {
       return;
@@ -840,6 +866,7 @@ function SettingsModal({
 
   const col: React.CSSProperties = {
     flex: 1,
+    minWidth: "min(200px, 100%)",
     display: "flex",
     flexDirection: "column",
     gap: 12,
@@ -872,9 +899,28 @@ function SettingsModal({
       animate={{ opacity: 1, y: 0, x: 0 }}
       exit={{ opacity: 0, y: -12, x: -8 }}
       transition={{ type: "spring", stiffness: 340, damping: 32 }}
-      style={{ position: "absolute", top: 64, left: 12, zIndex: 60, width: 700 }}
+      style={{
+        position: "absolute",
+        top: 64,
+        left: 12,
+        zIndex: 60,
+        width: "min(700px, calc(100vw - 24px))",
+        maxHeight: "calc(100dvh - 80px)",
+        display: "flex",
+        flexDirection: "column",
+      }}
     >
-      <div style={{ ...glass, padding: "16px 0 18px", display: "flex", flexDirection: "column", gap: 0 }}>
+      <div
+        style={{
+          ...glass,
+          padding: "16px 0 18px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 0,
+          overflowY: "auto",
+          flex: 1,
+        }}
+      >
         <div
           style={{
             display: "flex",
@@ -914,7 +960,7 @@ function SettingsModal({
           </button>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "row", paddingTop: 16, minHeight: 200 }}>
+        <div style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", paddingTop: 16, minHeight: 200 }}>
           <div style={{ ...col, paddingLeft: 20 }}>
             {sLabel("BPM & Timing")}
             <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
@@ -1043,14 +1089,26 @@ function SettingsModal({
               }}
             >
               {sLabel("Metronome")}
-              <HSlider
-                value={70}
-                onChange={() => undefined}
-                accent={EMERALD}
-                label="Vol"
-                disabled
-                title="Metronome gain not wired yet"
-              />
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <span style={INLINE_LABEL}>Metronome Volume</span>
+                  <button
+                    type="button"
+                    onClick={() => onMetronomeVolumeChange(1)}
+                    style={RESET_BTN}
+                  >
+                    Reset
+                  </button>
+                </div>
+                <HSlider
+                  value={Math.round(metronomeVolume * 10)}
+                  onChange={(v) => onMetronomeVolumeChange(v / 10)}
+                  min={0}
+                  max={20}
+                  accent={EMERALD}
+                  title="Metronome click volume (0–2)"
+                />
+              </div>
               <div
                 style={{
                   display: "flex",
@@ -1394,7 +1452,7 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
         right: 24,
         top: 80,
         zIndex: 60,
-        width: 600,
+        width: "min(600px, calc(100vw - 32px))",
         height: "80vh",
         maxHeight: 550,
       }}
@@ -1468,7 +1526,6 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
                 fontSize: 8,
                 letterSpacing: "0.22em",
                 textTransform: "uppercase",
-                fontFamily: "monospace",
                 marginBottom: 2,
               }}
             >
@@ -1542,7 +1599,6 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
                   fontSize: 8,
                   letterSpacing: "0.22em",
                   textTransform: "uppercase",
-                  fontFamily: "monospace",
                 }}
               >
                 Focused Input
@@ -1558,33 +1614,25 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
 
             {focusedSelectedDeviceId != null ? (
               <>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <span
-                    style={{
-                      color: "rgba(255,255,255,0.22)",
-                      fontSize: 8,
-                      letterSpacing: "0.22em",
-                      textTransform: "uppercase",
-                      fontFamily: "monospace",
-                    }}
-                  >
-                    Input Gain
-                  </span>
-                  <HSlider
-                    value={laneCh(0)}
-                    onChange={(v) => inputDevices.onSetDeviceLaneVolume(focusedSelectedDeviceId, 0, v)}
-                    accent={EMERALD}
-                    label={chCount >= 2 ? "Ch 1 (L)" : "Ch 1"}
-                  />
-                  {chCount >= 2 ? (
+                {Object.keys(inputDevices.deviceVolumes).length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <span style={INLINE_LABEL}>Gain</span>
                     <HSlider
-                      value={laneCh(1)}
-                      onChange={(v) => inputDevices.onSetDeviceLaneVolume(focusedSelectedDeviceId, 1, v)}
+                      value={laneCh(0)}
+                      onChange={(v) => inputDevices.onSetDeviceLaneVolume(focusedSelectedDeviceId, 0, v)}
                       accent={EMERALD}
-                      label="Ch 2 (R)"
+                      label={chCount >= 2 ? "Ch 1 (L)" : "Ch 1"}
                     />
-                  ) : null}
-                </div>
+                    {chCount >= 2 ? (
+                      <HSlider
+                        value={laneCh(1)}
+                        onChange={(v) => inputDevices.onSetDeviceLaneVolume(focusedSelectedDeviceId, 1, v)}
+                        accent={EMERALD}
+                        label="Ch 2 (R)"
+                      />
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <div
                   style={{
@@ -1609,6 +1657,7 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
                     warning="Use headphones to prevent feedback."
                   />
                 </div>
+                {inputDevices.recTrimSlot ?? null}
               </>
             ) : null}
           </div>
@@ -2200,6 +2249,8 @@ export function KiteLoopV4Panel({
             cfg={looperConfig}
             handlers={looperHandlers}
             metronomeVisualOnly={metronome.visualMetronomeControls}
+            metronomeVolume={metronome.metronomeVolume}
+            onMetronomeVolumeChange={metronome.onMetronomeVolumeChange}
             runwayVisualOnly={looperState.runwayVisualOnly}
           />
         )}

@@ -17,6 +17,8 @@ export type LooperCountdownConfigProps = {
   }) => void;
   timingLocked: boolean;
   visualMetronomeControls: ReactNode;
+  metronomeVolume: number;
+  onMetronomeVolumeChange: (value: number) => void;
 };
 
 export function LooperCountdownConfig({
@@ -29,6 +31,8 @@ export function LooperCountdownConfig({
   timingLocked,
   onSelectTimeSignature,
   visualMetronomeControls,
+  metronomeVolume,
+  onMetronomeVolumeChange,
 }: LooperCountdownConfigProps) {
   return (
     <div className="space-y-4 rounded-xl border border-stone-800 bg-stone-900/40 p-4">
@@ -78,6 +82,36 @@ export function LooperCountdownConfig({
         <p className="text-xs font-semibold uppercase tracking-widest text-stone-400">
           Metronome Mode
         </p>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[9px] uppercase tracking-wider text-stone-400">
+              Metronome Volume
+            </span>
+            <button
+              type="button"
+              onClick={() => onMetronomeVolumeChange(1)}
+              className="cursor-pointer border-none bg-transparent px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-orange-500"
+            >
+              Reset
+            </button>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={2}
+            step={0.1}
+            value={metronomeVolume}
+            onChange={(e) => onMetronomeVolumeChange(Number(e.target.value))}
+            className="h-2 w-full accent-emerald-400"
+            style={{
+              background: `linear-gradient(to right, #22c55e ${(metronomeVolume / 2) * 100}%, #374151 ${(metronomeVolume / 2) * 100}%)`,
+              borderRadius: 9999,
+              appearance: "none",
+              WebkitAppearance: "none",
+            }}
+            aria-label="Metronome volume"
+          />
+        </div>
         <div className="flex flex-wrap items-center gap-2">{visualMetronomeControls}</div>
       </div>
       <div className="space-y-2">
