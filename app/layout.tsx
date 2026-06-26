@@ -53,6 +53,9 @@ export const metadata: Metadata = {
     description: siteDescription,
     images: ["/kite-mobile-icon.svg"],
   },
+  verification: {
+    google: "googlef944984ab89a9239",
+  },
 };
 
 export const viewport: Viewport = {
