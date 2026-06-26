@@ -54,7 +54,7 @@ export const metadata: Metadata = {
     images: ["/kite-mobile-icon.svg"],
   },
   verification: {
-    google: "googlef944984ab89a9239",
+    google: "7RlP5LNx-aByYJiLZaYOIDdfKaSKfXsz-chWX62AUyY",
   },
 };
 
