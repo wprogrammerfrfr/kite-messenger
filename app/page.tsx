@@ -3,13 +3,13 @@ import type { Metadata } from "next";
 import WelcomePage from "@/components/WelcomePage";
 
 const homeDescription =
-  "Kite — secure messaging with E2EE, EN/FA/AR support, and support mode. Tap Get Started to join.";
+  "The world's first browser-based loopstation and real-time musical collaboration platform for live P2P jam sessions.";
 
 export const metadata: Metadata = {
   title: "Welcome",
   description: homeDescription,
   openGraph: {
-    title: "Kite | Welcome",
+    title: "Kite Studio",
     description: homeDescription,
     url: "/",
     type: "website",
@@ -18,13 +18,13 @@ export const metadata: Metadata = {
         url: "/kite-mobile-icon.svg",
         width: 512,
         height: 512,
-        alt: "Kite",
+        alt: "Kite Studio",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Kite | Welcome",
+    title: "Kite Studio",
     description: homeDescription,
     images: ["/kite-mobile-icon.svg"],
   },

@@ -6,9 +6,9 @@ import { ResilienceProvider } from "@/components/resilience-provider";
 import { InstallPromptProvider } from "@/components/install-prompt-provider";
 import GlobalNavShell from "@/components/GlobalNavShell";
 
-const siteTitle = "Kite";
+const siteTitle = "Kite Studio";
 const siteDescription =
-  "End-to-end encrypted messaging for musicians, therapists, and those who value privacy. Built by Sammy.";
+  "The world's first browser-based loopstation and real-time musical collaboration platform for live P2P jam sessions.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(
@@ -16,9 +16,18 @@ export const metadata: Metadata = {
   ),
   title: {
     default: siteTitle,
-    template: "%s | Kite",
+    template: "%s | Kite Studio",
   },
   description: siteDescription,
+  keywords: [
+    "online jamming",
+    "browser musical studio",
+    "browser-based loopstation",
+    "looper",
+    "real-time musical collaboration",
+    "P2P jam room",
+    "WebRTC music studio",
+  ],
   icons: {
     icon: "/kite-mobile-icon.svg",
     shortcut: "/kite-mobile-icon.svg",
@@ -33,7 +42,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: siteTitle,
     description: siteDescription,
-    siteName: "Kite",
+    siteName: "Kite Studio",
     type: "website",
     locale: "en_US",
     images: ["/kite-mobile-icon.svg"],
