@@ -324,7 +324,7 @@ import {
 import { forceMusicModeOpus } from "@/lib/sdp-utils";
 import type { BridgeStatus, Role } from "@/lib/p2p/transport-port";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
-import type { SoloLooperMode } from "@/components/kite-loop-v2/KiteLoopV2Panel";
+import type { SoloLooperMode } from "@/hooks/useKiteStudioEngine.types";
 import type {
   KiteEngineActions,
   KiteEngineConfig,

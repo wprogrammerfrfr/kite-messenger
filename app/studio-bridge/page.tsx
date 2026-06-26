@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import {
   useCallback,
@@ -13,13 +13,11 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { useRouter } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
-import { KiteLoopV2Panel } from "@/components/kite-loop-v2/KiteLoopV2Panel";
 import {
   KiteLoopV4Panel,
   type KiteLoopV4InputDevicesProps,
+  type SoloTrackLaneView,
 } from "@/components/kite-loop-v2/KiteLoopV4Panel";
-import { FourBeatMetronome } from "@/components/kite-loop-v2/FourBeatMetronome";
-import type { SoloTrackLaneView } from "@/components/kite-loop-v2/FourTrackLooperLanes";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { useKiteStudioEngine } from "@/hooks/useKiteStudioEngine";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
@@ -267,6 +265,9 @@ export default function StudioBridgePage() {
         getKiteSetupOrigin: () => "lobby",
         getConfirmExitOpen: () => false,
         setConfirmExitOpen: () => {},
+        confirmResetTrack: (trackIndex) =>
+          window.confirm(`Reset Track ${trackIndex} while it is recording?`),
+        onJoinOwnSessionError: (message) => window.alert(message),
       },
     });
 
@@ -317,6 +318,7 @@ export default function StudioBridgePage() {
   const broadcastStatus = engineState.broadcastStatus;
   const jamSetupLock = engineState.jamSetupLock;
   const soloLooperState = engineState.soloLooperState;
+  const soloActiveRecordTrackIndex = engineState.soloActiveRecordTrackIndex;
   const isRecordingArmed = engineState.isRecordingArmed;
   const soloTrackVolumes = engineState.soloTrackVolumes;
   const soloMasterLoopFrames = engineState.soloMasterLoopFrames;
@@ -375,7 +377,6 @@ export default function StudioBridgePage() {
   const loopChunkSendProgress = presenterState.loopChunkSendProgress;
   const syncInitiatorId = presenterState.syncInitiatorId;
   const kiteSyncNetworkMetronomePaused = presenterState.kiteSyncNetworkMetronomePaused;
-  const useV4LooperUi = presenterState.useV4LooperUi;
 
   // Presenter actions aliases
   const setConfirmExitOpen = presenterActions.setConfirmExitOpen;
@@ -406,6 +407,7 @@ export default function StudioBridgePage() {
   const handleToggleMasterPause = engineActions.handleToggleMasterPause;
   const handleResetSoloTrack = engineActions.handleResetSoloTrack;
   const handleArmSoloOverdubTrack = engineActions.handleArmSoloOverdubTrack;
+  const handleTrackTransportTap = engineActions.handleTrackTransportTap;
   const handleSoloTrackVolumeChange = engineActions.handleSoloTrackVolumeChange;
   const handleToggleSoloSessionRecording = engineActions.handleToggleSoloSessionRecording;
   const downloadSoloSessionBlob = engineActions.downloadSoloSessionBlob;
@@ -439,6 +441,7 @@ export default function StudioBridgePage() {
   const dismissHighPingTip = engineActions.dismissHighPingTip;
   const refreshAudioInputDevices = engineActions.refreshAudioInputDevices;
   const broadcastKiteSyncStop = engineActions.broadcastKiteSyncStop;
+  const toggleKiteSync = engineActions.toggleKiteSync;
 
   const REMOTE_PLAYBACK_VOLUME_MIN = 0.5;
   const REMOTE_PLAYBACK_VOLUME_MAX = 4;
@@ -454,29 +457,11 @@ export default function StudioBridgePage() {
   const broadcastWizardStudioParam = engineLegacy.broadcastWizardStudioParam;
   const sendJamSetupLock = engineLegacy.sendJamSetupLock;
   const studioAudioContextRef = engineLegacy.studioAudioContextRef;
-  const flushAndSetRemoteGridTarget = engineLegacy.flushAndSetRemoteGridTarget;
-  const cleanupKiteEngine = engineLegacy.cleanupKiteEngine;
-  const restoreLiveVoipTrackAfterKite = engineLegacy.restoreLiveVoipTrackAfterKite;
-  const buildRemotePlaybackGraph = engineLegacy.buildRemotePlaybackGraph;
-  const broadcastKiteSync = engineLegacy.broadcastKiteSync;
-  const setKiteSyncEnabled = engineLegacy.setKiteSyncEnabled;
-  const setBroadcastStatus = engineLegacy.setBroadcastStatus;
-  const setSyncInitiatorId = engineLegacy.setSyncInitiatorId;
-  const setKiteSyncCountInActive = engineLegacy.setKiteSyncCountInActive;
   const setAudioContextReady = engineLegacy.setAudioContextReady;
   const setMetronomeBpm = engineLegacy.setMetronomeBpm;
   const broadcastStudioParam = engineLegacy.broadcastStudioParam;
   const getStudioKiteSampleRate = engineLegacy.getStudioKiteSampleRate;
   const clearRecordedBlobUrl = engineLegacy.clearRecordedBlobUrl;
-  const remoteStreamRef = engineLegacy.remoteStreamRef;
-  const metronomeGainRef = engineLegacy.metronomeGainRef;
-  const kiteSyncCountInEndAtContextSecRef = engineLegacy.kiteSyncCountInEndAtContextSecRef;
-  const syncInitiatorIdRef = engineLegacy.syncInitiatorIdRef;
-  const mountedRef = engineLegacy.mountedRef;
-  const kiteSyncCountInActiveRef = engineLegacy.kiteSyncCountInActiveRef;
-  const kiteSyncCountInCompletionHandledRef = engineLegacy.kiteSyncCountInCompletionHandledRef;
-  const ensureStudioAudioContext = engineLegacy.ensureStudioAudioContext;
-  const rebuildMixerAndReplaceTrack = engineLegacy.rebuildMixerAndReplaceTrack;
 
   // Engine refs
   const perChannelMeterRefs = engineRefs.perChannelMeterRefs;
@@ -562,21 +547,29 @@ export default function StudioBridgePage() {
     return [1, 2, 3, 4].map((n) => {
       const slot = slotMap.get(n);
       const progress = soloSlotProgressPct(slot);
+      const isThisTrackRecording =
+        slot?.mode === "recording" ||
+        soloActiveRecordTrackIndex === n ||
+        (soloLooperState === "recording" &&
+          soloActiveRecordTrackIndex == null &&
+          n === 1);
       const secondaryBlocked =
         soloMasterLoopFrames == null ||
         isRecordingArmed ||
         isMasterPaused ||
-        soloLooperState === "recording" ||
-        soloLooperState === "idle";
-      const track1ArmDisabled = isRecordingArmed || isMasterPaused || soloLooperState === "recording";
+        soloLooperState === "idle" ||
+        (soloLooperState === "recording" && !isThisTrackRecording);
+      const track1ArmDisabled =
+        isMasterPaused ||
+        isRecordingArmed ||
+        (soloLooperState === "recording" && !isThisTrackRecording);
       return {
         trackIndex: n as 1 | 2 | 3 | 4,
         volume: soloTrackVolumes[n - 1],
         progress,
         workletMode: slot?.mode ?? "idle",
         onVolumeChange: (lin: number) => handleSoloTrackVolumeChange(n as 1 | 2 | 3 | 4, lin),
-        onArmRecord:
-          n === 1 ? handleRecordFirstLoop : () => handleArmSoloOverdubTrack(n as 2 | 3 | 4),
+        onArmRecord: () => handleTrackTransportTap(n as 1 | 2 | 3 | 4),
         armDisabled: n === 1 ? track1ArmDisabled : secondaryBlocked,
         armLabel: n === 1 ? "Record" : "Overdub",
         isFocused: focusedTrackIndex === n,
@@ -586,6 +579,11 @@ export default function StudioBridgePage() {
         isOverdubArmedWaiting:
           slot?.mode === "armed_overdub" ||
           (n >= 2 && soloOverdubArmedTrackIndex !== null && soloOverdubArmedTrackIndex === n),
+        isEngineRecording:
+          soloActiveRecordTrackIndex === n ||
+          (soloLooperState === "recording" &&
+            soloActiveRecordTrackIndex == null &&
+            n === 1),
       };
     });
   }, [
@@ -598,9 +596,9 @@ export default function StudioBridgePage() {
     isRecordingArmed,
     isMasterPaused,
     soloLooperState,
+    soloActiveRecordTrackIndex,
     handleSoloTrackVolumeChange,
-    handleArmSoloOverdubTrack,
-    handleRecordFirstLoop,
+    handleTrackTransportTap,
     handleResetSoloTrack,
   ]);
 
@@ -618,7 +616,7 @@ export default function StudioBridgePage() {
         ? "Downbeat"
         : visualActiveBeatInBar !== null
           ? "Beat"
-          : "—";
+          : "â€”";
 
     const partnerSessionLabel =
       remoteParticipantName?.trim() || "Partner";
@@ -724,7 +722,7 @@ export default function StudioBridgePage() {
                 marginTop: 12,
               }}
             >
-              {/* ── Mic Level Card ── */}
+              {/* â”€â”€ Mic Level Card â”€â”€ */}
               <div
                 style={{
                   flex: 1,
@@ -777,7 +775,7 @@ export default function StudioBridgePage() {
                 </div>
               </div>
 
-              {/* ── Gain Control Card ── */}
+              {/* â”€â”€ Gain Control Card â”€â”€ */}
               <div
                 style={{
                   flex: 1,
@@ -926,7 +924,23 @@ export default function StudioBridgePage() {
         </button>
       ) : null}
       <div className="flex items-center gap-2">
-        <FourBeatMetronome activeBeat={visualActiveBeatInBar} />
+        <div className="flex flex-row items-center justify-center gap-2">
+          {[0, 1, 2, 3].map((beatIndex) => {
+            const isActive = visualActiveBeatInBar === beatIndex;
+            const activeClass =
+              beatIndex === 0
+                ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"
+                : "bg-stone-300";
+            return (
+              <div
+                key={beatIndex}
+                className={`h-4 w-4 rounded-full transition-colors duration-100 ${
+                  isActive ? activeClass : "bg-stone-800 border border-stone-600"
+                }`}
+              />
+            );
+          })}
+        </div>
       </div>
     </>
   );
@@ -1018,40 +1032,12 @@ export default function StudioBridgePage() {
               : "max-w-md justify-center px-5 py-16 pb-28 sm:px-6 lg:pb-16"
         }`}
       >
-        {!useV4LooperUi ? (
-          <motion.button
-            type="button"
-            onClick={returnToLobby}
-            className="mb-6 inline-flex w-fit items-center gap-1 rounded-lg border border-white/[0.12] bg-white/[0.03] px-2.5 py-2 text-left text-xs font-medium text-white/55 transition hover:border-orange-500/25 hover:border-emerald-500/20 hover:bg-white/[0.05] hover:text-white/80"
-            whileTap={{ scale: 0.97 }}
-            aria-label="Return to lobby"
-          >
-            <ChevronLeft className="h-4 w-4 shrink-0 opacity-70" strokeWidth={2} aria-hidden />
-            <span>Return to Lobby</span>
-          </motion.button>
-        ) : null}
         <motion.div
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
           className="w-full"
         >
-          {!useV4LooperUi ? (
-            <>
-              <h1 className="bg-gradient-to-r from-orange-400 via-stone-100 to-emerald-400 bg-clip-text text-center text-3xl font-bold tracking-tight text-transparent">
-                Kite Studio
-              </h1>
-              <p className="mt-2 text-center text-xs font-semibold uppercase tracking-widest text-stone-500">
-                Pre-flight check
-              </p>
-              <div className="mt-4 flex justify-center">
-                <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-widest text-emerald-300">
-                  Standard P2P Signaling
-                </span>
-              </div>
-            </>
-          ) : null}
-
           {!authReady ? (
             <div className="mt-10 flex flex-col items-center rounded-2xl border border-stone-800/90 bg-stone-950/50 px-6 py-10 backdrop-blur-sm">
               <div
@@ -1576,13 +1562,13 @@ export default function StudioBridgePage() {
                         How many chords before it repeats?
                       </h3>
                       <p className="mt-1 text-sm font-medium leading-relaxed text-stone-400">
-                        Count the chords in one cycle. Don&apos;t overthink — just count what
+                        Count the chords in one cycle. Don&apos;t overthink â€” just count what
                         you&apos;d play before starting over.
                       </p>
                     </div>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
                       {[
-                        { count: 2, label: "I–V vamp" },
+                        { count: 2, label: "Iâ€“V vamp" },
                         { count: 4, label: "pop 4-chord" },
                         { count: 8, label: "Canon / jazz 8" },
                         { count: 12, label: "12-bar blues" },
@@ -1714,7 +1700,7 @@ export default function StudioBridgePage() {
                       Tap the beat ♪
                     </button>
                     <p className="text-center text-xs font-semibold text-stone-400">
-                      Tap 4+ times — resets after 2 seconds of silence
+                      Tap 4+ times â€” resets after 2 seconds of silence
                     </p>
                   </div>
                 ) : null}
@@ -1811,7 +1797,7 @@ export default function StudioBridgePage() {
                     </div>
                     <div className="border-l-2 border-stone-600 pl-4 text-sm font-semibold leading-relaxed text-stone-300">
                       Your song is in {kiteSetupTimeSignatureTop}/{kiteSetupTimeSignatureBottom}
-                      {kiteSetupIsSwing ? " swing" : ""} — each bar has{" "}
+                      {kiteSetupIsSwing ? " swing" : ""} â€” each bar has{" "}
                       {kiteSetupTimeSignatureTop} beats. We set the loop to {kiteSetupChordCount}{" "}
                       bars so your {kiteSetupChordCount}-chord cycle completes cleanly before the
                       next loop starts. Your bandmate will always hear a full phrase, never a
@@ -1871,67 +1857,7 @@ export default function StudioBridgePage() {
               className="mt-8 space-y-4"
             >
               {kiteMode !== "solo" ? largeRoomCodeCard : null}
-              {kiteMode === "solo" ? (
-                <>
-                  {!useV4LooperUi ? (
-                    <div className="caret-transparent outline-none select-none">
-                    <KiteLoopV2Panel
-                      soloLooperState={soloLooperState}
-                      isRecordingArmed={isRecordingArmed}
-                      isMasterPaused={isMasterPaused}
-                      sessionRecorderState={soloSessionRecorderState}
-                      recordingArmedCountdown={recordingArmedCountdown}
-                      runwayDisplay={soloRunwayDisplay}
-                      runwayPhase={isRecordingArmed ? "armed" : "idle"}
-                      runwayVisualOnly={isVisualMetronomeOnly}
-                      loopProgress={loopProgress}
-                      kiteIntervalTimingRef={kiteIntervalTimingRef}
-                      kiteSetupTempo={kiteSetupTempo}
-                      kiteSetupTimeSignatureTop={kiteSetupTimeSignatureTop}
-                      kiteSetupTimeSignatureBottom={kiteSetupTimeSignatureBottom}
-                      kiteSetupIsSwing={kiteSetupIsSwing}
-                      isTimingLocked={isRecordingArmed || soloLooperState !== "idle"}
-                      loopMode={soloLooperMode}
-                      barCount={soloLooperBarCount}
-                      latencyMs={soloLooperLatencyMs}
-                      visualMetronomeControls={renderVisualMetronomeControls()}
-                      metronomeVolume={metronomeVolume}
-                      onMetronomeVolumeChange={onMetronomeVolumeChange}
-                      onLoopModeChange={setSoloLooperMode}
-                      onBarCountChange={setSoloLooperBarCount}
-                      onLatencyMsChange={handleSoloLatencyMsChange}
-                      onTempoSliderChange={(v) => {
-                        setKiteSetupTempo(v);
-                        broadcastWizardStudioParam({ kiteSetupTempo: v, bpm: v });
-                      }}
-                      onTempoPreset={(bpm) => {
-                        setKiteSetupTempo(bpm);
-                        broadcastWizardStudioParam({
-                          kiteSetupTempo: bpm,
-                          bpm,
-                        });
-                      }}
-                      onSelectTimeSignature={(option) => {
-                        setKiteSetupTimeSignatureTop(option.top);
-                        setKiteSetupTimeSignatureBottom(option.bottom);
-                        setKiteSetupIsSwing(option.swing);
-                        const bpi = Math.max(1, Math.round(kiteSetupChordCount * option.top));
-                        broadcastWizardStudioParam({
-                          kiteSetupTimeSignatureTop: option.top,
-                          kiteSetupTimeSignatureBottom: option.bottom,
-                          bpi,
-                        });
-                      }}
-                      onRecordFirstLoop={handleRecordFirstLoop}
-                      onToggleMasterPause={handleToggleMasterPause}
-                      onToggleSessionRecording={handleToggleSoloSessionRecording}
-                      onStopAndResetSoloLooper={handleStopAndResetSoloLooper}
-                      soloTrackLanes={soloTrackLanes}
-                    />
-                    </div>
-                  ) : null}
-                </>
-              ) : status === "connected" ? (
+              {kiteMode !== "solo" && status === "connected" ? (
                 <div className="relative">
                 {kiteMode === "broadcast" ? (
                   <BroadcastDashboard />
@@ -2031,48 +1957,7 @@ export default function StudioBridgePage() {
                         <button
                           type="button"
                           disabled={stealthBroadcastUiLock}
-                          onClick={() => {
-                              const next = !kiteSyncEnabled;
-                              console.log("Kite Sync Toggle Clicked. New State:", next);
-                              if (next) {
-                                const ctx = studioAudioContextRef.current;
-                                if (ctx) {
-                                  flushAndSetRemoteGridTarget(ctx.currentTime + 0.01);
-                                  const countInOneBarSec = (60 / metronomeBpm) * Math.max(1, Math.round(kiteSetupTimeSignatureTop));
-                                  if (Number.isFinite(countInOneBarSec) && countInOneBarSec > 0) {
-                                    kiteSyncCountInEndAtContextSecRef.current =
-                                      ctx.currentTime + countInOneBarSec;
-                                    if (metronomeGainRef.current) {
-                                      metronomeGainRef.current.gain.value = 0;
-                                    }
-                                    setKiteSyncCountInActive(true);
-                                    kiteSyncCountInActiveRef.current = true;
-                                    kiteSyncCountInCompletionHandledRef.current = false;
-                                  }
-                                }
-                                syncInitiatorIdRef.current = localJamSetupOwnerId;
-                                if (mountedRef.current) {
-                                  setSyncInitiatorId(localJamSetupOwnerId);
-                                }
-                              } else {
-                                if (!canControlStop) return;
-                                cleanupKiteEngine({ stopLocalTracks: false, isFull: false });
-
-                                restoreLiveVoipTrackAfterKite();
-
-                                const remoteStream = remoteStreamRef.current;
-                                if (remoteStream) {
-                                  buildRemotePlaybackGraph(remoteStream);
-                                }
-                                syncInitiatorIdRef.current = null;
-                                if (mountedRef.current) {
-                                  setSyncInitiatorId(null);
-                                }
-                              }
-                              setKiteSyncEnabled(next);
-                              setBroadcastStatus(next ? "syncing" : "idle");
-                              broadcastKiteSync({ kiteSyncEnabled: next });
-                            }}
+                          onClick={() => toggleKiteSync()}
                           className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                             kiteSyncEnabled
                               ? "border-emerald-500/40 bg-emerald-500/12 text-emerald-200 hover:bg-emerald-500/18"
@@ -2109,7 +1994,7 @@ export default function StudioBridgePage() {
                           Echo Safety {echoSafetyMode ? "On" : "Off"}
                         </button>
                         <span className="rounded-md border border-yellow-500/35 bg-yellow-500/10 px-2 py-1 text-[10px] font-semibold text-yellow-200">
-                          ⚠️ Headphones Required for Sync Buffer. If using speakers, enable Echo Safety.
+                          âš ï¸ Headphones Required for Sync Buffer. If using speakers, enable Echo Safety.
                         </span>
                         {studioAudioContextRef.current?.state !== "running" ? (
                           <button
@@ -2323,7 +2208,7 @@ export default function StudioBridgePage() {
                       role="status"
                     >
                       <p className="text-center text-sm font-medium leading-relaxed text-stone-200">
-                        Latency has stayed high. Try a different network, switch to Wi‑Fi, or move
+                        Latency has stayed high. Try a different network, switch to Wiâ€‘Fi, or move
                         closer to your router.
                       </p>
                       <div className="mt-3 flex justify-center">
@@ -2438,26 +2323,6 @@ export default function StudioBridgePage() {
             </motion.div>
           )}
 
-          {!useV4LooperUi && collaboratorLeft ? (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="mt-6 rounded-xl border border-orange-500/25 bg-stone-900/50 px-4 py-4 text-center"
-            >
-              <p className="text-sm font-semibold text-stone-200">
-                {(lastDepartedParticipantName ?? "A participant")} left the session.
-              </p>
-              <motion.button
-                type="button"
-                onClick={returnToLobby}
-                whileTap={{ scale: 0.97 }}
-                className="mt-4 w-full rounded-xl border border-orange-500/35 bg-gradient-to-r from-orange-500/15 to-stone-700/20 px-4 py-3 text-sm font-semibold text-stone-100 transition hover:from-orange-500/25 hover:to-stone-700/30"
-              >
-                Return to Lobby
-              </motion.button>
-            </motion.div>
-          ) : null}
-
           {connectionLostCountdown !== null && !collaboratorLeft ? (
             <motion.div
               initial={{ opacity: 0, y: 8 }}
@@ -2513,214 +2378,7 @@ export default function StudioBridgePage() {
           )}
         </motion.div>
       </div>
-      {!stealthBroadcastUiLock && !useV4LooperUi ? (
-      <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex flex-col items-end gap-2">
-        <motion.button
-          type="button"
-          onClick={() => setDevicePanelOpen(!devicePanelOpen)}
-          whileTap={{ scale: 0.97 }}
-          className="pointer-events-auto rounded-lg border border-stone-700/90 bg-stone-950/85 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-stone-200 transition hover:border-emerald-500/45 hover:text-emerald-200"
-          aria-expanded={devicePanelOpen}
-          aria-controls="audio-input-panel"
-        >
-          {devicePanelOpen ? "Hide Inputs" : "Audio Inputs"}
-        </motion.button>
-        {devicePanelOpen ? (
-          <div
-            id="audio-input-panel"
-            className="pointer-events-auto w-[17rem] rounded-xl border border-stone-700/90 bg-stone-950/95 p-3 shadow-2xl backdrop-blur-sm"
-          >
-            <p className="text-[10px] font-semibold uppercase tracking-widest text-stone-500">
-              Input Device
-            </p>
-            <div className="mt-2 max-h-52 space-y-1.5 overflow-y-auto pr-1">
-              {audioInputDevices.length > 0 ? (
-                audioInputDevices.map((device) => {
-                  const deviceId = device.deviceId;
-                  const isSelected = activeDeviceIds.includes(deviceId);
-                  const isInterfaceInput = interfaceInputDeviceFlags[deviceId] === true;
-                  const isInterfaceMonitorEnabled =
-                    isInterfaceInput && interfaceLiveMonitorEnabledFlags[deviceId] === true;
-                  const inputChannels = deviceInputChannelCount[deviceId] ?? 1;
-                  const lane0Key = `${deviceId}:ch0`;
-                  const lane1Key = `${deviceId}:ch1`;
-                  const volCh0 = deviceVolumes[lane0Key] ?? 100;
-                  const volCh1 = deviceVolumes[lane1Key] ?? 100;
-                  return (
-                    <div key={deviceId || `audio-input-${device.label}`} className="space-y-1.5">
-                      <button
-                        type="button"
-                        onClick={() => void toggleAudioDevice(deviceId)}
-                        className={`w-full rounded-lg border px-2.5 py-2 text-left text-xs font-medium transition ${
-                          isSelected
-                            ? "border-emerald-500/45 bg-emerald-500/10 text-emerald-200"
-                            : "border-stone-700 bg-stone-900/65 text-stone-300 hover:border-stone-600"
-                        }`}
-                      >
-                        {device.label || "Unnamed input device"}
-                      </button>
-                      {isSelected ? (
-                        <div className="rounded-lg border border-stone-700/80 bg-stone-900/70 px-2 py-1.5">
-                          <div className="mb-1.5 space-y-1">
-                            <div className="h-1.5 w-full overflow-hidden rounded bg-stone-800">
-                              <div
-                                ref={(el) => {
-                                  const laneKey = `${deviceId}:ch0`;
-                                  if (el) perChannelMeterRefs.current.set(laneKey, el);
-                                  else perChannelMeterRefs.current.delete(laneKey);
-                                }}
-                                className="h-full w-0 rounded bg-emerald-500 transition-[width] duration-75"
-                              />
-                            </div>
-                            <div className="h-1.5 w-full overflow-hidden rounded bg-stone-800">
-                              <div
-                                ref={(el) => {
-                                  const laneKey = `${deviceId}:ch1`;
-                                  if (el) perChannelMeterRefs.current.set(laneKey, el);
-                                  else perChannelMeterRefs.current.delete(laneKey);
-                                }}
-                                className="h-full w-0 rounded bg-emerald-500/80 transition-[width] duration-75"
-                              />
-                            </div>
-                          </div>
-                          {inputChannels >= 2 ? (
-                            <div className="space-y-2">
-                              <div>
-                                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-stone-400">
-                                  Input 1 / L — {volCh0}
-                                </label>
-                                <input
-                                  type="range"
-                                  min={0}
-                                  max={100}
-                                  step={1}
-                                  value={volCh0}
-                                  onChange={(e) =>
-                                    handleVolumeChange(
-                                      lane0Key,
-                                      Number.parseInt(e.target.value, 10)
-                                    )
-                                  }
-                                  className="w-full accent-emerald-500"
-                                />
-                              </div>
-                              <div>
-                                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-stone-400">
-                                  Input 2 / R — {volCh1}
-                                </label>
-                                <input
-                                  type="range"
-                                  min={0}
-                                  max={100}
-                                  step={1}
-                                  value={volCh1}
-                                  onChange={(e) =>
-                                    handleVolumeChange(
-                                      lane1Key,
-                                      Number.parseInt(e.target.value, 10)
-                                    )
-                                  }
-                                  className="w-full accent-emerald-500"
-                                />
-                              </div>
-                            </div>
-                          ) : (
-                            <>
-                              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-stone-400">
-                                Volume {volCh0}
-                              </label>
-                              <input
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={volCh0}
-                                onChange={(e) =>
-                                  handleVolumeChange(
-                                    lane0Key,
-                                    Number.parseInt(e.target.value, 10)
-                                  )
-                                }
-                                className="w-full accent-emerald-500"
-                              />
-                            </>
-                          )}
-                          <div className="mt-2 space-y-2 rounded-lg border border-stone-800/90 bg-stone-950/45 px-2 py-2">
-                            <label className="flex items-start gap-2 text-[11px] leading-snug text-stone-300">
-                              <input
-                                type="checkbox"
-                                checked={isInterfaceInput}
-                                onChange={(event) =>
-                                  setInterfaceInputDeviceFlag(deviceId, event.target.checked)
-                                }
-                                className="mt-0.5 accent-emerald-500"
-                              />
-                              <span>
-                                <span className="block font-semibold text-stone-200">
-                                  Interface / line-in source
-                                </span>
-                                <span className="text-stone-500">
-                                  Mark this only for plugged-in instruments or interface outputs.
-                                </span>
-                              </span>
-                            </label>
-                            <label
-                              className={`flex items-start gap-2 text-[11px] leading-snug ${
-                                isInterfaceInput ? "text-stone-300" : "text-stone-600"
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={isInterfaceMonitorEnabled}
-                                disabled={!isInterfaceInput}
-                                onChange={(event) =>
-                                  setInterfaceLiveMonitorEnabledFlag(deviceId, event.target.checked)
-                                }
-                                className="mt-0.5 accent-emerald-500 disabled:accent-stone-700"
-                              />
-                              <span>
-                                <span className="block font-semibold">Live monitor</span>
-                                <span>
-                                  Hear this interface input locally. Use headphones to avoid feedback.
-                                </span>
-                              </span>
-                            </label>
-                            {isInterfaceMonitorEnabled ? (
-                              <p className="rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-1 text-[10px] font-medium leading-snug text-yellow-100">
-                                Headphones recommended. This control only marks the monitor setting;
-                                the audio graph is added in the next plan step.
-                              </p>
-                            ) : null}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="rounded-lg border border-stone-800 bg-stone-900/60 px-2.5 py-2 text-xs text-stone-400">
-                  <p>No devices found.</p>
-                  <button
-                    type="button"
-                    onClick={() => void refreshAudioInputDevices()}
-                    className="mt-2 rounded border border-stone-700 px-2 py-1 text-[11px] font-medium text-stone-300 hover:border-stone-600"
-                  >
-                    Click to load devices
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="mt-3 rounded-lg border border-stone-700/80 bg-stone-900/70 px-2.5 py-2 text-[11px] leading-relaxed text-stone-400">
-              Pro Tip: Use your interface&apos;s &apos;Direct Monitor&apos; button to hear yourself.
-              Kite Studio captures your clean, direct signal for maximum speed. To use virtual
-              amps (like Neural DSP), route your audio through Voicemeeter (PC) or Loopback
-              (Mac).
-            </div>
-          </div>
-        ) : null}
-      </div>
-      ) : null}
-      {useV4LooperUi && studioUiPhase === "studio" && kiteMode !== "solo" ? (
+      {studioUiPhase === "studio" && kiteMode !== "solo" ? (
         <motion.nav
           initial={{ opacity: 0, y: -8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2736,8 +2394,7 @@ export default function StudioBridgePage() {
           </button>
         </motion.nav>
       ) : null}
-      {useV4LooperUi &&
-      studioUiPhase !== "lobby" &&
+      {studioUiPhase !== "lobby" &&
       studioUiPhase !== "kite-setup" &&
       kiteMode === "solo" ? (
         <div className="caret-transparent outline-none select-none">

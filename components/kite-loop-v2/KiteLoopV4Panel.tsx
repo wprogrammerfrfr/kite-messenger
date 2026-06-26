@@ -20,9 +20,27 @@ import {
 import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
 import type { RunwayDisplayLabel } from "@/lib/looper-runway-scheduler";
 
-import type { SoloTrackLaneView } from "@/components/kite-loop-v2/FourTrackLooperLanes";
-import type { SoloLooperMode, SoloLooperUiState } from "@/components/kite-loop-v2/KiteLoopV2Panel";
 import type { LooperRunwayPhase } from "@/components/kite-loop-v2/LooperCountdownRunway";
+import type { SoloLooperMode, SoloLooperState } from "@/hooks/useKiteStudioEngine.types";
+
+export type SoloTrackLaneView = {
+  trackIndex: 1 | 2 | 3 | 4;
+  volume: number;
+  progress: number;
+  workletMode: string;
+  onVolumeChange: (linear: number) => void;
+  onArmRecord: () => void;
+  armDisabled: boolean;
+  armLabel: string;
+  onResetTrack: () => void;
+  resetDisabled: boolean;
+  isFocused: boolean;
+  onRequestFocus: () => void;
+  /** Tracks 2–4: quantized overdub armed, waiting for Track 1 downbeat. */
+  isOverdubArmedWaiting?: boolean;
+  /** True when engine ref says this lane is capturing (before worklet slot.mode catches up). */
+  isEngineRecording?: boolean;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public prop types — grouped buckets (mirror integration plan).
@@ -30,7 +48,7 @@ import type { LooperRunwayPhase } from "@/components/kite-loop-v2/LooperCountdow
 export type KiteLoopV4SessionRecorderState = "idle" | "recording" | "paused" | "saving";
 
 export type KiteLoopV4LooperState = {
-  soloLooperState: SoloLooperUiState;
+  soloLooperState: SoloLooperState;
   isRecordingArmed: boolean;
   isMasterPaused: boolean;
   sessionRecorderState: KiteLoopV4SessionRecorderState;
@@ -528,6 +546,7 @@ type RecVisualKey = "idle" | "waiting" | "recording" | "playing";
 
 function mapLaneToRecVisual(lane: SoloTrackLaneView): RecVisualKey {
   if (lane.isOverdubArmedWaiting) return "waiting";
+  if (lane.isEngineRecording) return "recording";
   if (lane.workletMode === "recording") return "recording";
   if (lane.workletMode === "playing") return "playing";
   return "idle";
@@ -607,26 +626,42 @@ function resolveAmbientBackdropStyle(
 
 type TrackColumnProps = {
   lane: SoloTrackLaneView;
-  masterOnIdleRecord: () => void;
 };
 
-function TrackColumn({ lane, masterOnIdleRecord }: TrackColumnProps): React.JSX.Element {
+function TrackColumn({ lane }: TrackColumnProps): React.JSX.Element {
   const visual = mapLaneToRecVisual(lane);
   const cfg = REC_CFG[visual];
   const isPulsing = visual === "waiting";
   const isMaster = lane.trackIndex === 1;
   const faderPct = Math.min(100, Math.max(0, Math.round(lane.volume * 100)));
   const ambient = resolveAmbientBackdropStyle(lane.workletMode, lane.progress);
+  const canTapToToggle =
+    visual === "recording" || visual === "waiting" || lane.isEngineRecording === true;
+  const recInteractive = !lane.armDisabled || canTapToToggle;
 
-  const handleRecClick = (e: React.MouseEvent): void => {
+  const handleRecPointerDown = (e: React.PointerEvent<HTMLButtonElement>): void => {
+    if (e.button !== 0) return;
     e.stopPropagation();
-    if (lane.armDisabled) return;
-    if (isMaster && visual === "idle") {
-      masterOnIdleRecord();
-      return;
-    }
+    if (!recInteractive) return;
+    e.preventDefault();
     lane.onArmRecord();
   };
+
+  const handleRecClick = (e: React.MouseEvent<HTMLButtonElement>): void => {
+    e.stopPropagation();
+    if (e.detail !== 0) return;
+    if (!recInteractive) return;
+    lane.onArmRecord();
+  };
+
+  const recAriaLabel =
+    visual === "recording" || lane.isEngineRecording
+      ? `Stop recording ${trackDisplayName(lane.trackIndex)}`
+      : visual === "waiting"
+        ? `Disarm overdub ${trackDisplayName(lane.trackIndex)}`
+        : isMaster && visual === "idle"
+          ? "Start first loop on Master 1"
+          : `Record on ${trackDisplayName(lane.trackIndex)}`;
 
   const handleClear = (e: React.MouseEvent): void => {
     e.stopPropagation();
@@ -636,7 +671,9 @@ function TrackColumn({ lane, masterOnIdleRecord }: TrackColumnProps): React.JSX.
   return (
     <div
       role="presentation"
-      onClick={() => lane.onRequestFocus()}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) lane.onRequestFocus();
+      }}
       style={{
         ...glass,
         flex: 1,
@@ -726,10 +763,14 @@ function TrackColumn({ lane, masterOnIdleRecord }: TrackColumnProps): React.JSX.
         <VertSlider value={faderPct} onChange={(v) => lane.onVolumeChange(v / 100)} />
       </div>
 
-      <motion.div
-        animate={isPulsing ? { opacity: [1, 0.5, 1] } : { opacity: 1 }}
+      <motion.button
+        type="button"
+        aria-label={recAriaLabel}
+        animate={isPulsing ? { opacity: [1, 0.5, 1] } : { opacity: recInteractive ? 1 : 0.45 }}
         transition={isPulsing ? { repeat: Infinity, duration: 0.9 } : {}}
+        onPointerDown={handleRecPointerDown}
         onClick={handleRecClick}
+        disabled={!recInteractive}
         style={{
           position: "relative",
           zIndex: 1,
@@ -743,10 +784,12 @@ function TrackColumn({ lane, masterOnIdleRecord }: TrackColumnProps): React.JSX.
           background: cfg.bg,
           border: `2px solid ${cfg.bord}`,
           boxShadow: cfg.glow,
-          cursor: lane.armDisabled ? "not-allowed" : "pointer",
+          cursor: recInteractive ? "pointer" : "not-allowed",
           gap: 4,
+          padding: 0,
+          touchAction: "manipulation",
+          WebkitTapHighlightColor: "transparent",
           transition: "background 0.18s, border-color 0.18s",
-          opacity: lane.armDisabled ? 0.45 : 1,
         }}
       >
         <div
@@ -755,14 +798,14 @@ function TrackColumn({ lane, masterOnIdleRecord }: TrackColumnProps): React.JSX.
             height: 18,
             borderRadius: "50%",
             background: cfg.col,
-            opacity: visual === "idle" ? 0.25 : 1,
+            opacity: visual === "idle" && !lane.isEngineRecording ? 0.25 : 1,
             transition: "all 0.15s",
           }}
         />
         <span style={{ fontSize: 7, letterSpacing: "0.12em", color: cfg.col, textTransform: "uppercase" }}>
-          {isMaster && visual === "idle" ? "START" : cfg.lbl}
+          {isMaster && visual === "idle" && !lane.isEngineRecording ? "START" : cfg.lbl}
         </span>
-      </motion.div>
+      </motion.button>
 
       <div style={{ flex: 1, position: "relative", zIndex: 1 }} />
 
@@ -2080,11 +2123,7 @@ export function KiteLoopV4Panel({
         <div style={{ position: "relative", width: "100%", maxWidth: 580 }}>
           <div style={{ display: "flex", gap: 8, width: "100%" }}>
             {looperState.soloTrackLanes.map((lane) => (
-              <TrackColumn
-                key={lane.trackIndex}
-                lane={lane}
-                masterOnIdleRecord={() => looperHandlers.onRecordFirstLoop()}
-              />
+              <TrackColumn key={lane.trackIndex} lane={lane} />
             ))}
           </div>
           {showCalibrationOnboarding ? (

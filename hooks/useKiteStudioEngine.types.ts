@@ -8,7 +8,8 @@ import type { RunwayDisplayLabel } from "@/lib/looper-runway-scheduler";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import type { BridgeStatus, Role } from "@/lib/p2p/transport-port";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
-import type { SoloLooperMode } from "@/components/kite-loop-v2/KiteLoopV2Panel";
+
+export type SoloLooperMode = "free" | "grid";
 
 /** Studio bridge UI phase — stays in page presenter; engine reads via config. */
 export type StudioUiPhase = "lobby" | "connecting" | "studio" | "kite-setup";
@@ -71,6 +72,8 @@ export type KiteEngineState = {
   broadcastStatus: BroadcastStatus;
   jamSetupLock: JamSetupLock;
   soloLooperState: SoloLooperState;
+  /** Track index 1–4 actively capturing input; mirrors soloLooperActiveRecordTrackIndexRef (engine-authoritative, no RAF lag). */
+  soloActiveRecordTrackIndex: number | null;
   isRecordingArmed: boolean;
   soloTrackVolumes: [number, number, number, number];
   soloMasterLoopFrames: number | null;
@@ -127,6 +130,8 @@ export type KiteEngineUiCallbacks = {
   getKiteSetupOrigin: () => KiteSetupOrigin;
   getConfirmExitOpen: () => boolean;
   setConfirmExitOpen: (open: boolean) => void;
+  confirmResetTrack: (trackIndex: 1 | 2 | 3 | 4) => boolean;
+  onJoinOwnSessionError: (message: string) => void;
 };
 
 /** Config passed from page.tsx into the headless engine hook. */
@@ -204,6 +209,7 @@ export type KiteEngineActions = {
   handleResetSoloTrack: (trackIndex: 1 | 2 | 3 | 4) => void;
   handleArmSoloOverdubTrack: (trackIndex: 2 | 3 | 4) => void;
   onLooperPedalDown: () => void;
+  handleTrackTransportTap: (trackIndex: 1 | 2 | 3 | 4) => void;
   handleSoloTrackVolumeChange: (trackIndex: 1 | 2 | 3 | 4, linear: number) => void;
   handleToggleSoloSessionRecording: () => void;
   downloadSoloSessionBlob: (blob: Blob, ext: string) => void;
@@ -236,6 +242,7 @@ export type KiteEngineActions = {
   applyPedalFocus: (trackIndex: 1 | 2 | 3 | 4) => void;
   dismissHighPingTip: () => void;
   broadcastKiteSyncStop: () => void;
+  toggleKiteSync: () => void;
 };
 
 /** UI-adjacent state owned by the engine hook but consumed by the page presenter shell. */
@@ -282,7 +289,6 @@ export type KitePresenterState = {
   loopChunkSendProgress: KiteLoopChunkSendProgress;
   syncInitiatorId: string | null;
   kiteSyncNetworkMetronomePaused: boolean;
-  useV4LooperUi: boolean;
 };
 
 export type KitePresenterActions = {

@@ -21,13 +21,11 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { useRouter } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
-import { KiteLoopV2Panel } from "@/components/kite-loop-v2/KiteLoopV2Panel";
 import {
   KiteLoopV4Panel,
   type KiteLoopV4InputDevicesProps,
+  type SoloTrackLaneView,
 } from "@/components/kite-loop-v2/KiteLoopV4Panel";
-import { FourBeatMetronome } from "@/components/kite-loop-v2/FourBeatMetronome";
-import type { SoloTrackLaneView } from "@/components/kite-loop-v2/FourTrackLooperLanes";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { useKiteStudioEngine } from "@/hooks/useKiteStudioEngine";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
