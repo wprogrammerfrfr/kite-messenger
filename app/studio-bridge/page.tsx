@@ -735,16 +735,7 @@ export default function StudioBridgePage() {
                   gap: 12,
                 }}
               >
-                <span
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    letterSpacing: "0.15em",
-                    color: "#34d399",
-                    fontFamily: "monospace",
-                    textTransform: "uppercase",
-                  }}
-                >
+                <span className="font-sans text-[11px] font-medium uppercase tracking-widest text-emerald-500">
                   Mic Level
                 </span>
                 {/* Sleek Borderless Track */}
@@ -796,16 +787,7 @@ export default function StudioBridgePage() {
                     gap: 2,
                   }}
                 >
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 700,
-                      letterSpacing: "0.15em",
-                      color: "#34d399",
-                      fontFamily: "monospace",
-                      textTransform: "uppercase",
-                    }}
-                  >
+                  <span className="font-sans text-[11px] font-medium uppercase tracking-widest text-emerald-500">
                     Gain
                   </span>
                   <span

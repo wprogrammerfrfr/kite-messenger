@@ -642,6 +642,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloCountInPumpGenerationRef = useRef(0);
   const soloCountInEndAtContextSecRef = useRef(0);
   const soloCountInBeatSecRef = useRef(0);
+  const soloCountInDownbeatRafRef = useRef<number | null>(null);
   const soloRunwayGoClearTimerRef = useRef<number | null>(null);
   const scheduledMetronomeOscillatorsRef = useRef<Set<OscillatorNode>>(new Set());
   const kiteLoopChunksRef = useRef<ReturnType<typeof createLoadIntervalChunks> | null>(null);
@@ -2988,14 +2989,56 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setVisualActiveBeatInBar(null);
   }, []);
 
+  const cancelSoloCountInDownbeatWait = useCallback(() => {
+    if (soloCountInDownbeatRafRef.current !== null) {
+      cancelAnimationFrame(soloCountInDownbeatRafRef.current);
+      soloCountInDownbeatRafRef.current = null;
+    }
+  }, []);
+
+  const scheduleSoloCountInDownbeat = useCallback(
+    (params: {
+      ctx: AudioContext;
+      downbeatContextSec: number;
+      gen: number;
+      onDownbeat: () => void | Promise<void>;
+    }) => {
+      cancelSoloCountInDownbeatWait();
+      const eps = params.ctx.sampleRate > 0 ? 2 / params.ctx.sampleRate : 0.001;
+      const tick = (): void => {
+        if (!mountedRef.current || params.gen !== soloCountInPumpGenerationRef.current) {
+          soloCountInDownbeatRafRef.current = null;
+          return;
+        }
+        if (params.ctx.currentTime + eps < params.downbeatContextSec) {
+          soloCountInDownbeatRafRef.current = requestAnimationFrame(tick);
+          return;
+        }
+        soloCountInDownbeatRafRef.current = null;
+        void Promise.resolve(params.onDownbeat()).catch((err) => {
+          soloLooperStateRef.current = "idle";
+          setSoloLooperState("idle");
+          hasCapturedFirstKiteLoopRef.current = false;
+          console.error("Solo looper failed to start:", err);
+          setKiteSetupError(
+            err instanceof Error ? err.message : "Failed to start looper engine."
+          );
+        });
+      };
+      soloCountInDownbeatRafRef.current = requestAnimationFrame(tick);
+    },
+    [cancelSoloCountInDownbeatWait]
+  );
+
   const teardownSoloCountInPump = useCallback(() => {
     soloCountInPumpGenerationRef.current += 1;
+    cancelSoloCountInDownbeatWait();
     soloCountInPumpRef.current?.teardown();
     soloCountInPumpRef.current = null;
     soloCountInEndAtContextSecRef.current = 0;
     soloCountInBeatSecRef.current = 0;
     clearSoloRunwayDisplay();
-  }, [clearSoloRunwayDisplay]);
+  }, [cancelSoloCountInDownbeatWait, clearSoloRunwayDisplay]);
 
   const cleanupKiteEngine = useCallback(
     ({
@@ -4695,48 +4738,41 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
                 return;
               }
 
-              void (async () => {
-                // Safari guard: resume the AudioContext before computing the timing
-                // anchor — Safari may have suspended it during the count-in beats.
-                await ctx.resume();
+              soloRunwayGoClearTimerRef.current = window.setTimeout(() => {
+                soloRunwayGoClearTimerRef.current = null;
+                if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
+                setSoloRunwayDisplay(null);
+              }, 400);
 
-                setRecordingArmedCountdown(null);
-                soloLooperStateRef.current = "recording";
-                setSoloLooperState("recording");
-                syncActiveRecordTrackIndex(1);
-                hasCapturedFirstKiteLoopRef.current = false;
+              const beatDurationSeconds = 60 / Math.max(1, timing.bpm);
+              const recordAnchorContextSec = payload.contextTime + beatDurationSeconds;
+              soloCountInBeatSecRef.current = beatDurationSeconds;
+              soloCountInEndAtContextSecRef.current = recordAnchorContextSec;
 
-                soloRunwayGoClearTimerRef.current = window.setTimeout(() => {
-                  soloRunwayGoClearTimerRef.current = null;
-                  if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
-                  setSoloRunwayDisplay(null);
-                }, 400);
-
-                const beatDurationSeconds = 60 / Math.max(1, timing.bpm);
-                const recordAnchorContextSec = payload.contextTime + beatDurationSeconds;
-
-                // Snapshot BPM so commitActiveRecording uses the correct value at
-                // stop time even if kiteIntervalTimingRef changes in grid mode.
-                recordingStartBpmRef.current = timing.bpm;
-
-                await startSoloLooper(timing, { recordStartContextSec: recordAnchorContextSec });
-              })().catch((err) => {
-                soloLooperStateRef.current = "idle";
-                setSoloLooperState("idle");
-                hasCapturedFirstKiteLoopRef.current = false;
-                console.error("Solo looper failed to start:", err);
-                setKiteSetupError(
-                  err instanceof Error ? err.message : "Failed to start looper engine."
-                );
+              scheduleSoloCountInDownbeat({
+                ctx,
+                downbeatContextSec: recordAnchorContextSec,
+                gen,
+                onDownbeat: async () => {
+                  // Safari guard: resume before capture anchor — Safari may suspend during count-in.
+                  await ctx.resume();
+                  isRecordingArmedRef.current = false;
+                  setIsRecordingArmed(false);
+                  setRecordingArmedCountdown(null);
+                  soloLooperStateRef.current = "recording";
+                  setSoloLooperState("recording");
+                  syncActiveRecordTrackIndex(1);
+                  hasCapturedFirstKiteLoopRef.current = false;
+                  recordingStartBpmRef.current = timing.bpm;
+                  setVisualActiveBeatInBar(0);
+                  await startSoloLooper(timing, { recordStartContextSec: recordAnchorContextSec });
+                },
               });
             },
             onRunwayEnd: () => {
               if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
               soloCountInPumpRef.current?.teardown();
               soloCountInPumpRef.current = null;
-              isRecordingArmedRef.current = false;
-              setIsRecordingArmed(false);
-              setRecordingArmedCountdown(null);
             },
           });
 
@@ -4780,7 +4816,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     deriveKiteTimingMetadata,
     ensureStudioAudioContext,
     playSoloMetronomeClick,
+    scheduleSoloCountInDownbeat,
     startSoloLooper,
+    syncActiveRecordTrackIndex,
     teardownSoloCountInPump,
     applyPedalFocus,
   ]);

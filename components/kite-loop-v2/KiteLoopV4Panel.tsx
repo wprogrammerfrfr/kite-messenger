@@ -1659,7 +1659,7 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
               <>
                 {Object.keys(inputDevices.deviceVolumes).length > 0 ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    <span style={INLINE_LABEL}>Gain</span>
+                    <span className="font-sans text-[11px] font-medium uppercase tracking-widest text-emerald-500">Gain</span>
                     <HSlider
                       value={laneCh(0)}
                       onChange={(v) => inputDevices.onSetDeviceLaneVolume(focusedSelectedDeviceId, 0, v)}
