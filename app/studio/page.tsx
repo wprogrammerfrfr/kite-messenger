@@ -197,6 +197,21 @@ export default function StudioLobbyPage() {
 
   return (
     <div className="relative min-h-screen select-none overflow-hidden text-white antialiased [&_input]:select-text [&_textarea]:select-text">
+      {isConnecting ? (
+        <div
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-[#0c0a09]/85 backdrop-blur-sm"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <div
+            className="h-10 w-10 rounded-full border-2 border-orange-500/35 border-t-emerald-400/80 animate-spin"
+            style={{ animationDuration: "1.1s" }}
+            aria-hidden
+          />
+          <p className="text-sm font-medium text-stone-300">Opening Kite Studio…</p>
+        </div>
+      ) : null}
       <div className="fixed inset-0 bg-[#0c0a09]" aria-hidden />
 
       {/* Dual-tone aurora — orange + emerald */}

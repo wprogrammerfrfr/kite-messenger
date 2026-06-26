@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   Video,
   VideoOff,
+  Music2,
 } from "lucide-react";
 
 import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
@@ -22,6 +23,8 @@ import type { RunwayDisplayLabel } from "@/lib/looper-runway-scheduler";
 
 import type { LooperRunwayPhase } from "@/components/kite-loop-v2/LooperCountdownRunway";
 import type { SoloLooperMode, SoloLooperState } from "@/hooks/useKiteStudioEngine.types";
+import KiteTunerPanel from "@/components/studio-bridge/KiteTunerPanel";
+import { DEFAULT_INSTRUMENT_ID, type KiteTunerInstrumentId } from "@/hooks/useKiteTunerEngine";
 
 export type SoloTrackLaneView = {
   trackIndex: 1 | 2 | 3 | 4;
@@ -120,6 +123,8 @@ export type KiteLoopV4PanelProps = {
   looperHandlers: KiteLoopV4LooperHandlers;
   inputDevices: KiteLoopV4InputDevicesProps;
   metronome: KiteLoopV4MetronomeProps;
+  studioAudioContextRef: MutableRefObject<AudioContext | null>;
+  activeStreamsMapRef: MutableRefObject<Map<string, MediaStream>>;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1725,11 +1730,16 @@ export function KiteLoopV4Panel({
   looperHandlers,
   inputDevices,
   metronome,
+  studioAudioContextRef,
+  activeStreamsMapRef,
 }: KiteLoopV4PanelProps): React.JSX.Element {
   const timing = looperConfig.kiteIntervalTimingRef.current;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inputsOpen, setInputsOpen] = useState(false);
+  const [isTunerOpen, setIsTunerOpen] = useState(false);
+  const [tunerInstrumentId, setTunerInstrumentId] =
+    useState<KiteTunerInstrumentId>(DEFAULT_INSTRUMENT_ID);
   const [calibrationDismissed, setCalibrationDismissed] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1795,7 +1805,18 @@ export function KiteLoopV4Panel({
     !calibrationDismissed &&
     !settingsOpen &&
     !inputsOpen &&
+    !isTunerOpen &&
     looperState.runwayDisplay == null;
+
+  const primaryRawStream = ((): MediaStream | null => {
+    for (const deviceId of inputDevices.activeDeviceIds) {
+      const stream = activeStreamsMapRef.current.get(deviceId) ?? null;
+      if (stream?.getAudioTracks().some((track) => track.readyState === "live")) {
+        return stream;
+      }
+    }
+    return null;
+  })();
 
   const dismissCalibrationOnboarding = (): void => {
     setCalibrationDismissed(true);
@@ -1895,6 +1916,7 @@ export function KiteLoopV4Panel({
             onClick={() => {
               setSettingsOpen((v) => !v);
               setInputsOpen(false);
+              setIsTunerOpen(false);
             }}
             style={{
               ...glassSharp,
@@ -2199,8 +2221,61 @@ export function KiteLoopV4Panel({
         </div>
       </main>
 
-      {/* Live meter */}
-      <div style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", zIndex: 10 }}>
+      {/* Live meter + tuner toggle */}
+      <div
+        style={{
+          position: "absolute",
+          left: 10,
+          top: "50%",
+          transform: "translateY(-50%)",
+          zIndex: 10,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        <button
+          type="button"
+          aria-label={isTunerOpen ? "Close tuner" : "Open tuner"}
+          aria-pressed={isTunerOpen}
+          onClick={() => {
+            setIsTunerOpen((v) => !v);
+            setInputsOpen(false);
+            setSettingsOpen(false);
+          }}
+          style={{
+            ...glassSharp,
+            minWidth: 42,
+            padding: "10px 8px 8px",
+            borderRadius: 14,
+            background: isTunerOpen ? "rgba(34,197,94,0.1)" : "rgba(10,10,10,0.75)",
+            border: `1px solid ${isTunerOpen ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
+            color: "rgba(255,255,255,0.75)",
+            cursor: "pointer",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 4,
+            flexShrink: 0,
+          }}
+        >
+          <Music2 size={14} color={isTunerOpen ? EMERALD : "rgba(255,255,255,0.55)"} />
+          <span
+            style={{
+              color: isTunerOpen ? EMERALD : "rgba(34,197,94,0.85)",
+              fontSize: 7,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              fontWeight: 600,
+              lineHeight: 1,
+            }}
+          >
+            Tuner
+          </span>
+        </button>
+
         <div
           style={{
             ...glass,
@@ -2245,6 +2320,7 @@ export function KiteLoopV4Panel({
             onClick={() => {
               setInputsOpen(true);
               setSettingsOpen(false);
+              setIsTunerOpen(false);
             }}
             style={{
               position: "absolute",
@@ -2281,6 +2357,15 @@ export function KiteLoopV4Panel({
         )}
       </AnimatePresence>
 
+      <KiteTunerPanel
+        isOpen={isTunerOpen}
+        onClose={() => setIsTunerOpen(false)}
+        audioContext={studioAudioContextRef.current}
+        inputStream={primaryRawStream}
+        instrumentId={tunerInstrumentId}
+        onInstrumentChange={setTunerInstrumentId}
+      />
+
       <AnimatePresence>
         {settingsOpen && (
           <SettingsModal
@@ -2304,7 +2389,7 @@ export function KiteLoopV4Panel({
       </AnimatePresence>
 
       <AnimatePresence>
-        {settingsOpen || inputsOpen ? (
+        {settingsOpen || inputsOpen || isTunerOpen ? (
           <motion.div
             role="presentation"
             initial={{ opacity: 0 }}
@@ -2313,6 +2398,7 @@ export function KiteLoopV4Panel({
             onClick={() => {
               setSettingsOpen(false);
               setInputsOpen(false);
+              setIsTunerOpen(false);
             }}
             style={{
               position: "absolute",

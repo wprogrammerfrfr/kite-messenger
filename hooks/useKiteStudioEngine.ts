@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  startTransition,
   type MutableRefObject,
 } from "react";
 import Peer, { type SignalData } from "simple-peer";
@@ -293,13 +294,6 @@ function addLog(msg: string) {
   console.log(msg);
 }
 
-function formatRecordingTime(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
 /** ~1s clean sine tone for speaker check (Web Audio API). */
 function playTestTone(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -327,7 +321,6 @@ function playTestTone(): Promise<void> {
   });
 }
 
-type CheckRowState = "pending" | "done" | "error";
 type KiteSignalState = "checking" | "secure" | "offline" | "error";
 
 const BASELINE_LEVEL_BAR_HEIGHTS = [0.12, 0.12, 0.12, 0.12, 0.12] as const;
@@ -346,7 +339,7 @@ function meterBinsFromFrequencyData(buf: Uint8Array): number[] {
  * Orchestrates audio DSP, WebRTC, looper, and Kite Sync — UI shell wires props only.
  */
 export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngineResult {
-  const { router, ui, initialSessionId, onAuthUserChange, onAuthReadyChange } = config;
+  const { router, ui, onAuthUserChange, onAuthReadyChange } = config;
   const [status, setStatus] = useState<BridgeStatus>("connecting");
   const [statusNote, setStatusNote] = useState("Initializing session...");
   /** Initialization failure copy; cleared on successful P2P `connect` so it never competes with success UI. */
@@ -5211,6 +5204,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [kiteMode, studioUiPhase]);
 
   useEffect(() => {
+    if (studioUiPhase === "lobby") {
+      return;
+    }
     let rafId = 0;
     const tick = (): void => {
       const mode = kiteModeRef.current;
@@ -5250,7 +5246,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     return () => {
       cancelAnimationFrame(rafId);
     };
-  }, []);
+  }, [studioUiPhase]);
 
   useLooperFootPedal({
     armContext: {
@@ -5592,12 +5588,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     bridgeActiveRoleRef.current = null;
     historySavedRef.current = false;
     sessionStartedAtRef.current = Date.now();
-    setCollaboratorLeft(false);
-    setRemoteParticipantName(null);
-    setLastDepartedParticipantName(null);
-    clearLostCountdown();
-    setMicSyncTimedOut(false);
-    setMicPermissionHint(null);
+    startTransition(() => {
+      setCollaboratorLeft(false);
+      setRemoteParticipantName(null);
+      setLastDepartedParticipantName(null);
+      clearLostCountdown();
+      setMicSyncTimedOut(false);
+      setMicPermissionHint(null);
+      setLocalMicStream(null);
+    });
 
     appliedRemoteSignalRef.current = false;
     seenIceRef.current.clear();
@@ -5607,7 +5606,6 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     // Defensive cleanup: stop any lingering local tracks from previous failed sync attempts.
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
-    setLocalMicStream(null);
 
     const performTeardown = () => {
       if (teardownRan) return;
@@ -7000,9 +6998,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
     };
 
-    void init();
+    const initFrame = requestAnimationFrame(() => {
+      void init();
+    });
 
     return () => {
+      cancelAnimationFrame(initFrame);
       bridgeInitInFlightRef.current = false;
       bridgeTeardownRef.current = null;
       buildTransportRef.current = null;
@@ -7146,7 +7147,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     [kiteSyncCountInActive]
   );
 
-  const engineState: KiteEngineState = {
+  const startSoloLooperAction = useCallback(async () => {
+    const timing = deriveKiteTimingMetadata();
+    await startSoloLooperRunner(timing);
+  }, [deriveKiteTimingMetadata, startSoloLooperRunner]);
+
+  const engineState = useMemo(
+    (): KiteEngineState => ({
     status,
     sessionId,
     role,
@@ -7204,10 +7211,72 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     kiteSyncCountInActive,
     metronomeVolume,
     retryInitTick,
-    kiteIntervalTimingRef,
-  };
+      kiteIntervalTimingRef,
+    }),
+    [
+      status,
+      sessionId,
+      role,
+      pingMs,
+      inboundPacketLossPercent,
+      calculatedDelayMs,
+      kiteSyncEnabled,
+      metronomeBpm,
+      beatsPerInterval,
+      isVisualMetronomeOnly,
+      localMicStream,
+      echoSafetyMode,
+      isBufferingEnabled,
+      isWorkletLoaded,
+      bufferDepthFrames,
+      targetLeadFrames,
+      isAutoBuffer,
+      isBufferPrimed,
+      lastCorrectionEvent,
+      remoteStream,
+      remoteMeterTapActive,
+      isMicMuted,
+      isSpeakerMuted,
+      remotePlaybackVolume,
+      isRecording,
+      audioContextReady,
+      audioInputDevices,
+      activeDeviceIds,
+      deviceVolumes,
+      deviceInputChannelCount,
+      interfaceInputDeviceFlags,
+      interfaceLiveMonitorEnabledFlags,
+      kiteSetupTimeSignatureTop,
+      kiteSetupTimeSignatureBottom,
+      kiteSetupIsSwing,
+      kiteSetupChordCount,
+      kiteSetupTempo,
+      kiteSetupMode,
+      kiteMode,
+      broadcastStatus,
+      jamSetupLock,
+      soloLooperState,
+      soloActiveRecordTrackIndex,
+      isRecordingArmed,
+      soloTrackVolumes,
+      soloMasterLoopFrames,
+      soloLooperLatencyMs,
+      soloInputGain,
+      soloLatencyCalibrationStatus,
+      soloLatencyCalibrationMessage,
+      soloLooperMode,
+      soloLooperBarCount,
+      isMasterPaused,
+      soloSessionRecorderState,
+      kiteSyncCountInActive,
+      metronomeVolume,
+      retryInitTick,
+      kiteIntervalTimingRef,
+    ]
+  );
 
-  const engineActions: KiteEngineActions = {
+  const engineActions = useMemo(
+    (): KiteEngineActions => ({
     handleEnterStudio,
     handleEnterSoloStudio,
     confirmEndSession,
@@ -7221,10 +7290,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     toggleSpeaker,
     onRemotePlaybackVolumeChange: onRemotePlaybackVolumeChangeAction,
     onMetronomeVolumeChange: onMetronomeVolumeChangeAction,
-    startSoloLooper: async () => {
-      const timing = deriveKiteTimingMetadata();
-      await startSoloLooperRunner(timing);
-    },
+    startSoloLooper: startSoloLooperAction,
     handleRecordFirstLoop,
     commitActiveRecording,
     handleAutoCalibrateSoloLatency,
@@ -7268,18 +7334,89 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     dismissHighPingTip,
     broadcastKiteSyncStop,
     toggleKiteSync,
-  };
+    }),
+    [
+      handleEnterStudio,
+      handleEnterSoloStudio,
+      confirmEndSession,
+      returnToLobby,
+      toggleAudioDevice,
+      handleVolumeChange,
+      setInterfaceInputDeviceFlag,
+      setInterfaceLiveMonitorEnabledFlag,
+      refreshAudioInputDevices,
+      toggleMic,
+      toggleSpeaker,
+      onRemotePlaybackVolumeChangeAction,
+      onMetronomeVolumeChangeAction,
+      startSoloLooperAction,
+      handleRecordFirstLoop,
+      commitActiveRecording,
+      handleAutoCalibrateSoloLatency,
+      handleSoloLatencyMsChange,
+      handleStopAndResetSoloLooper,
+      handleToggleMasterPause,
+      handleResetSoloTrack,
+      handleArmSoloOverdubTrack,
+      onLooperPedalDown,
+      handleTrackTransportTap,
+      handleSoloTrackVolumeChange,
+      handleToggleSoloSessionRecording,
+      downloadSoloSessionBlob,
+      handleStartKiteSetup,
+      handleCancelKiteSetup,
+      handleConfirmKiteSetup,
+      handleStartBroadcastCountIn,
+      handleTapBeat,
+      goToNextKiteSetupStep,
+      goToPreviousKiteSetupStep,
+      setSoloInputGain,
+      setSoloLooperMode,
+      setSoloLooperBarCount,
+      setKiteSetupTempo,
+      setKiteSetupTimeSignatureTop,
+      setKiteSetupTimeSignatureBottom,
+      setKiteSetupIsSwing,
+      setKiteSetupChordCount,
+      setIsVisualMetronomeOnly,
+      setIsBufferingEnabled,
+      setIsAutoBuffer,
+      setTargetLeadFrames,
+      setEchoSafetyMode,
+      setRetryInitTick,
+      runAudioTest,
+      startLocalRecording,
+      stopLocalRecording,
+      registerMixerMeterElement,
+      registerMasterLiveMeterElement,
+      applyPedalFocus,
+      dismissHighPingTip,
+      broadcastKiteSyncStop,
+      toggleKiteSync,
+    ]
+  );
 
-  const engineRefs: KiteEngineRefs = {
+  const engineRefs = useMemo(
+    (): KiteEngineRefs => ({
     remoteAudioRef,
     localMonitorAudioRef,
     metronomeBlinkElementRef,
     soloMeterElementRef,
     perChannelMeterRefs,
     masterLiveMeterElementRef,
-  };
+    }),
+    [
+      remoteAudioRef,
+      localMonitorAudioRef,
+      metronomeBlinkElementRef,
+      soloMeterElementRef,
+      perChannelMeterRefs,
+      masterLiveMeterElementRef,
+    ]
+  );
 
-  const presenterState: KitePresenterState = {
+  const presenterState = useMemo(
+    (): KitePresenterState => ({
     statusNote,
     bridgeInitError,
     inviteLink,
@@ -7307,7 +7444,6 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     connectionLostCountdown,
     user,
     authReady,
-    devicePanelOpen,
     kiteSetupStep,
     kiteSetupUsesCustomChords,
     kiteSetupOrigin,
@@ -7318,50 +7454,87 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloTrackSlotUi,
     focusedTrackIndex,
     soloOverdubArmedTrackIndex,
-    loopChunkSendError,
-    loopChunkSendProgress,
     syncInitiatorId,
     kiteSyncNetworkMetronomePaused,
-  };
+    }),
+    [
+      statusNote,
+      bridgeInitError,
+      inviteLink,
+      highPingTipOpen,
+      visualActiveBeatInBar,
+      micPermissionDenied,
+      micPermissionHint,
+      micSyncTimedOut,
+      audioTestDone,
+      audioTestPlaying,
+      audioTestFailed,
+      kiteSignal,
+      studioUiPhase,
+      roomCopyNote,
+      remoteLevel,
+      remoteMeterHeights,
+      remoteMeterRafKey,
+      recordingTimeMs,
+      recordedBlobUrl,
+      recordedDownloadExt,
+      confirmExitOpen,
+      collaboratorLeft,
+      remoteParticipantName,
+      lastDepartedParticipantName,
+      connectionLostCountdown,
+      user,
+      authReady,
+      kiteSetupStep,
+      kiteSetupUsesCustomChords,
+      kiteSetupOrigin,
+      kiteSetupError,
+      loopProgress,
+      recordingArmedCountdown,
+      soloRunwayDisplay,
+      soloTrackSlotUi,
+      focusedTrackIndex,
+      soloOverdubArmedTrackIndex,
+      syncInitiatorId,
+      kiteSyncNetworkMetronomePaused,
+    ]
+  );
 
-  const presenterActions: KitePresenterActions = {
-    setConfirmExitOpen,
-    setRoomCopyNote,
-    setDevicePanelOpen,
-    setStatusNote,
-    setKiteSetupUsesCustomChords,
-    setKiteSetupMode,
-  };
+  const presenterActions = useMemo(
+    (): KitePresenterActions => ({
+      setConfirmExitOpen,
+      setRoomCopyNote,
+      setStatusNote,
+      setKiteSetupUsesCustomChords,
+      setKiteSetupMode,
+    }),
+    [setConfirmExitOpen, setRoomCopyNote, setStatusNote, setKiteSetupUsesCustomChords, setKiteSetupMode]
+  );
 
-  const engineLegacy: KiteEngineLegacyApi = {
+  const engineLegacy = useMemo(
+    (): KiteEngineLegacyApi => ({
     broadcastWizardStudioParam,
     sendJamSetupLock,
     studioAudioContextRef: studioAudioContextRef as MutableRefObject<AudioContext | null>,
-    flushAndSetRemoteGridTarget: (targetTimeSec) =>
-      bridgedP2PEngine.metered.flushAndSetGridTarget(targetTimeSec),
-    cleanupKiteEngine,
-    restoreLiveVoipTrackAfterKite,
-    buildRemotePlaybackGraph,
-    broadcastKiteSync,
-    setKiteSyncEnabled,
-    setBroadcastStatus,
-    setSyncInitiatorId,
-    setKiteSyncCountInActive,
+    activeStreamsMapRef: activeStreamsMapRef as MutableRefObject<Map<string, MediaStream>>,
     setAudioContextReady,
     setMetronomeBpm,
     broadcastStudioParam,
     getStudioKiteSampleRate,
     clearRecordedBlobUrl,
-    remoteStreamRef: remoteStreamRef as MutableRefObject<MediaStream | null>,
-    metronomeGainRef: metronomeGainRef as MutableRefObject<GainNode | null>,
-    kiteSyncCountInEndAtContextSecRef,
-    syncInitiatorIdRef,
-    mountedRef,
-    kiteSyncCountInActiveRef,
-    kiteSyncCountInCompletionHandledRef,
-    ensureStudioAudioContext,
-    rebuildMixerAndReplaceTrack,
-  };
+    }),
+    [
+      broadcastWizardStudioParam,
+      sendJamSetupLock,
+      studioAudioContextRef,
+      activeStreamsMapRef,
+      setAudioContextReady,
+      setMetronomeBpm,
+      broadcastStudioParam,
+      getStudioKiteSampleRate,
+      clearRecordedBlobUrl,
+    ]
+  );
 
   return { engineState, engineActions, engineRefs, presenterState, presenterActions, engineLegacy };
 

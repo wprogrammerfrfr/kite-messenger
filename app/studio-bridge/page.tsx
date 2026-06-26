@@ -1,7 +1,6 @@
 ﻿"use client";
 
 import {
-  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,14 +9,13 @@ import {
   type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, ChevronLeft, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
+import { Check, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { useRouter } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
-import {
-  KiteLoopV4Panel,
-  type KiteLoopV4InputDevicesProps,
-  type SoloTrackLaneView,
-} from "@/components/kite-loop-v2/KiteLoopV4Panel";
+import { BroadcastDashboard } from "@/components/studio-bridge/BroadcastDashboard";
+import { StudioPreflightLobby } from "@/components/studio-bridge/StudioPreflightLobby";
+import dynamic from "next/dynamic";
+import type { KiteLoopV4InputDevicesProps, SoloTrackLaneView } from "@/components/kite-loop-v2/KiteLoopV4Panel";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { useKiteStudioEngine } from "@/hooks/useKiteStudioEngine";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
@@ -25,6 +23,14 @@ import {
   KITE_SYNC_LOSS_PAUSE_PCT,
   KITE_SYNC_LOSS_RESUME_PCT,
 } from "@/lib/p2p/kite-sync-loss";
+
+const KiteLoopV4Panel = dynamic(
+  () =>
+    import("@/components/kite-loop-v2/KiteLoopV4Panel").then((mod) => ({
+      default: mod.KiteLoopV4Panel,
+    })),
+  { ssr: false }
+);
 
 type CheckRowState = "pending" | "done" | "error";
 type KiteSignalState = "checking" | "secure" | "offline" | "error";
@@ -225,50 +231,20 @@ export default function StudioBridgePage() {
   const router = useRouter();
   const userRef = useRef<User | null>(null);
 
+  const engineUiConfig = useMemo(
+    () => ({
+      getUser: () => userRef.current,
+      confirmResetTrack: (trackIndex: 1 | 2 | 3 | 4) =>
+        window.confirm(`Reset Track ${trackIndex} while it is recording?`),
+      onJoinOwnSessionError: (message: string) => window.alert(message),
+    }),
+    []
+  );
+
   const { engineState, engineActions, engineRefs, presenterState, presenterActions, engineLegacy } =
     useKiteStudioEngine({
       router,
-      ui: {
-        setStudioUiPhase: () => {},
-        setStatusNote: () => {},
-        setBridgeInitError: () => {},
-        setInviteLink: () => {},
-        setCollaboratorLeft: () => {},
-        setLastDepartedParticipantName: () => {},
-        setRemoteParticipantName: () => {},
-        setConnectionLostCountdown: () => {},
-        setLoopProgress: () => {},
-        setSoloRunwayDisplay: () => {},
-        setSoloTrackSlotUi: () => {},
-        setRecordingArmedCountdown: () => {},
-        setFocusedTrackIndex: () => {},
-        setSoloOverdubArmedTrackIndex: () => {},
-        setSyncInitiatorId: () => {},
-        setKiteSyncNetworkMetronomePaused: () => {},
-        setVisualActiveBeatInBar: () => {},
-        setRemoteMeterRafKey: () => {},
-        setRemoteLevel: () => {},
-        setRemoteMeterHeights: () => {},
-        setLoopChunkSendError: () => {},
-        setLoopChunkSendProgress: () => {},
-        setKiteSetupError: () => {},
-        setKiteSetupStep: () => {},
-        setKiteSetupOrigin: () => {},
-        setKiteSetupUsesCustomChords: () => {},
-        setRecordingTimeMs: () => {},
-        setRecordedBlobUrl: () => {},
-        setRecordedDownloadExt: () => {},
-        setHighPingTipOpen: () => {},
-        getStudioUiPhase: () => "lobby",
-        getUser: () => userRef.current,
-        getAuthReady: () => true,
-        getKiteSetupOrigin: () => "lobby",
-        getConfirmExitOpen: () => false,
-        setConfirmExitOpen: () => {},
-        confirmResetTrack: (trackIndex) =>
-          window.confirm(`Reset Track ${trackIndex} while it is recording?`),
-        onJoinOwnSessionError: (message) => window.alert(message),
-      },
+      ui: engineUiConfig,
     });
 
   useEffect(() => {
@@ -284,12 +260,10 @@ export default function StudioBridgePage() {
   const calculatedDelayMs = engineState.calculatedDelayMs;
   const kiteSyncEnabled = engineState.kiteSyncEnabled;
   const metronomeBpm = engineState.metronomeBpm;
-  const beatsPerInterval = engineState.beatsPerInterval;
   const isVisualMetronomeOnly = engineState.isVisualMetronomeOnly;
   const localMicStream = engineState.localMicStream;
   const echoSafetyMode = engineState.echoSafetyMode;
   const isBufferingEnabled = engineState.isBufferingEnabled;
-  const isWorkletLoaded = engineState.isWorkletLoaded;
   const bufferDepthFrames = engineState.bufferDepthFrames;
   const targetLeadFrames = engineState.targetLeadFrames;
   const isAutoBuffer = engineState.isAutoBuffer;
@@ -358,14 +332,11 @@ export default function StudioBridgePage() {
   const confirmExitOpen = presenterState.confirmExitOpen;
   const collaboratorLeft = presenterState.collaboratorLeft;
   const remoteParticipantName = presenterState.remoteParticipantName;
-  const lastDepartedParticipantName = presenterState.lastDepartedParticipantName;
   const connectionLostCountdown = presenterState.connectionLostCountdown;
   const user = presenterState.user;
   const authReady = presenterState.authReady;
-  const devicePanelOpen = presenterState.devicePanelOpen;
   const kiteSetupStep = presenterState.kiteSetupStep;
   const kiteSetupUsesCustomChords = presenterState.kiteSetupUsesCustomChords;
-  const kiteSetupOrigin = presenterState.kiteSetupOrigin;
   const kiteSetupError = presenterState.kiteSetupError;
   const loopProgress = presenterState.loopProgress;
   const recordingArmedCountdown = presenterState.recordingArmedCountdown;
@@ -373,15 +344,12 @@ export default function StudioBridgePage() {
   const soloTrackSlotUi = presenterState.soloTrackSlotUi;
   const focusedTrackIndex = presenterState.focusedTrackIndex;
   const soloOverdubArmedTrackIndex = presenterState.soloOverdubArmedTrackIndex;
-  const loopChunkSendError = presenterState.loopChunkSendError;
-  const loopChunkSendProgress = presenterState.loopChunkSendProgress;
   const syncInitiatorId = presenterState.syncInitiatorId;
   const kiteSyncNetworkMetronomePaused = presenterState.kiteSyncNetworkMetronomePaused;
 
   // Presenter actions aliases
   const setConfirmExitOpen = presenterActions.setConfirmExitOpen;
   const setRoomCopyNote = presenterActions.setRoomCopyNote;
-  const setDevicePanelOpen = presenterActions.setDevicePanelOpen;
   const setStatusNote = presenterActions.setStatusNote;
   const setKiteSetupUsesCustomChords = presenterActions.setKiteSetupUsesCustomChords;
   const setKiteSetupMode = presenterActions.setKiteSetupMode;
@@ -400,17 +368,14 @@ export default function StudioBridgePage() {
   const onRemotePlaybackVolumeChange = engineActions.onRemotePlaybackVolumeChange;
   const onMetronomeVolumeChange = engineActions.onMetronomeVolumeChange;
   const handleRecordFirstLoop = engineActions.handleRecordFirstLoop;
-  const commitActiveRecording = engineActions.commitActiveRecording;
   const handleAutoCalibrateSoloLatency = engineActions.handleAutoCalibrateSoloLatency;
   const handleSoloLatencyMsChange = engineActions.handleSoloLatencyMsChange;
   const handleStopAndResetSoloLooper = engineActions.handleStopAndResetSoloLooper;
   const handleToggleMasterPause = engineActions.handleToggleMasterPause;
   const handleResetSoloTrack = engineActions.handleResetSoloTrack;
-  const handleArmSoloOverdubTrack = engineActions.handleArmSoloOverdubTrack;
   const handleTrackTransportTap = engineActions.handleTrackTransportTap;
   const handleSoloTrackVolumeChange = engineActions.handleSoloTrackVolumeChange;
   const handleToggleSoloSessionRecording = engineActions.handleToggleSoloSessionRecording;
-  const downloadSoloSessionBlob = engineActions.downloadSoloSessionBlob;
   const handleStartKiteSetup = engineActions.handleStartKiteSetup;
   const handleCancelKiteSetup = engineActions.handleCancelKiteSetup;
   const handleConfirmKiteSetup = engineActions.handleConfirmKiteSetup;
@@ -457,6 +422,7 @@ export default function StudioBridgePage() {
   const broadcastWizardStudioParam = engineLegacy.broadcastWizardStudioParam;
   const sendJamSetupLock = engineLegacy.sendJamSetupLock;
   const studioAudioContextRef = engineLegacy.studioAudioContextRef;
+  const activeStreamsMapRef = engineLegacy.activeStreamsMapRef;
   const setAudioContextReady = engineLegacy.setAudioContextReady;
   const setMetronomeBpm = engineLegacy.setMetronomeBpm;
   const broadcastStudioParam = engineLegacy.broadcastStudioParam;
@@ -464,7 +430,6 @@ export default function StudioBridgePage() {
   const clearRecordedBlobUrl = engineLegacy.clearRecordedBlobUrl;
 
   // Engine refs
-  const perChannelMeterRefs = engineRefs.perChannelMeterRefs;
   const remoteAudioRef = engineRefs.remoteAudioRef;
   const localMonitorAudioRef = engineRefs.localMonitorAudioRef;
   const metronomeBlinkElementRef = engineRefs.metronomeBlinkElementRef;
@@ -601,76 +566,6 @@ export default function StudioBridgePage() {
     handleTrackTransportTap,
     handleResetSoloTrack,
   ]);
-
-    const BroadcastDashboard = () => {
-    const syncStatusLabel =
-      broadcastStatus === "idle"
-        ? "Ready"
-        : kiteSyncCountInActive
-          ? "Count-in"
-          : broadcastStatus === "live"
-            ? "Live"
-            : "Starting";
-    const phaseLabel =
-      visualActiveBeatInBar === 0
-        ? "Downbeat"
-        : visualActiveBeatInBar !== null
-          ? "Beat"
-          : "â€”";
-
-    const partnerSessionLabel =
-      remoteParticipantName?.trim() || "Partner";
-    const jamAnchorMessage =
-      syncInitiatorId === localJamSetupOwnerId
-        ? "You're leading this sync."
-        : syncInitiatorId
-          ? `Synced by ${partnerSessionLabel}`
-          : "Active jam session";
-
-    return (
-      <div className="space-y-3 rounded-xl border border-stone-800/90 bg-stone-950/45 p-4">
-        <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-center">
-          <p className="font-mono text-sm text-stone-100">
-            <span className="text-stone-500">BPM</span>{" "}
-            <span className="font-semibold tabular-nums">{metronomeBpm}</span>
-          </p>
-          <p className="font-mono text-sm text-stone-100">
-            <span className="text-stone-500">Phase</span>{" "}
-            <span className="font-semibold">{phaseLabel}</span>
-          </p>
-          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400">{syncStatusLabel}</p>
-        </div>
-        {canStartSync ? (
-          <button
-            type="button"
-            onClick={handleStartBroadcastCountIn}
-            className="w-full rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/15"
-          >
-            Start Count-In &amp; Jam
-          </button>
-        ) : null}
-        {broadcastStatus !== "idle" || kiteSyncEnabled ? (
-          <p className="text-center text-xs font-medium text-stone-400">{jamAnchorMessage}</p>
-        ) : null}
-        <button
-          type="button"
-          disabled={!canControlStop}
-          aria-disabled={!canControlStop}
-          onClick={() => {
-            if (!canControlStop) return;
-            broadcastKiteSyncStop();
-          }}
-          className={`w-full rounded-xl border px-4 py-3 text-sm font-semibold transition ${
-            canControlStop
-              ? "border-orange-500/40 bg-orange-500/10 text-orange-200 hover:bg-orange-500/15"
-              : "cursor-not-allowed border-stone-700/80 bg-stone-900/50 text-stone-500 opacity-60"
-          }`}
-        >
-          Stop Kite Sync
-        </button>
-      </div>
-    );
-  };
 
     const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
@@ -1066,329 +961,29 @@ export default function StudioBridgePage() {
           ) : null}
 
           {showLobbyControls ? (
-            <div
-              className="relative flex min-h-screen w-full flex-col overflow-hidden bg-stone-950 font-sans antialiased caret-transparent outline-none select-none"
-              style={{ fontFamily: "'Sora', 'DM Sans', system-ui, sans-serif" }}
-            >
-              <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
-                <div className="absolute -top-24 left-0 h-[34rem] w-[34rem] rounded-full bg-orange-500/[0.1] blur-3xl" />
-                <div className="absolute top-1/3 right-0 h-[30rem] w-[30rem] rounded-full bg-emerald-500/[0.09] blur-3xl" />
-                <div className="absolute bottom-0 left-1/3 h-[26rem] w-[26rem] rounded-full bg-orange-500/[0.06] blur-3xl" />
-                <div className="absolute top-1/2 left-1/2 h-[22rem] w-[22rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-500/[0.05] blur-3xl" />
-                <div
-                  className="absolute inset-0 opacity-[0.015]"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(rgba(255,255,255,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.5) 1px, transparent 1px)",
-                    backgroundSize: "48px 48px",
-                  }}
-                />
-              </div>
-
-              <header className="relative shrink-0 px-4 py-5 md:px-8 md:py-6">
-                <div className="flex w-full items-center gap-4 md:gap-8">
-                  <motion.button
-                    type="button"
-                    onClick={returnToLobby}
-                    className="shrink-0 rounded-xl border border-white/[0.14] bg-stone-900/70 px-4 py-2.5 text-sm font-semibold text-stone-300 shadow-sm transition-all hover:border-orange-500/35 hover:bg-orange-500/8 hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-500/30"
-                    whileTap={{ scale: 0.97 }}
-                    aria-label="Return to lobby"
-                  >
-                    <ChevronLeft className="mr-1 inline h-4 w-4 align-[-3px] opacity-70" strokeWidth={2} aria-hidden />
-                    return to lobby
-                  </motion.button>
-
-                  <div className="flex flex-1 items-center justify-center gap-3 md:gap-4">
-                    <h1 className="bg-gradient-to-r from-orange-400 via-orange-300 to-emerald-400 bg-clip-text text-2xl font-black tracking-tight text-transparent md:text-4xl">
-                      Kite Studio
-                    </h1>
-                    <span className="rounded-lg border border-emerald-500/40 bg-emerald-500/12 px-2.5 py-1 text-[11px] font-bold uppercase tracking-widest text-emerald-400 md:px-3 md:py-1.5 md:text-xs">
-                      Preflight
-                    </span>
-                  </div>
-
-                  <div className="hidden w-[168px] shrink-0 md:block" aria-hidden />
-                </div>
-              </header>
-
-              <main className="relative flex min-h-0 w-full flex-1 flex-col px-4 py-4 md:px-6 md:py-5">
-                {micPermissionDenied ? (
-                  <div role="alert" className="mb-6 flex items-start gap-3 rounded-xl border border-orange-500/25 bg-orange-500/8 px-4 py-3.5">
-                    <div>
-                      <p className="text-sm font-semibold text-orange-300">Microphone Access Denied</p>
-                      <p className="mt-0.5 text-xs leading-relaxed text-stone-400">
-                        {micPermissionHint ||
-                          "Please allow microphone access in your browser or system settings, then reload this page."}
-                      </p>
-                    </div>
-                  </div>
-                ) : null}
-
-                {micSyncTimedOut && !localMicStream ? (
-                  <div role="alert" className="mb-6 flex items-start justify-between gap-3 rounded-xl border border-white/[0.08] bg-stone-800/60 px-4 py-3.5">
-                    <div>
-                      <p className="text-sm font-semibold text-stone-300">Microphone Sync Timeout</p>
-                      <p className="mt-0.5 text-xs text-stone-500">Could not detect your mic within the expected time.</p>
-                    </div>
-                    <motion.button
-                      type="button"
-                      onClick={() => setRetryInitTick((n) => n + 1)}
-                      whileTap={{ scale: 0.97 }}
-                      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-orange-500/30 px-3 py-1.5 text-xs font-semibold text-orange-400 transition-all hover:bg-orange-500/10 focus:outline-none focus:ring-2 focus:ring-orange-500/30"
-                    >
-                      Retry
-                    </motion.button>
-                  </div>
-                ) : null}
-
-                <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[45fr_55fr] lg:items-stretch">
-                  <section
-                    aria-labelledby="preflight-heading"
-                    className="flex h-full min-h-[360px] flex-col overflow-hidden rounded-2xl border border-white/[0.07] bg-stone-900/50 backdrop-blur-sm lg:min-h-0"
-                  >
-                    <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-5 py-4">
-                      <div>
-                        <h2 id="preflight-heading" className="text-sm font-bold tracking-tight text-white">
-                          System Readiness
-                        </h2>
-                        <p className="mt-px text-[11px] text-stone-500">All checks must pass before entering</p>
-                      </div>
-                      <div className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold ${
-                        micRowState === "done" && audioRowState === "done" && connRowState === "done"
-                          ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
-                          : micRowState === "error" || audioRowState === "error" || connRowState === "error"
-                            ? "border-orange-500/25 bg-orange-500/10 text-orange-400"
-                            : "border-white/[0.06] bg-stone-800/60 text-stone-400"
-                      }`}>
-                        <span
-                          className={`inline-block h-2 w-2 rounded-full ${
-                            micRowState === "done" && audioRowState === "done" && connRowState === "done"
-                              ? "animate-pulse bg-emerald-400"
-                              : "bg-stone-600"
-                          }`}
-                          aria-hidden="true"
-                        />
-                        {micRowState === "done" && audioRowState === "done" && connRowState === "done"
-                          ? "All Ready"
-                          : micRowState === "error" || audioRowState === "error" || connRowState === "error"
-                            ? "Action Required"
-                            : "Checking..."}
-                      </div>
-                    </div>
-
-                    <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
-                      <div className={`flex min-h-0 flex-1 flex-col rounded-xl border p-4 ${
-                        micRowState === "done"
-                          ? "border-emerald-500/25 bg-emerald-500/[0.06]"
-                          : micRowState === "error"
-                            ? "border-orange-500/25 bg-orange-500/[0.06]"
-                            : "border-white/[0.08] bg-white/[0.02]"
-                      }`}>
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div className={`flex items-center gap-2 ${
-                            micRowState === "done" ? "text-emerald-400" : micRowState === "error" ? "text-orange-400" : "text-stone-500"
-                          }`}>
-                            <Mic className="h-4 w-4" aria-hidden />
-                            <span className="text-sm font-semibold text-white/90">Microphone</span>
-                          </div>
-                          <span className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
-                            micRowState === "done"
-                              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-400"
-                              : micRowState === "error"
-                                ? "border-orange-500/30 bg-orange-500/15 text-orange-400"
-                                : "border-stone-600/40 bg-stone-700/60 text-stone-400"
-                          }`}>
-                            {micRowState === "done" ? "Ready" : micRowState === "error" ? "Error" : "Checking"}
-                          </span>
-                        </div>
-                        <div className="flex min-h-0 w-full flex-1 items-center justify-center rounded-xl border border-emerald-500/10 bg-black/20 p-2">
-                          <div className="mx-auto w-1/2 max-w-[200px] min-w-[140px]">
-                            <MicLevelBars stream={localMicStream} />
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className={`flex min-h-0 flex-1 flex-col rounded-xl border p-4 ${
-                        audioRowState === "done"
-                          ? "border-emerald-500/25 bg-emerald-500/[0.06]"
-                          : audioRowState === "error"
-                            ? "border-orange-500/25 bg-orange-500/[0.06]"
-                            : "border-white/[0.08] bg-white/[0.02]"
-                      }`}>
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div className={`flex items-center gap-2 ${
-                            audioRowState === "done" ? "text-emerald-400" : audioRowState === "error" ? "text-orange-400" : "text-stone-500"
-                          }`}>
-                            <Volume2 className="h-4 w-4" aria-hidden />
-                            <span className="text-sm font-semibold text-white/90">Speaker</span>
-                          </div>
-                          <span className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
-                            audioRowState === "done"
-                              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-400"
-                              : audioRowState === "error"
-                                ? "border-orange-500/30 bg-orange-500/15 text-orange-400"
-                                : "border-stone-600/40 bg-stone-700/60 text-stone-400"
-                          }`}>
-                            {audioRowState === "done" ? "Ready" : audioRowState === "error" ? "Error" : "Checking"}
-                          </span>
-                        </div>
-                        <div className="flex min-h-0 flex-1 items-stretch">
-                          {audioRowState === "done" ? (
-                            <div className="flex h-full min-h-[3rem] w-full flex-1 items-center justify-center rounded-xl border border-emerald-500/20 bg-black/20 px-4 py-2 text-sm font-semibold text-emerald-300 shadow-inner shadow-emerald-950/20">
-                              Audio output confirmed
-                            </div>
-                          ) : (
-                            <motion.button
-                              type="button"
-                              onClick={() => void runAudioTest()}
-                              disabled={audioTestPlaying}
-                              whileTap={audioTestPlaying ? undefined : { scale: 0.97 }}
-                              className={`flex h-full min-h-[3rem] w-full flex-1 items-center justify-center gap-1.5 rounded-xl border bg-black/20 px-4 py-2 text-sm font-semibold shadow-inner shadow-orange-950/20 transition-all focus:outline-none focus:ring-2 focus:ring-orange-500/30 ${
-                                audioTestPlaying
-                                  ? "cursor-not-allowed border-white/[0.08] text-stone-500"
-                                  : "border-orange-500/25 text-orange-400 hover:border-orange-500/40 hover:bg-orange-500/8"
-                              }`}
-                            >
-                              {audioTestPlaying ? "Playing..." : "tap to test audio"}
-                            </motion.button>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className={`flex min-h-0 flex-1 flex-col rounded-xl border p-4 ${
-                        connRowState === "done"
-                          ? "border-emerald-500/25 bg-emerald-500/[0.06]"
-                          : connRowState === "error"
-                            ? "border-orange-500/25 bg-orange-500/[0.06]"
-                            : "border-white/[0.08] bg-white/[0.02]"
-                      }`}>
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div className={`flex items-center gap-2 ${
-                            connRowState === "done" ? "text-emerald-400" : connRowState === "error" ? "text-orange-400" : "text-stone-500"
-                          }`}>
-                            <span className="text-sm font-semibold text-white/90">Kite Signal</span>
-                          </div>
-                          <span className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
-                            connRowState === "done"
-                              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-400"
-                              : connRowState === "error"
-                                ? "border-orange-500/30 bg-orange-500/15 text-orange-400"
-                                : "border-stone-600/40 bg-stone-700/60 text-stone-400"
-                          }`}>
-                            {connRowState === "done" ? "Ready" : connRowState === "error" ? "Error" : "Checking"}
-                          </span>
-                        </div>
-                        <div className="flex h-full min-h-[3rem] w-full flex-1 items-center justify-center rounded-lg border border-dashed border-white/[0.08] bg-white/[0.01] px-3">
-                          <span className={`text-xs ${
-                            connRowState === "done" ? "text-emerald-400/80" : connRowState === "error" ? "text-orange-400/80" : "text-stone-600"
-                          }`}>
-                            {connRowState === "done"
-                              ? pingMs === null
-                                ? "Relay connected"
-                                : `Relay connected · ${pingMs} ms`
-                              : connRowState === "error"
-                                ? kiteErrorCopy
-                                : kitePendingCopy}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="grid h-full min-h-0 flex-1 grid-cols-1 overflow-hidden rounded-2xl border border-white/[0.07] bg-stone-900/50 backdrop-blur-sm max-lg:min-h-[360px] md:grid-cols-2">
-                    <div className="flex min-h-0 flex-col gap-5 border-b border-white/[0.05] p-6 md:border-b-0 md:border-r">
-                      <div>
-                        <h2 className="text-sm font-bold tracking-tight text-white">Session</h2>
-                        <p className="mt-1 text-[11px] leading-relaxed text-stone-500">
-                          Share the room code with your collaborator.
-                        </p>
-                      </div>
-
-                      <motion.button
-                        type="button"
-                        onClick={() => void copyRoomCode()}
-                        className="w-full rounded-xl border border-white/[0.08] bg-stone-950/50 px-4 py-5 text-center transition-all hover:border-emerald-500/30 hover:bg-stone-950/70 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-                        whileTap={{ scale: 0.98 }}
-                      >
-                        <p className="text-[10px] font-semibold uppercase tracking-widest text-stone-500">Room code</p>
-                        <p className="mt-1 font-mono text-xl font-bold tracking-wider text-white">{sessionId?.toUpperCase() ?? "------"}</p>
-                        {roomCopyNote ? (
-                          <p className="mt-1 text-xs font-semibold text-emerald-300/90" role="status">
-                            {roomCopyNote}
-                          </p>
-                        ) : (
-                          <p className="mt-1 text-xs text-stone-500">tap to copy</p>
-                        )}
-                      </motion.button>
-
-                      <div className="px-1 py-2">
-                        <p className="mb-3 text-[10px] font-semibold uppercase tracking-widest text-stone-600">Before you enter</p>
-                        <ul className="space-y-2 text-sm leading-relaxed text-stone-400">
-                          <li className="flex items-center gap-2">
-                            <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
-                            <span>use wired headphones</span>
-                          </li>
-                          <li className="flex items-center gap-2">
-                            <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
-                            <span>calibrate before looping</span>
-                          </li>
-                          <li className="flex items-center gap-2">
-                            <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
-                            <span>Ethernet for best performance</span>
-                          </li>
-                        </ul>
-                      </div>
-                    </div>
-
-                    <div className="flex min-h-0 flex-col gap-4 p-6">
-                      <div>
-                        <h2 className="text-sm font-bold tracking-tight text-white">Session Actions</h2>
-                        <p className="mt-1 text-[11px] leading-relaxed text-stone-500">
-                          {canEnterStudio
-                            ? "All checks passed. You're ready to enter."
-                            : "Complete preflight checks to enable session entry."}
-                        </p>
-                      </div>
-
-                      <motion.button
-                        type="button"
-                        onClick={handleEnterStudio}
-                        disabled={!canEnterStudio}
-                        aria-label="Jam with a friend"
-                        whileTap={canEnterStudio ? { scale: 0.97 } : undefined}
-                        className={`flex flex-1 items-center justify-center gap-3 rounded-2xl px-6 py-8 text-base font-bold tracking-tight transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-orange-500/40 ${
-                          canEnterStudio
-                            ? "bg-gradient-to-r from-orange-500 to-emerald-500 text-white shadow-lg shadow-orange-500/25 hover:scale-[1.01] hover:shadow-orange-500/40 active:scale-[0.99]"
-                            : "cursor-not-allowed border border-white/[0.05] bg-stone-800/60 text-stone-600"
-                        }`}
-                      >
-                        {canEnterStudio ? "Jam with a friend" : "Waiting for Preflight..."}
-                      </motion.button>
-
-                      <motion.button
-                        type="button"
-                        onClick={handleEnterSoloStudio}
-                        disabled={!canPracticeAlone}
-                        aria-label="Kite loopstation"
-                        whileTap={canPracticeAlone ? { scale: 0.97 } : undefined}
-                        className={`flex flex-[1.35] items-center justify-center gap-2.5 rounded-2xl border px-6 py-10 text-lg font-semibold tracking-tight transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
-                          canPracticeAlone
-                            ? "border-emerald-500/30 text-emerald-400 hover:border-emerald-500/50 hover:bg-emerald-500/8 active:scale-[0.99]"
-                            : "cursor-not-allowed border-white/[0.06] text-stone-600"
-                        }`}
-                      >
-                        Kite loopstation
-                      </motion.button>
-                    </div>
-                  </section>
-                </div>
-              </main>
-
-              <footer className="relative flex shrink-0 items-center justify-between border-t border-white/[0.04] px-4 py-3 md:px-6">
-                <span className="text-[10px] text-stone-700">Kite Studio © 2025</span>
-                <span className="text-[10px] text-stone-700">Preflight v2 · Stable</span>
-              </footer>
-            </div>
+            <StudioPreflightLobby
+              returnToLobby={returnToLobby}
+              micPermissionDenied={micPermissionDenied}
+              micPermissionHint={micPermissionHint}
+              micSyncTimedOut={micSyncTimedOut}
+              localMicStream={localMicStream}
+              setRetryInitTick={setRetryInitTick}
+              micRowState={micRowState}
+              audioRowState={audioRowState}
+              connRowState={connRowState}
+              runAudioTest={runAudioTest}
+              audioTestPlaying={audioTestPlaying}
+              pingMs={pingMs}
+              kiteErrorCopy={kiteErrorCopy}
+              kitePendingCopy={kitePendingCopy}
+              copyRoomCode={copyRoomCode}
+              sessionId={sessionId}
+              roomCopyNote={roomCopyNote}
+              canEnterStudio={canEnterStudio}
+              handleEnterStudio={handleEnterStudio}
+              canPracticeAlone={canPracticeAlone}
+              handleEnterSoloStudio={handleEnterSoloStudio}
+            />
           ) : studioUiPhase === "kite-setup" ? (
             <motion.div
               initial={{ opacity: 0, y: 12 }}
@@ -1842,7 +1437,20 @@ export default function StudioBridgePage() {
               {kiteMode !== "solo" && status === "connected" ? (
                 <div className="relative">
                 {kiteMode === "broadcast" ? (
-                  <BroadcastDashboard />
+                  <BroadcastDashboard
+                    metronomeBpm={metronomeBpm}
+                    visualActiveBeatInBar={visualActiveBeatInBar}
+                    broadcastStatus={broadcastStatus}
+                    kiteSyncCountInActive={kiteSyncCountInActive}
+                    kiteSyncEnabled={kiteSyncEnabled}
+                    canStartSync={canStartSync}
+                    canControlStop={canControlStop}
+                    remoteParticipantName={remoteParticipantName}
+                    syncInitiatorId={syncInitiatorId}
+                    localJamSetupOwnerId={localJamSetupOwnerId}
+                    onStartCountIn={handleStartBroadcastCountIn}
+                    onStopSync={broadcastKiteSyncStop}
+                  />
                 ) : (
                 <>
                   <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-stone-700 bg-stone-950/80 px-4 py-3 text-center">
@@ -2448,6 +2056,8 @@ export default function StudioBridgePage() {
             metronomeVolume,
             onMetronomeVolumeChange,
           }}
+          studioAudioContextRef={studioAudioContextRef}
+          activeStreamsMapRef={activeStreamsMapRef}
         />
         </div>
       ) : null}

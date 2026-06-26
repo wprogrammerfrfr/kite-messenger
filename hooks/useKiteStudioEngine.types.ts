@@ -92,44 +92,9 @@ export type KiteEngineState = {
   kiteIntervalTimingRef: MutableRefObject<KiteIntervalTiming | null>;
 };
 
-/** UI-only callbacks the engine invokes when it must update presenter state. */
-export type KiteEngineUiCallbacks = {
-  setStudioUiPhase: (phase: StudioUiPhase) => void;
-  setStatusNote: (note: string) => void;
-  setBridgeInitError: (error: string | null) => void;
-  setInviteLink: (url: string | null) => void;
-  setCollaboratorLeft: (left: boolean) => void;
-  setLastDepartedParticipantName: (name: string | null) => void;
-  setRemoteParticipantName: (name: string | null) => void;
-  setConnectionLostCountdown: (sec: number | null) => void;
-  setLoopProgress: (pct: number) => void;
-  setSoloRunwayDisplay: (label: RunwayDisplayLabel | null) => void;
-  setSoloTrackSlotUi: (slots: SoloLooperPlaybackUiStateEvent["slots"] | null) => void;
-  setRecordingArmedCountdown: (sec: number | null) => void;
-  setFocusedTrackIndex: (index: 1 | 2 | 3 | 4) => void;
-  setSoloOverdubArmedTrackIndex: (index: number | null) => void;
-  setSyncInitiatorId: (id: string | null) => void;
-  setKiteSyncNetworkMetronomePaused: (paused: boolean) => void;
-  setVisualActiveBeatInBar: (beat: 0 | 1 | 2 | 3 | null) => void;
-  setRemoteMeterRafKey: (updater: (key: number) => number) => void;
-  setRemoteLevel: (level: number) => void;
-  setRemoteMeterHeights: (heights: number[]) => void;
-  setLoopChunkSendError: (error: string | null) => void;
-  setLoopChunkSendProgress: (progress: KiteLoopChunkSendProgress) => void;
-  setKiteSetupError: (error: string | null) => void;
-  setKiteSetupStep: (step: KiteSetupStep) => void;
-  setKiteSetupOrigin: (origin: KiteSetupOrigin) => void;
-  setKiteSetupUsesCustomChords: (v: boolean) => void;
-  setRecordingTimeMs: (ms: number) => void;
-  setRecordedBlobUrl: (url: string | null) => void;
-  setRecordedDownloadExt: (ext: "webm" | "m4a" | "aac" | "bin") => void;
-  setHighPingTipOpen: (open: boolean) => void;
-  getStudioUiPhase: () => StudioUiPhase;
+/** Minimal UI callbacks the engine still delegates to the presenter shell. */
+export type KiteEngineUiConfig = {
   getUser: () => User | null;
-  getAuthReady: () => boolean;
-  getKiteSetupOrigin: () => KiteSetupOrigin;
-  getConfirmExitOpen: () => boolean;
-  setConfirmExitOpen: (open: boolean) => void;
   confirmResetTrack: (trackIndex: 1 | 2 | 3 | 4) => boolean;
   onJoinOwnSessionError: (message: string) => void;
 };
@@ -137,7 +102,7 @@ export type KiteEngineUiCallbacks = {
 /** Config passed from page.tsx into the headless engine hook. */
 export type KiteEngineConfig = {
   router: AppRouterInstance;
-  ui: KiteEngineUiCallbacks;
+  ui: KiteEngineUiConfig;
   /** Initial session id from URL (optional). */
   initialSessionId?: string | null;
   onAuthUserChange?: (user: User | null) => void;
@@ -159,29 +124,12 @@ export type KiteEngineLegacyApi = {
   broadcastWizardStudioParam: (patch: Record<string, number>) => void;
   sendJamSetupLock: (action: "acquire" | "release") => boolean;
   studioAudioContextRef: MutableRefObject<AudioContext | null>;
-  flushAndSetRemoteGridTarget: (targetTimeSec: number | null) => void;
-  cleanupKiteEngine: (opts: { stopLocalTracks: boolean; isFull: boolean }) => void;
-  restoreLiveVoipTrackAfterKite: () => void;
-  buildRemotePlaybackGraph: (stream: MediaStream) => void;
-  broadcastKiteSync: (opts: { kiteSyncEnabled: boolean }) => void;
-  setKiteSyncEnabled: (v: boolean) => void;
-  setBroadcastStatus: (v: BroadcastStatus) => void;
-  setSyncInitiatorId: (id: string | null) => void;
-  setKiteSyncCountInActive: (v: boolean) => void;
+  activeStreamsMapRef: MutableRefObject<Map<string, MediaStream>>;
   setAudioContextReady: (v: boolean) => void;
   setMetronomeBpm: (updater: number | ((prev: number) => number)) => void;
   broadcastStudioParam: (patch: Record<string, number>) => void;
   getStudioKiteSampleRate: () => number;
   clearRecordedBlobUrl: () => void;
-  remoteStreamRef: MutableRefObject<MediaStream | null>;
-  metronomeGainRef: MutableRefObject<GainNode | null>;
-  kiteSyncCountInEndAtContextSecRef: MutableRefObject<number>;
-  syncInitiatorIdRef: MutableRefObject<string | null>;
-  mountedRef: MutableRefObject<boolean>;
-  kiteSyncCountInActiveRef: MutableRefObject<boolean>;
-  kiteSyncCountInCompletionHandledRef: MutableRefObject<boolean>;
-  ensureStudioAudioContext: () => AudioContext;
-  rebuildMixerAndReplaceTrack: () => Promise<void>;
 };
 
 /** Commands the UI shell sends to the engine. */
@@ -274,7 +222,6 @@ export type KitePresenterState = {
   connectionLostCountdown: number | null;
   user: User | null;
   authReady: boolean;
-  devicePanelOpen: boolean;
   kiteSetupStep: KiteSetupStep;
   kiteSetupUsesCustomChords: boolean;
   kiteSetupOrigin: KiteSetupOrigin;
@@ -285,8 +232,6 @@ export type KitePresenterState = {
   soloTrackSlotUi: SoloLooperPlaybackUiStateEvent["slots"] | null;
   focusedTrackIndex: 1 | 2 | 3 | 4;
   soloOverdubArmedTrackIndex: number | null;
-  loopChunkSendError: string | null;
-  loopChunkSendProgress: KiteLoopChunkSendProgress;
   syncInitiatorId: string | null;
   kiteSyncNetworkMetronomePaused: boolean;
 };
@@ -294,7 +239,6 @@ export type KitePresenterState = {
 export type KitePresenterActions = {
   setConfirmExitOpen: (open: boolean) => void;
   setRoomCopyNote: (note: string | null) => void;
-  setDevicePanelOpen: (value: boolean | ((prev: boolean) => boolean)) => void;
   setStatusNote: (note: string) => void;
   setKiteSetupUsesCustomChords: (value: boolean) => void;
   setKiteSetupMode: (mode: KiteMode) => void;
