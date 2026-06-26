@@ -1,4 +1,7 @@
-import { NextResponse } from 'next/server';
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
+import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
 
 type TurnCredentialsPayload = {
   iceServers: unknown[];
@@ -20,7 +23,7 @@ function parseTurnCredentialsBody(raw: unknown): TurnCredentialsPayload {
     return { iceServers, ttlSeconds: null, expiresAtEpochMs: null };
   }
 
-  if (!raw || typeof raw !== 'object') {
+  if (!raw || typeof raw !== "object") {
     return { iceServers: [], ttlSeconds: null, expiresAtEpochMs: null };
   }
 
@@ -31,7 +34,7 @@ function parseTurnCredentialsBody(raw: unknown): TurnCredentialsPayload {
   }
 
   const pickFiniteInt = (v: unknown): number | null => {
-    if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+    if (typeof v !== "number" || !Number.isFinite(v)) return null;
     return Math.max(0, Math.floor(v));
   };
 
@@ -41,11 +44,11 @@ function parseTurnCredentialsBody(raw: unknown): TurnCredentialsPayload {
     pickFiniteInt(o.expiryInSeconds) ??
     pickFiniteInt(o.expiresInSeconds);
 
-  if (typeof o.expiresAtEpochMs === 'number' && Number.isFinite(o.expiresAtEpochMs)) {
+  if (typeof o.expiresAtEpochMs === "number" && Number.isFinite(o.expiresAtEpochMs)) {
     expiresAtEpochMs = Math.floor(o.expiresAtEpochMs);
-  } else if (typeof o.expiresAt === 'number' && Number.isFinite(o.expiresAt)) {
+  } else if (typeof o.expiresAt === "number" && Number.isFinite(o.expiresAt)) {
     expiresAtEpochMs = Math.floor(o.expiresAt);
-  } else if (typeof o.expiresAt === 'string') {
+  } else if (typeof o.expiresAt === "string") {
     const parsed = Date.parse(o.expiresAt);
     if (!Number.isNaN(parsed)) expiresAtEpochMs = parsed;
   }
@@ -61,15 +64,78 @@ function parseTurnCredentialsBody(raw: unknown): TurnCredentialsPayload {
   };
 }
 
-export async function GET() {
+async function resolveAuthenticatedUser(request: Request) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !anon) {
+    return { user: null, misconfigured: true as const };
+  }
+
+  const authHeader = request.headers.get("authorization");
+  const bearerToken = authHeader?.replace(/^Bearer\s+/i, "").trim();
+  if (bearerToken) {
+    const bearerClient = createClient(url, anon);
+    const {
+      data: { user },
+      error,
+    } = await bearerClient.auth.getUser(bearerToken);
+    if (!error && user) {
+      return { user, misconfigured: false as const };
+    }
+  }
+
+  const cookieStore = cookies();
+  const supabaseAuth = createServerClient(url, anon, {
+    cookies: {
+      get(name: string) {
+        return cookieStore.get(name)?.value;
+      },
+      set(name: string, value: string, options: CookieOptions) {
+        try {
+          cookieStore.set({ name, value, ...options });
+        } catch {
+          /* ignore when called outside mutable context */
+        }
+      },
+      remove(name: string, options: CookieOptions) {
+        try {
+          cookieStore.set({ name, value: "", ...options });
+        } catch {
+          /* ignore when called outside mutable context */
+        }
+      },
+    },
+  });
+
+  const {
+    data: { user },
+    error: userErr,
+  } = await supabaseAuth.auth.getUser();
+
+  if (userErr || !user) {
+    return { user: null, misconfigured: false as const };
+  }
+
+  return { user, misconfigured: false as const };
+}
+
+export async function GET(request: Request) {
+  const authResult = await resolveAuthenticatedUser(request);
+  if (authResult.misconfigured) {
+    return NextResponse.json({ error: "Server misconfigured" }, { status: 503 });
+  }
+  if (!authResult.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   // .trim() strips hidden Windows \r carriage returns that cause 401 errors
   const username = process.env.METERED_USERNAME?.trim();
   const password = process.env.METERED_PASSWORD?.trim();
 
   if (!username || !password) {
-    console.error('[Kite] TURN credentials not configured on server');
+    console.error("[Kite] TURN credentials not configured on server");
     return NextResponse.json(
-      { error: 'TURN credentials not configured' },
+      { error: "TURN credentials not configured" },
       { status: 500 }
     );
   }
@@ -78,7 +144,7 @@ export async function GET() {
     // Fetch short-lived credentials from Metered.ca API
     const res = await fetch(
       `https://${username}.metered.live/api/v1/turn/credentials?apiKey=${password}`,
-      { cache: 'no-store' }
+      { cache: "no-store" }
     );
 
     if (!res.ok) {
@@ -94,9 +160,9 @@ export async function GET() {
       expiresAtEpochMs,
     });
   } catch (error) {
-    console.error('[Kite] Failed to fetch TURN credentials:', error);
+    console.error("[Kite] Failed to fetch TURN credentials:", error);
     return NextResponse.json(
-      { error: 'Failed to fetch TURN credentials' },
+      { error: "Failed to fetch TURN credentials" },
       { status: 500 }
     );
   }
