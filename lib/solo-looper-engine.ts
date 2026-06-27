@@ -1,4 +1,8 @@
 import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
+import {
+  createMetronomePump,
+  type MetronomePumpHandle,
+} from "@/lib/studio-metronome-pump";
 
 const MIN_SOLO_TRACK_INDEX = 1;
 const MAX_SOLO_TRACK_INDEX = 4;
@@ -92,6 +96,19 @@ export type SoloLooperCalibrationResultEvent = {
   latencyFrames: number | null;
 };
 
+export type SoloLooperHandsfreeTrackAdvancedEvent = {
+  type: "HANDSFREE_TRACK_ADVANCED";
+  fromTrack: number;
+  toTrack: number;
+  sampleRate: number;
+};
+
+export type SoloLooperHandsfreeSequenceCompleteEvent = {
+  type: "HANDSFREE_SEQUENCE_COMPLETE";
+  trackIndex: 4;
+  loopId: string | null;
+};
+
 export type SoloLooperEngineEvent =
   | SoloLooperReadyEvent
   | SoloLooperStateEvent
@@ -99,6 +116,8 @@ export type SoloLooperEngineEvent =
   | SoloLooperConfigureRejectedEvent
   | SoloLooperAutoStopCompletedEvent
   | SoloLooperCalibrationResultEvent
+  | SoloLooperHandsfreeTrackAdvancedEvent
+  | SoloLooperHandsfreeSequenceCompleteEvent
   | SoloLooperPlaybackUiStateEvent
   | SoloLooperOverdubArmedEvent
   | SoloLooperOverdubArmRejectedEvent
@@ -141,7 +160,7 @@ export type SoloLooperArmOverdubParams = {
 };
 
 export type SoloLooperStartRecordingParams = {
-  loopMode?: "free" | "grid";
+  loopMode?: "free" | "grid" | "handsfree";
   targetLengthFrames?: number;
   latencyOffsetFrames?: number;
   /** AudioContext.currentTime at which the worklet should declare the recording downbeat. */
@@ -154,7 +173,9 @@ export type SoloLooperStopRecordingParams = {
   channelCount?: 1 | 2;
   loopId?: string | null;
   latencyOffsetFrames?: number;
-  loopMode?: "free" | "grid";
+  loopMode?: "free" | "grid" | "handsfree";
+  /** AudioContext.currentTime stamped at pedal-up; worklet finalizes at this audio frame (Free Mode). */
+  stopAtContextSec?: number;
 };
 
 export type SoloLooperEngine = {
@@ -318,7 +339,8 @@ export async function buildSoloLooperEngine(
 
   let tornDown = false;
   let metronomeGainNodeRef: GainNode | null = options.metronomeGainNode ?? null;
-  let metronomeTimer: ReturnType<typeof setTimeout> | null = null;
+  let metronomePump: MetronomePumpHandle | null = null;
+  let metronomePumpGeneration = 0;
   let metronomeNextTickSec = 0;
   let metronomeBeatIndex = 0;
   const scheduledMetronomeNodes = new Set<AudioScheduledSourceNode>();
@@ -346,6 +368,8 @@ export async function buildSoloLooperEngine(
       "OVERDUB_DISARMED",
       "AUTO_STOP_COMPLETED",
       "CALIBRATION_RESULT",
+      "HANDSFREE_TRACK_ADVANCED",
+      "HANDSFREE_SEQUENCE_COMPLETE",
     ] as const;
     if (allowlist.includes(msgType as (typeof allowlist)[number])) {
       options.onEvent?.(data as SoloLooperEngineEvent);
@@ -394,9 +418,10 @@ export async function buildSoloLooperEngine(
   });
 
   const stopAudibleMetronome = (): void => {
-    if (metronomeTimer !== null) {
-      clearTimeout(metronomeTimer);
-      metronomeTimer = null;
+    metronomePumpGeneration += 1;
+    if (metronomePump !== null) {
+      metronomePump.teardown();
+      metronomePump = null;
     }
     for (const node of Array.from(scheduledMetronomeNodes)) {
       try {
@@ -447,7 +472,6 @@ export async function buildSoloLooperEngine(
     const normalizedBpm = Number.isFinite(bpm) ? Math.max(30, Math.min(300, bpm)) : 120;
     const beatSec = 60 / normalizedBpm;
     const lookaheadSec = 0.12;
-    const scheduleEveryMs = 25;
     const anchor =
       anchorSec !== undefined && Number.isFinite(anchorSec) && anchorSec >= ctx.currentTime
         ? anchorSec
@@ -455,21 +479,31 @@ export async function buildSoloLooperEngine(
     metronomeNextTickSec = anchor !== null ? anchor : Math.max(ctx.currentTime + 0.01, ctx.currentTime);
     metronomeBeatIndex = 0;
 
-    const pump = (): void => {
-      if (tornDown || ctx.state === "closed") {
-        stopAudibleMetronome();
-        return;
+    const gen = metronomePumpGeneration;
+    void (async () => {
+      try {
+        const pump = await createMetronomePump(ctx, { pumpIntervalSec: 0.025 });
+        if (tornDown || ctx.state === "closed" || gen !== metronomePumpGeneration) {
+          pump.teardown();
+          return;
+        }
+        metronomePump = pump;
+        pump.start(() => {
+          if (tornDown || ctx.state === "closed" || gen !== metronomePumpGeneration) {
+            stopAudibleMetronome();
+            return;
+          }
+          const horizon = ctx.currentTime + lookaheadSec;
+          while (metronomeNextTickSec <= horizon) {
+            scheduleMetronomeTick(metronomeNextTickSec, metronomeBeatIndex % 4 === 0);
+            metronomeNextTickSec += beatSec;
+            metronomeBeatIndex += 1;
+          }
+        });
+      } catch {
+        /* pump creation failed — metronome stays silent */
       }
-      const horizon = ctx.currentTime + lookaheadSec;
-      while (metronomeNextTickSec <= horizon) {
-        scheduleMetronomeTick(metronomeNextTickSec, metronomeBeatIndex % 4 === 0);
-        metronomeNextTickSec += beatSec;
-        metronomeBeatIndex += 1;
-      }
-      metronomeTimer = setTimeout(pump, scheduleEveryMs);
-    };
-
-    pump();
+    })();
   };
 
   const engine: SoloLooperEngine = {
@@ -526,6 +560,9 @@ export async function buildSoloLooperEngine(
           ? { latencyOffsetFrames: params.latencyOffsetFrames }
           : {}),
         ...(params.loopMode !== undefined ? { loopMode: params.loopMode } : {}),
+        ...(params.stopAtContextSec !== undefined
+          ? { stopAtContextSec: params.stopAtContextSec }
+          : {}),
       });
     },
     setTrackGain(trackIndex: number, linearGain: number): void {

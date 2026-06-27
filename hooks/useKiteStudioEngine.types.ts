@@ -9,7 +9,7 @@ import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import type { BridgeStatus, Role } from "@/lib/p2p/transport-port";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
 
-export type SoloLooperMode = "free" | "grid";
+export type SoloLooperMode = "free" | "grid" | "handsfree";
 
 /** Studio bridge UI phase — stays in page presenter; engine reads via config. */
 export type StudioUiPhase = "lobby" | "connecting" | "studio" | "kite-setup";
@@ -82,6 +82,8 @@ export type KiteEngineState = {
   soloLatencyCalibrationStatus: "idle" | "warning" | "listening" | "success" | "error";
   soloLatencyCalibrationMessage: string | null;
   soloLooperMode: SoloLooperMode;
+  /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
+  handsfreeSequenceActive: boolean;
   soloLooperBarCount: number;
   isMasterPaused: boolean;
   soloSessionRecorderState: SoloSessionRecorderState;

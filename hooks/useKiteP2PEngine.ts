@@ -58,6 +58,8 @@ export type UseKiteP2PEngineConfig = {
   getKiteSyncActive: () => boolean;
   /** Solo engine, mixer, AudioContext close — after sync + metered teardown. */
   onPageFullTeardown: () => Promise<void>;
+  /** When true, page coordinator already ran full teardown — skip ordered async cleanup. */
+  shouldSkipOrderedTeardown?: () => boolean;
   /** Page presenter UI only after partial sync drop on LEAVE. */
   onCollaboratorLeave: (params: KiteP2PEngineLeaveParams) => void;
 };
@@ -91,6 +93,7 @@ export function useKiteP2PEngine(config: UseKiteP2PEngineConfig): KiteP2PEngineA
 
   const runOrderedSessionTeardown = useCallback(async (opts?: CleanupKiteOpts): Promise<void> => {
     if (teardownInFlightRef.current) return;
+    if (configRef.current.shouldSkipOrderedTeardown?.()) return;
     teardownInFlightRef.current = true;
     try {
       syncApiRef.current?.cleanup(opts);
@@ -118,6 +121,7 @@ export function useKiteP2PEngine(config: UseKiteP2PEngineConfig): KiteP2PEngineA
 
   const transport = useKiteP2PTransport({
     ...config.transportConfig,
+    shouldSkipOrderedTeardown: config.shouldSkipOrderedTeardown,
     onRemotePlaybackTeardown: () => meteredTeardownRef.current(),
     onFullTeardown: async () => {
       await orderedTeardownRef.current({ isFull: true });

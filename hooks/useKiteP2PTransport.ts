@@ -67,6 +67,8 @@ export type UseKiteP2PTransportConfig = {
   onRemoteStreamReady: (stream: MediaStream) => void;
   onRemotePlaybackTeardown: () => void;
   onFullTeardown: () => Promise<void>;
+  /** When true, page coordinator already ran full teardown — skip ordered async cleanup. */
+  shouldSkipOrderedTeardown?: () => boolean;
   onCollaboratorDeparted: (params: { departedName: string; selfRole: Role | null }) => void;
   getLocalStream: () => MediaStream | null;
   getAudioContext: () => AudioContext | null;
@@ -392,6 +394,7 @@ export function useKiteP2PTransport(config: UseKiteP2PTransportConfig): KiteP2PT
 
     void (async () => {
       try {
+        if (configRef.current.shouldSkipOrderedTeardown?.()) return;
         configRef.current.onRemotePlaybackTeardown();
         await configRef.current.onFullTeardown();
       } catch {

@@ -872,6 +872,8 @@ function SettingsModal({
 
   const bpm = cfg.kiteSetupTempo;
   const gridMode = cfg.loopMode === "grid";
+  const handsfreeMode = cfg.loopMode === "handsfree";
+  const gridLikeMode = gridMode || handsfreeMode;
   const barCount = cfg.barCount;
   const rtlCompensation = cfg.latencyMs;
   const locked = cfg.isTimingLocked;
@@ -1091,138 +1093,12 @@ function SettingsModal({
                 </button>
               ))}
             </div>
-          </div>
-
-          <div style={colDivider} />
-
-          <div style={col}>
-            {sLabel("Time Signature")}
-            <div style={{ display: "flex", gap: 6 }}>
-              {TIME_SIG_SHORT.map(({ ui, option }) => {
-                const sel =
-                  cfg.kiteSetupTimeSignatureTop === option.top &&
-                  cfg.kiteSetupTimeSignatureBottom === option.bottom &&
-                  cfg.kiteSetupIsSwing === option.swing;
-                return (
-                  <button
-                    key={ui}
-                    type="button"
-                    disabled={locked}
-                    onClick={() => handlers.onSelectTimeSignature(option)}
-                    style={{
-                      flex: 1,
-                      borderRadius: 9,
-                      padding: "8px 0",
-                      border: `1px solid ${sel ? "rgba(255,69,0,0.55)" : "rgba(255,255,255,0.09)"}`,
-                      background: sel ? "rgba(255,69,0,0.1)" : "transparent",
-                      color: sel ? ORANGE : "rgba(255,255,255,0.38)",
-                      fontSize: 11,
-                      cursor: locked ? "not-allowed" : "pointer",
-                      opacity: locked ? 0.45 : 1,
-                    }}
-                  >
-                    {ui}
-                  </button>
-                );
-              })}
-            </div>
 
             <div
               style={{
                 borderTop: "1px solid rgba(255,255,255,0.05)",
                 paddingTop: 12,
-                display: "flex",
-                flexDirection: "column",
-                gap: 10,
-              }}
-            >
-              {sLabel("Metronome")}
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                  <span style={INLINE_LABEL}>Metronome Volume</span>
-                  <button
-                    type="button"
-                    onClick={() => onMetronomeVolumeChange(1)}
-                    style={RESET_BTN}
-                  >
-                    Reset
-                  </button>
-                </div>
-                <HSlider
-                  value={Math.round(metronomeVolume * 10)}
-                  onChange={(v) => onMetronomeVolumeChange(v / 10)}
-                  min={0}
-                  max={20}
-                  accent={EMERALD}
-                  title="Metronome click volume (0–2)"
-                />
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  gap: 8,
-                  pointerEvents: locked ? "none" : undefined,
-                  opacity: locked ? 0.45 : 1,
-                }}
-              >
-                {metronomeVisualOnly}
-                {runwayVisualOnly ? (
-                  <span style={{ color: "rgba(255,255,255,0.25)", fontSize: 9, fontStyle: "italic" }}>
-                    (Visual only)
-                  </span>
-                ) : null}
-              </div>
-            </div>
-          </div>
-
-          <div style={colDivider} />
-
-          <div style={{ ...col, paddingRight: 20 }}>
-            {sLabel("Grid Engine")}
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <Toggle
-                checked={gridMode}
-                onChange={(on) => handlers.onLoopModeChange(on ? "grid" : "free")}
-                label="Grid Mode"
-                sublabel="Off = Free Mode (no quantize)"
-              />
-              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 9 }}>Bar Count</span>
-                <div style={{ display: "flex", gap: 5 }}>
-                  {([1, 2, 4, 8] as const).map((b) => (
-                    <button
-                      key={b}
-                      type="button"
-                      disabled={!gridMode}
-                      onClick={() => handlers.onBarCountChange(b)}
-                      style={{
-                        flex: 1,
-                        borderRadius: 8,
-                        padding: "6px 0",
-                        border: `1px solid ${barCount === b ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.09)"}`,
-                        background: barCount === b ? "rgba(34,197,94,0.1)" : gridMode ? "transparent" : "rgba(0,0,0,0.2)",
-                        color:
-                          barCount === b ? EMERALD : gridMode ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.15)",
-                        fontSize: 12,
-                        fontFamily: "monospace",
-                        cursor: gridMode ? "pointer" : "default",
-                        opacity: gridMode ? 1 : 0.4,
-                        transition: "all 0.18s",
-                      }}
-                    >
-                      {b}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div
-              style={{
-                borderTop: "1px solid rgba(255,255,255,0.05)",
-                paddingTop: 12,
+                marginTop: 4,
                 display: "flex",
                 flexDirection: "column",
                 gap: 8,
@@ -1395,6 +1271,139 @@ function SettingsModal({
                   </div>
                 </motion.div>
               ) : null}
+            </div>
+          </div>
+
+          <div style={colDivider} />
+
+          <div style={col}>
+            {sLabel("Time Signature")}
+            <div style={{ display: "flex", gap: 6 }}>
+              {TIME_SIG_SHORT.map(({ ui, option }) => {
+                const sel =
+                  cfg.kiteSetupTimeSignatureTop === option.top &&
+                  cfg.kiteSetupTimeSignatureBottom === option.bottom &&
+                  cfg.kiteSetupIsSwing === option.swing;
+                return (
+                  <button
+                    key={ui}
+                    type="button"
+                    disabled={locked}
+                    onClick={() => handlers.onSelectTimeSignature(option)}
+                    style={{
+                      flex: 1,
+                      borderRadius: 9,
+                      padding: "8px 0",
+                      border: `1px solid ${sel ? "rgba(255,69,0,0.55)" : "rgba(255,255,255,0.09)"}`,
+                      background: sel ? "rgba(255,69,0,0.1)" : "transparent",
+                      color: sel ? ORANGE : "rgba(255,255,255,0.38)",
+                      fontSize: 11,
+                      cursor: locked ? "not-allowed" : "pointer",
+                      opacity: locked ? 0.45 : 1,
+                    }}
+                  >
+                    {ui}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div
+              style={{
+                borderTop: "1px solid rgba(255,255,255,0.05)",
+                paddingTop: 12,
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              {sLabel("Metronome")}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <span style={INLINE_LABEL}>Metronome Volume</span>
+                  <button
+                    type="button"
+                    onClick={() => onMetronomeVolumeChange(1)}
+                    style={RESET_BTN}
+                  >
+                    Reset
+                  </button>
+                </div>
+                <HSlider
+                  value={Math.round(metronomeVolume * 10)}
+                  onChange={(v) => onMetronomeVolumeChange(v / 10)}
+                  min={0}
+                  max={20}
+                  accent={EMERALD}
+                  title="Metronome click volume (0–2)"
+                />
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  gap: 8,
+                  pointerEvents: locked ? "none" : undefined,
+                  opacity: locked ? 0.45 : 1,
+                }}
+              >
+                {metronomeVisualOnly}
+                {runwayVisualOnly ? (
+                  <span style={{ color: "rgba(255,255,255,0.25)", fontSize: 9, fontStyle: "italic" }}>
+                    (Visual only)
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          </div>
+
+          <div style={colDivider} />
+
+          <div style={{ ...col, paddingRight: 20 }}>
+            {sLabel("Grid Engine")}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <Toggle
+                checked={gridMode}
+                onChange={(on) => handlers.onLoopModeChange(on ? "grid" : "free")}
+                label="Grid Mode"
+                sublabel="Off = Free Mode (no quantize)"
+              />
+              <Toggle
+                checked={handsfreeMode}
+                onChange={(on) => handlers.onLoopModeChange(on ? "handsfree" : "free")}
+                label="Handsfree Mode"
+                sublabel="Auto-record tracks 1→4 at loop boundaries"
+              />
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 9 }}>Bar Count</span>
+                <div style={{ display: "flex", gap: 5 }}>
+                  {([1, 2, 4, 8] as const).map((b) => (
+                    <button
+                      key={b}
+                      type="button"
+                      disabled={!gridLikeMode}
+                      onClick={() => handlers.onBarCountChange(b)}
+                      style={{
+                        flex: 1,
+                        borderRadius: 8,
+                        padding: "6px 0",
+                        border: `1px solid ${barCount === b ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.09)"}`,
+                        background: barCount === b ? "rgba(34,197,94,0.1)" : gridLikeMode ? "transparent" : "rgba(0,0,0,0.2)",
+                        color:
+                          barCount === b ? EMERALD : gridLikeMode ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.15)",
+                        fontSize: 12,
+                        fontFamily: "monospace",
+                        cursor: gridLikeMode ? "pointer" : "default",
+                        opacity: gridLikeMode ? 1 : 0.4,
+                        transition: "all 0.18s",
+                      }}
+                    >
+                      {b}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
