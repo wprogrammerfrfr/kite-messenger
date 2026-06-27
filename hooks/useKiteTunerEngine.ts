@@ -15,6 +15,7 @@ const ANALYSER_FFT_SIZE = 8192;
 const PITCH_SMOOTHING_ALPHA = 0.35;
 const READING_UPDATE_CENTS_THRESHOLD = 0.5;
 const ACF_PEAK_MIN_CORRELATION = 0.3;
+const ACF_FUNDAMENTAL_PEAK_RATIO = 0.88;
 
 export type KiteTunerInstrumentId =
   | "guitar_standard"
@@ -206,24 +207,28 @@ export function detectPitchHz(
 
   if (bestLag <= 0 || bestCorr < ACF_PEAK_MIN_CORRELATION) return null;
 
-  let refinedLag = bestLag;
-  if (bestLag > minPeriod && bestLag < maxPeriod) {
-    const yPrev = normalizedAutocorrelationAtLag(buf, bestLag - 1);
-    const yMid = bestCorr;
-    const yNext = normalizedAutocorrelationAtLag(buf, bestLag + 1);
-    refinedLag = parabolicPeakLag(bestLag, yPrev, yMid, yNext);
-  }
-
-  let detectedHz = sampleRate / refinedLag;
-
-  const halfPeriodHz = sampleRate / (refinedLag / 2);
-  if (halfPeriodHz >= minHz && halfPeriodHz <= maxHz) {
-    const halfLag = Math.max(minPeriod, Math.round(refinedLag / 2));
-    const halfCorr = normalizedAutocorrelationAtLag(buf, halfLag);
-    if (halfCorr >= bestCorr * 0.92) {
-      detectedHz = halfPeriodHz;
+  const peakThreshold = bestCorr * ACF_FUNDAMENTAL_PEAK_RATIO;
+  let fundamentalLag = bestLag;
+  for (let factor = 2; factor <= 4; factor += 1) {
+    const candidateLag = bestLag / factor;
+    if (candidateLag < minPeriod) continue;
+    const candidateLagRounded = Math.round(candidateLag);
+    const candidateCorr = normalizedAutocorrelationAtLag(buf, candidateLagRounded);
+    if (candidateCorr >= peakThreshold && candidateLag < fundamentalLag) {
+      fundamentalLag = candidateLag;
     }
   }
+
+  const lagForRefine = Math.round(fundamentalLag);
+  let refinedLag = fundamentalLag;
+  if (lagForRefine > minPeriod && lagForRefine < maxPeriod) {
+    const yPrev = normalizedAutocorrelationAtLag(buf, lagForRefine - 1);
+    const yMid = normalizedAutocorrelationAtLag(buf, lagForRefine);
+    const yNext = normalizedAutocorrelationAtLag(buf, lagForRefine + 1);
+    refinedLag = parabolicPeakLag(lagForRefine, yPrev, yMid, yNext);
+  }
+
+  const detectedHz = sampleRate / refinedLag;
 
   if (!Number.isFinite(detectedHz) || detectedHz < minHz || detectedHz > maxHz) {
     return null;
