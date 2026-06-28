@@ -16,7 +16,7 @@ export default function WelcomePage() {
     void supabase.auth.getSession().then(({ data: { session } }) => {
       if (cancelled) return;
       if (session) {
-        router.replace("/chat");
+        router.replace("/studio");
         return;
       }
       setWelcomeReady(true);

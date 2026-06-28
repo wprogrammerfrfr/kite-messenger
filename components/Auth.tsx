@@ -1,16 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import Image from "next/image";
 import {
   AlertCircle,
   CheckCircle,
   Eye,
   EyeOff,
+  Loader2,
   Lock,
   Mail,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import {
+  settingsProfileCacheKey,
+  writeJsonCache,
+} from "@/lib/kite-tab-cache";
 import { SHOW_PROFESSIONAL_AND_ROLE_UI } from "@/lib/feature-flags";
 import { useResilience } from "@/components/resilience-provider";
 import { t, type Language } from "@/lib/translations";
@@ -42,7 +48,74 @@ const GoogleIcon = () => (
 const inputClassName =
   "w-full rounded-xl border border-[rgba(230,237,243,0.08)] bg-[rgba(230,237,243,0.04)] py-3 text-sm text-[rgba(230,237,243,0.9)] caret-[#FF4500] outline-none transition-all duration-200 placeholder:text-[rgba(230,237,243,0.35)] focus:border-[#FF4500]/50 focus:bg-[rgba(230,237,243,0.06)] focus:ring-[3px] focus:ring-[#FF4500]/10";
 
-export function Auth() {
+function resolvePostLoginPath(): string {
+  if (typeof window === "undefined") return "/studio";
+  const next = new URLSearchParams(window.location.search).get("next");
+  if (next && next.startsWith("/") && !next.startsWith("//")) return next;
+  return "/studio";
+}
+
+function isStudioPostLoginPath(path: string): boolean {
+  return path === "/studio" || path.startsWith("/studio/") || path.startsWith("/studio-bridge");
+}
+
+const LOBBY_HANDOFF_STORAGE_KEY = "kite-studio:lobby-handoff:v1";
+
+type LobbyHandoffPayload = {
+  userId: string;
+  email: string;
+  user_metadata: unknown;
+  profilePrefetched: boolean;
+};
+
+function writeLobbyHandoff(payload: LobbyHandoffPayload): void {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(LOBBY_HANDOFF_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // private mode / quota
+  }
+}
+
+async function warmProfileCacheForLobby(userId: string): Promise<boolean> {
+  try {
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("nickname, bio, emergency_contact, role, profile_picture_url")
+      .eq("id", userId)
+      .maybeSingle();
+    if (error || !profile) return false;
+    const p = profile as {
+      nickname: string | null;
+      bio: string | null;
+      emergency_contact: string | null;
+      role: string | null;
+      profile_picture_url: string | null;
+    };
+    const role: Role =
+      p.role === "therapist" || p.role === "musician" || p.role === "responder"
+        ? p.role
+        : "musician";
+    writeJsonCache(settingsProfileCacheKey(userId), {
+      nickname: p.nickname ?? "",
+      bio: p.bio ?? "",
+      emergencyContact: p.emergency_contact ?? "",
+      profilePictureUrl: p.profile_picture_url ?? "",
+      role,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type AuthProps = {
+  onAuthRedirectStart?: () => void;
+  onAuthRedirectEnd?: () => void;
+};
+
+export function Auth({ onAuthRedirectStart, onAuthRedirectEnd }: AuthProps = {}) {
+  const router = useRouter();
   const { isOnline, isLowBandwidthMode } = useResilience();
   const [uiLang, setUiLang] = useState<Language>("en");
   const [mode, setMode] = useState<Mode>("login");
@@ -54,6 +127,7 @@ export function Auth() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,15 +137,57 @@ export function Auth() {
 
     try {
       if (mode === "login") {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
+        const trimmedEmail = email.trim();
+        if (!trimmedEmail || !password) {
+          setError("Please enter your email and password.");
+          setLoading(false);
+          return;
+        }
+
+        setIsRedirecting(true);
+        onAuthRedirectStart?.();
+
+        const { data: signInData, error: signInError } =
+          await supabase.auth.signInWithPassword({
+            email: trimmedEmail,
+            password,
+          });
 
         if (signInError) {
+          console.error("[Auth] signInWithPassword failed", {
+            message: signInError.message,
+            status: signInError.status,
+            name: signInError.name,
+            code: (signInError as { code?: string }).code,
+            emailLength: trimmedEmail.length,
+            supabaseHost: new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!).host,
+          });
+          setIsRedirecting(false);
+          onAuthRedirectEnd?.();
           setError(signInError.message);
         } else {
-          setMessage("Logged in successfully.");
+          const user = signInData.user;
+          const userId = user?.id;
+          if (userId && user) {
+            writeLobbyHandoff({
+              userId,
+              email: user.email ?? "",
+              user_metadata: user.user_metadata ?? {},
+              profilePrefetched: false,
+            });
+            const profilePrefetched = await warmProfileCacheForLobby(userId);
+            writeLobbyHandoff({
+              userId,
+              email: user.email ?? "",
+              user_metadata: user.user_metadata ?? {},
+              profilePrefetched,
+            });
+          }
+          await supabase.auth.getSession();
+          onAuthRedirectEnd?.();
+          if (typeof window !== "undefined") {
+            window.location.assign(resolvePostLoginPath());
+          }
         }
       } else {
         const redirectBase =
@@ -82,7 +198,9 @@ export function Auth() {
           email,
           password,
           options: {
-            emailRedirectTo: redirectBase ? `${redirectBase}/auth/callback` : undefined,
+            emailRedirectTo: redirectBase
+              ? `${redirectBase}/auth/callback?next=${encodeURIComponent("/studio")}`
+              : undefined,
             data: {
               role,
             },
@@ -103,6 +221,10 @@ export function Auth() {
         }
       }
     } catch (err) {
+      if (mode === "login") {
+        setIsRedirecting(false);
+        onAuthRedirectEnd?.();
+      }
       setError(
         err instanceof Error ? err.message : "Something went wrong. Try again."
       );
@@ -145,12 +267,14 @@ export function Auth() {
     setLoading(true);
     try {
       const redirectBase =
-        process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ||
-        window.location.origin;
+        typeof window !== "undefined"
+          ? window.location.origin
+          : process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "");
+      const oauthNext = encodeURIComponent(resolvePostLoginPath());
       const { error: oauthError } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: `${redirectBase}/auth/callback`,
+          redirectTo: `${redirectBase}/auth/callback?next=${oauthNext}`,
         },
       });
       if (oauthError) setError(oauthError.message);
@@ -171,6 +295,15 @@ export function Auth() {
 
   // Allow landing → chat handoff via `/chat?mode=signup` or `/chat?mode=login`.
   // This is intentionally best-effort and falls back to login if missing/invalid.
+  useEffect(() => {
+    if (mode !== "login") return;
+    router.prefetch("/studio");
+    const postLoginPath = resolvePostLoginPath();
+    if (isStudioPostLoginPath(postLoginPath)) {
+      router.prefetch("/studio-bridge");
+    }
+  }, [mode, router]);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -218,6 +351,18 @@ export function Auth() {
   }, []);
 
   const isLogin = mode === "login";
+
+  if (isRedirecting) {
+    return (
+      <div
+        className="flex min-h-screen w-full items-center justify-center bg-[#000000]"
+        role="status"
+        aria-label="Redirecting"
+      >
+        <Loader2 className="h-8 w-8 animate-spin text-[#FF4500]" />
+      </div>
+    );
+  }
 
   return (
     <div

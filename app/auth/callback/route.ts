@@ -1,22 +1,28 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
-import { cookies } from "next/headers";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+
+function resolveSafeNextPath(raw: string | null): string {
+  const fallback = "/studio";
+  if (raw == null || raw.trim() === "") return fallback;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return fallback;
+  return trimmed;
+}
 
 /**
  * Email confirmation / OAuth: exchanges `code` for a session and sets auth cookies.
- * Configure Supabase Auth redirect URL to: {APP_URL}/auth/callback
- * Set NEXT_PUBLIC_APP_URL=https://kite-messenger-omega.vercel.app (or your prod URL).
+ * Redirects always use the request origin so localhost and production each stay on-host.
  */
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const nextPath = url.searchParams.get("next") ?? "/chat";
 
-  const appUrl =
-    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ?? url.origin;
+  const appUrl = url.origin;
 
   function errorRedirect(description?: string) {
     const target = new URL("/chat", appUrl);
+    target.searchParams.set("mode", "login");
+    target.searchParams.set("next", "/studio");
     target.searchParams.set("error", "auth_callback");
     if (description) {
       target.searchParams.set(
@@ -31,29 +37,23 @@ export async function GET(request: Request) {
     return errorRedirect();
   }
 
-  const cookieStore = cookies();
+  const nextPath = resolveSafeNextPath(url.searchParams.get("next"));
+  let response = NextResponse.redirect(new URL(nextPath, appUrl));
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        get(name: string) {
-          return cookieStore.get(name)?.value;
+        getAll() {
+          return request.cookies.getAll();
         },
-        set(name: string, value: string, options: CookieOptions) {
-          try {
-            cookieStore.set({ name, value, ...options });
-          } catch {
-            /* ignore when called outside mutable context */
-          }
-        },
-        remove(name: string, options: CookieOptions) {
-          try {
-            cookieStore.set({ name, value: "", ...options });
-          } catch {
-            /* ignore */
-          }
+        setAll(
+          cookiesToSet: { name: string; value: string; options: CookieOptions }[]
+        ) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            response.cookies.set(name, value, options);
+          });
         },
       },
     }
@@ -64,6 +64,5 @@ export async function GET(request: Request) {
     return errorRedirect(error.message);
   }
 
-  const safeNext = nextPath.startsWith("/") ? nextPath : `/${nextPath}`;
-  return NextResponse.redirect(new URL(safeNext, appUrl));
+  return response;
 }

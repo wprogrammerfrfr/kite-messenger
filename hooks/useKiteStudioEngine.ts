@@ -108,6 +108,52 @@ type RetainedKiteLoopBuffer = {
   channelCount: number;
   buffer: ArrayBuffer;
 };
+
+/** Matches worklet framesPerBeat × totalBeats grid quantization (see solo-looper-processor). */
+function computeGridTargetLengthFrames(
+  sampleRate: number,
+  bpm: number,
+  beatsPerBar: number,
+  barCount: number
+): number {
+  const effectiveBpm = Math.max(1, Math.round(bpm));
+  const sr = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 44100;
+  const framesPerBeat = Math.round(sr * (60 / effectiveBpm));
+  const totalBeats = Math.max(1, Math.round(beatsPerBar * barCount));
+  return Math.max(1, framesPerBeat * totalBeats);
+}
+
+function slotsPlaybackUiEqual(
+  a: SoloLooperPlaybackUiStateEvent["slots"],
+  b: SoloLooperPlaybackUiStateEvent["slots"] | null
+): boolean {
+  if (b === null) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const sa = a[i];
+    const sb = b[i];
+    if (
+      sa.trackIndex !== sb.trackIndex ||
+      sa.mode !== sb.mode ||
+      sa.playbackCursor !== sb.playbackCursor ||
+      sa.intervalFrames !== sb.intervalFrames ||
+      sa.recordCursor !== sb.recordCursor
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Dev-only: correlate drift reports with mode + transport phase (see timing drift audit). */
+function logDriftDiagnostic(
+  label: string,
+  mode: SoloLooperMode,
+  payload: Record<string, unknown>
+): void {
+  if (process.env.NODE_ENV === "production") return;
+  console.debug(`[Kite drift] ${label}`, { mode, ...payload });
+}
 type JamSetupLockMessage = {
   type: "JAM_SETUP_LOCK";
   action: JamSetupLockAction;
@@ -621,6 +667,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloOverdubArmedTrackIndexRef = useRef<number | null>(null);
   /** Latest worklet slot snapshot (mirrors `PLAYBACK_UI_STATE`). */
   const soloTrackSlotUiLatestRef = useRef<SoloLooperPlaybackUiStateEvent["slots"] | null>(null);
+  /** Free-mode pedal stop anchor — sampled at input event before main-thread work. */
+  const freePedalStopContextSecRef = useRef<number | null>(null);
+  /** Audio-clock loop progress window (recording phase). */
+  const loopProgressAnchorContextSecRef = useRef<number | null>(null);
+  const loopProgressDurationSecRef = useRef<number>(0);
+  const lastPlaybackUiCommitMsRef = useRef(0);
+  const lastAuthUserIdRef = useRef<string | null>(null);
 
   const applyPedalFocus = useCallback((trackIndex: 1 | 2 | 3 | 4) => {
     soloPedalTargetTrackIndexRef.current = trackIndex;
@@ -3314,6 +3367,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
   const handleSoloLooperEvent = useCallback(
     (event: SoloLooperEngineEvent, ctx: AudioContext) => {
+      /*
+       * Mode transport divergence (timing drift audit):
+       * - Handsfree: worklet auto-stop + sequence advance; metronome until HANDSFREE_SEQUENCE_COMPLETE.
+       * - Grid: worklet auto-stop at targetLengthFrames; T1 metronome kept for overdub parity.
+       * - Free: pedal stop uses freePedalStopContextSecRef; metronome stops on LOOP_READY, not at commit.
+       */
       const intervalId = soloLooperEventIntervalIdRef.current ?? `${sessionId ?? "solo"}-bootstrap`;
       const sequenceNumber = soloLooperEventSequenceNumberRef.current;
       if (event.type === "PLAYBACK_UI_STATE") {
@@ -3336,8 +3395,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           }
           return slot;
         });
+        const prevSnapshot = soloTrackSlotUiLatestRef.current;
         soloTrackSlotUiLatestRef.current = sanitizedSlots;
-        setSoloTrackSlotUi(sanitizedSlots);
+        const nowMs = performance.now();
+        const changed = !slotsPlaybackUiEqual(sanitizedSlots, prevSnapshot);
+        const throttleElapsed = nowMs - lastPlaybackUiCommitMsRef.current >= 100;
+        if (changed || throttleElapsed) {
+          lastPlaybackUiCommitMsRef.current = nowMs;
+          setSoloTrackSlotUi(sanitizedSlots);
+        }
         return;
       }
       if (event.type === "LOOP_STATE") {
@@ -3430,21 +3496,27 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         const masterFrames = masterLoopIntervalFramesRef.current;
         const progressSampleRate =
           Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
-        const intervalMs = masterFrames
-          ? (masterFrames / progressSampleRate) * 1000
-          : (kiteIntervalTimingRef.current?.localIntervalFrames ?? 0) /
-              (kiteIntervalTimingRef.current?.localSampleRate ?? progressSampleRate) *
-              1000;
-        const startedAt = performance.now();
+        const progressDurationSec =
+          masterFrames != null && masterFrames > 0
+            ? masterFrames / progressSampleRate
+            : loopProgressDurationSecRef.current > 0
+              ? loopProgressDurationSecRef.current
+              : 1;
+        const anchorSec = ctx.currentTime;
+        loopProgressAnchorContextSecRef.current = anchorSec;
+        loopProgressDurationSecRef.current = progressDurationSec;
         const animateProgress = (): void => {
           if (soloLooperStateRef.current !== "recording") {
             loopProgressRafRef.current = null;
             return;
           }
-          const elapsedMs = performance.now() - startedAt;
-          const currentTick = Math.min(intervalMs, Math.max(0, elapsedMs));
-          setLoopProgress(Math.min(100, Math.max(0, (currentTick / intervalMs) * 100)));
-          if (elapsedMs < intervalMs) {
+          const elapsedSec = Math.max(0, ctx.currentTime - anchorSec);
+          const pct = Math.min(
+            100,
+            Math.max(0, (elapsedSec / progressDurationSec) * 100)
+          );
+          setLoopProgress(pct);
+          if (elapsedSec < progressDurationSec) {
             loopProgressRafRef.current = requestAnimationFrame(animateProgress);
           } else {
             loopProgressRafRef.current = null;
@@ -3484,8 +3556,17 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           return;
         }
         syncActiveRecordTrackIndex(null);
-        soloLooperEngineRef.current?.stopAudibleMetronome();
-        cancelScheduledMetronomeClicks();
+        const keepMetronomeForGridT1 =
+          soloLooperModeRef.current === "grid" && event.trackIndex === 1;
+        if (!keepMetronomeForGridT1) {
+          soloLooperEngineRef.current?.stopAudibleMetronome();
+          cancelScheduledMetronomeClicks();
+        }
+        logDriftDiagnostic("AUTO_STOP_COMPLETED", soloLooperModeRef.current, {
+          trackIndex: event.trackIndex,
+          metronomeKept: keepMetronomeForGridT1,
+          phase: "recording",
+        });
         if (event.trackIndex === 1) {
           setLoopProgress(100);
           soloLooperStateRef.current = "captured";
@@ -3689,12 +3770,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloSessionMediaRecorderRef.current = recorder;
       recorder.start(1000);
 
-      if (isMasterPausedRef.current) {
-        recorder.pause();
-        setSoloSessionRecorderState("paused");
-      } else {
-        setSoloSessionRecorderState("recording");
-      }
+      setSoloSessionRecorderState("recording");
     } catch (err) {
       console.error("[Solo session recorder] Failed to start:", err);
       stopSoloSessionDisplayTracks(soloSessionDisplayStreamRef);
@@ -3809,7 +3885,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           const timingSnapshot = kiteIntervalTimingRef.current;
           const bpm = Math.max(
             1,
-            Math.round(timingSnapshot?.bpm ?? kiteSetupTempoRef.current ?? 120)
+            Math.round(
+              soloLooperModeRef.current === "grid"
+                ? (recordingStartBpmRef.current ??
+                    timingSnapshot?.bpm ??
+                    kiteSetupTempoRef.current ??
+                    120)
+                : (timingSnapshot?.bpm ??
+                  kiteSetupTempoRef.current ??
+                  120)
+            )
           );
           const beatsPerBar = Math.max(
             1,
@@ -3821,9 +3906,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             )
           );
           const barCount = Math.max(1, Math.round(soloLooperBarCountRef.current || 1));
-          const secondsPerBeat = 60 / bpm;
-          const totalSeconds = secondsPerBeat * beatsPerBar * barCount;
-          targetLengthFrames = Math.max(1, Math.round(totalSeconds * startSampleRate));
+          targetLengthFrames = computeGridTargetLengthFrames(
+            startSampleRate,
+            bpm,
+            beatsPerBar,
+            barCount
+          );
         }
 
         return {
@@ -3848,8 +3936,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           hasRecordAnchor ? recordStartAt : undefined
         );
       }
+      const startParams = buildStartRecordingParams();
       engine.startRecording({
-        ...buildStartRecordingParams(),
+        ...startParams,
         ...(hasRecordAnchor ? { recordStartContextSec: recordStartAt } : {}),
       });
 
@@ -3861,17 +3950,29 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       if (loopProgressRafRef.current !== null) {
         cancelAnimationFrame(loopProgressRafRef.current);
       }
-      const intervalMs = (engineTiming.localIntervalFrames / engineTiming.localSampleRate) * 1000;
-      const startedAt = performance.now();
+      const progressSampleRate =
+        Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
+      loopProgressAnchorContextSecRef.current = hasRecordAnchor
+        ? recordStartAt!
+        : ctx.currentTime;
+      loopProgressDurationSecRef.current =
+        startParams.targetLengthFrames !== undefined
+          ? startParams.targetLengthFrames / progressSampleRate
+          : engineTiming.localIntervalFrames / engineTiming.localSampleRate;
+      const progressDurationSec = loopProgressDurationSecRef.current;
+      const anchorSec = loopProgressAnchorContextSecRef.current;
       const animateProgress = () => {
         if (soloLooperStateRef.current !== "recording") {
           loopProgressRafRef.current = null;
           return;
         }
-        const elapsedMs = performance.now() - startedAt;
-        const currentTick = Math.min(intervalMs, Math.max(0, elapsedMs));
-        setLoopProgress(Math.min(100, Math.max(0, (currentTick / intervalMs) * 100)));
-        if (elapsedMs < intervalMs) {
+        const elapsedSec = Math.max(0, ctx.currentTime - anchorSec);
+        const pct = Math.min(
+          100,
+          Math.max(0, (elapsedSec / progressDurationSec) * 100)
+        );
+        setLoopProgress(pct);
+        if (elapsedSec < progressDurationSec) {
           loopProgressRafRef.current = requestAnimationFrame(animateProgress);
         } else {
           loopProgressRafRef.current = null;
@@ -5052,20 +5153,6 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     ) {
       engine.startAudibleMetronome(kiteIntervalTimingRef.current?.bpm || 120);
     }
-
-    const recorder = soloSessionMediaRecorderRef.current;
-    if (!recorder) return;
-    if (nextPaused) {
-      if (recorder.state === "recording") {
-        recorder.pause();
-      }
-      setSoloSessionRecorderState("paused");
-    } else {
-      if (recorder.state === "paused") {
-        recorder.resume();
-      }
-      setSoloSessionRecorderState("recording");
-    }
   }, []);
 
   const handleResetSoloTrack = useCallback((trackIndex: 1 | 2 | 3 | 4) => {
@@ -5191,6 +5278,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       handleStopAndResetSoloLooper();
       return;
     }
+    const stopAtContextSec =
+      soloLooperModeRef.current === "free"
+        ? freePedalStopContextSecRef.current ?? ctx.currentTime
+        : ctx.currentTime;
     const rawActive = soloLooperActiveRecordTrackIndexRef.current;
     let activeTrackIndex: number;
     if (
@@ -5221,7 +5312,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     }
     const loopId = soloLooperLiveLoopIdRef.current;
     soloLooperLoopFinalizePendingRef.current = true;
-    if (activeTrackIndex === 1) {
+    const isFreeT1 =
+      soloLooperModeRef.current === "free" && activeTrackIndex === 1;
+    if (activeTrackIndex === 1 && !isFreeT1) {
       engine.stopAudibleMetronome();
     }
     const sampleRate = Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0
@@ -5231,17 +5324,21 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       0,
       Math.round((soloLooperLatencyMsRef.current / 1000) * sampleRate)
     );
+    logDriftDiagnostic("commitActiveRecording", soloLooperModeRef.current, {
+      trackIndex: activeTrackIndex,
+      stopAtContextSec: isFreeT1 ? stopAtContextSec : undefined,
+      phase: "recording",
+    });
     engine.stopRecording({
       trackIndex: activeTrackIndex,
       bpm: currentBpm,
       channelCount: 2,
       latencyOffsetFrames,
       loopMode: soloLooperModeRef.current,
-      ...(soloLooperModeRef.current === "free" && activeTrackIndex === 1
-        ? { stopAtContextSec: ctx.currentTime }
-        : {}),
+      ...(isFreeT1 ? { stopAtContextSec } : {}),
       ...(loopId !== null ? { loopId } : {}),
     });
+    freePedalStopContextSecRef.current = null;
   }, [handleStopAndResetSoloLooper]);
   commitActiveRecordingRef.current = commitActiveRecording;
 
@@ -5254,6 +5351,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         soloLooperActiveRecordTrackIndexRef.current != null ||
         soloLooperStateRef.current === "recording"
       ) {
+        const ctx = studioAudioContextRef.current;
+        if (
+          ctx &&
+          ctx.state !== "closed" &&
+          soloLooperModeRef.current === "free"
+        ) {
+          freePedalStopContextSecRef.current = ctx.currentTime;
+        }
         commitActiveRecording();
         return;
       }
@@ -5524,6 +5629,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     let cancelled = false;
     void supabase.auth.getUser().then(({ data: { user: next } }) => {
       if (cancelled) return;
+      lastAuthUserIdRef.current = next?.id ?? null;
       setUser(next ?? null);
       onAuthUserChange?.(next ?? null);
       setAuthReady(true);
@@ -5531,8 +5637,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     });
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (cancelled) return;
+      const nextUserId = session?.user?.id ?? null;
+      if (event === "TOKEN_REFRESHED" && nextUserId === lastAuthUserIdRef.current) {
+        return;
+      }
+      lastAuthUserIdRef.current = nextUserId;
       setUser(session?.user ?? null);
       onAuthUserChange?.(session?.user ?? null);
       setAuthReady(true);

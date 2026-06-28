@@ -1,6 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  memo,
+  type CSSProperties,
+  type MutableRefObject,
+  type ReactNode,
+} from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Settings,
@@ -133,6 +143,39 @@ export type KiteLoopV4PanelProps = {
 const ORANGE = "#ff4500";
 const EMERALD = "#22c55e";
 const SLIDER_TRACK_EMPTY = "rgba(255,255,255,0.08)";
+
+const STUDIO_GLOW_ROOT_BG =
+  "radial-gradient(ellipse 140% 120% at 50% 38%, rgba(34, 197, 94, 0.32) 0%, rgba(255, 69, 0, 0.26) 28%, rgba(34, 197, 94, 0.14) 48%, rgba(0, 0, 0, 0.72) 78%, #000 100%)";
+const STUDIO_GLOW_STAGE_BG =
+  "radial-gradient(ellipse 115% 100% at 50% 50%, rgba(34, 197, 94, 0.30) 0%, rgba(255, 69, 0, 0.24) 38%, rgba(34, 197, 94, 0.12) 58%, rgba(0, 0, 0, 0.55) 82%, #000 100%)";
+const STUDIO_GLOW_FRAME_SHADOW =
+  "0 0 0 1px rgba(255,255,255,0.14), 0 0 48px rgba(34,197,94,0.55), 0 0 96px rgba(34,197,94,0.30), 0 0 140px rgba(255,69,0,0.35), 0 12px 48px rgba(0,0,0,0.55)";
+const STUDIO_GLOW_VIGNETTE_BG =
+  "radial-gradient(ellipse 85% 70% at 50% 45%, transparent 0%, rgba(0, 0, 0, 0.35) 72%, rgba(0, 0, 0, 0.65) 100%)";
+const WEBCAM_FRAME_FALLBACK_ASPECT = 16 / 9;
+
+function getWebcamFrameLayoutStyle(
+  aspect: number,
+  viewportWidth: number,
+  viewportHeight: number,
+): CSSProperties {
+  const base: CSSProperties = {
+    aspectRatio: aspect,
+    maxWidth: "100%",
+    maxHeight: "100%",
+    borderRadius: 14,
+    overflow: "hidden",
+    boxShadow: STUDIO_GLOW_FRAME_SHADOW,
+  };
+  if (viewportWidth <= 0 || viewportHeight <= 0) {
+    return { ...base, width: "100%", height: "auto" };
+  }
+  const viewportAspect = viewportWidth / viewportHeight;
+  if (aspect >= viewportAspect) {
+    return { ...base, width: "100%", height: "auto" };
+  }
+  return { ...base, height: "100%", width: "auto" };
+}
 
 const INLINE_LABEL: React.CSSProperties = {
   color: "rgba(255,255,255,0.28)",
@@ -1727,13 +1770,13 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SESSION_COLORS: Record<KiteLoopV4SessionRecorderState, string> = {
-  idle: "rgba(255,255,255,0.4)",
+  idle: "#ef4444",
   recording: ORANGE,
   paused: "#eab308",
   saving: EMERALD,
 };
 
-export function KiteLoopV4Panel({
+export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   looperState,
   looperConfig,
   looperHandlers,
@@ -1755,6 +1798,23 @@ export function KiteLoopV4Panel({
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [videoAspectRatio, setVideoAspectRatio] = useState<number | null>(null);
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+
+  const handleVideoMetadata = useCallback(() => {
+    const el = videoRef.current;
+    if (!el || el.videoWidth <= 0 || el.videoHeight <= 0) return;
+    setVideoAspectRatio(el.videoWidth / el.videoHeight);
+  }, []);
+
+  useLayoutEffect(() => {
+    const updateViewportSize = (): void => {
+      setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+    };
+    updateViewportSize();
+    window.addEventListener("resize", updateViewportSize);
+    return () => window.removeEventListener("resize", updateViewportSize);
+  }, []);
 
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
@@ -1780,6 +1840,12 @@ export function KiteLoopV4Panel({
   useEffect(() => {
     const el = videoRef.current;
     if (el) el.srcObject = cameraStream;
+  }, [cameraStream]);
+
+  useEffect(() => {
+    if (!cameraStream) {
+      setVideoAspectRatio(null);
+    }
   }, [cameraStream]);
 
   useEffect(() => {
@@ -1848,6 +1914,13 @@ export function KiteLoopV4Panel({
     return "WEBCAM OFF";
   };
 
+  const webcamFrameAspect = videoAspectRatio ?? WEBCAM_FRAME_FALLBACK_ASPECT;
+  const webcamFrameStyle = getWebcamFrameLayoutStyle(
+    webcamFrameAspect,
+    viewportSize.width,
+    viewportSize.height,
+  );
+
   return (
     <div
       style={{
@@ -1860,24 +1933,42 @@ export function KiteLoopV4Panel({
         overflow: "hidden",
         display: "flex",
         flexDirection: "column",
-        background: "#000",
+        background: STUDIO_GLOW_ROOT_BG,
       }}
     >
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
+      <div
         style={{
           position: "absolute",
           inset: 0,
-          width: "100%",
-          height: "100%",
-          objectFit: "cover",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          pointerEvents: "none",
           zIndex: 0,
-          opacity: 1,
+          background: STUDIO_GLOW_STAGE_BG,
+          opacity: isCameraActive ? 1 : 0,
+          transition: "opacity 0.25s ease",
         }}
-      />
+      >
+        {isCameraActive ? (
+          <div style={webcamFrameStyle}>
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              onLoadedMetadata={handleVideoMetadata}
+              style={{
+                display: "block",
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                background: "#000",
+              }}
+            />
+          </div>
+        ) : null}
+      </div>
 
       <div
         style={{
@@ -1885,8 +1976,7 @@ export function KiteLoopV4Panel({
           inset: 0,
           pointerEvents: "none",
           zIndex: 1,
-          background:
-            "radial-gradient(ellipse 80% 60% at 50% 50%, rgba(0,0,0,0.05) 0%, rgba(0,0,0,0.4) 100%)",
+          background: STUDIO_GLOW_VIGNETTE_BG,
         }}
       />
 
@@ -2037,8 +2127,8 @@ export function KiteLoopV4Panel({
               ...glassSharp,
               padding: "7px 14px",
               cursor: sessionTapeState === "saving" ? "wait" : "pointer",
-              border: `1px solid ${sessionTapeState !== "idle" ? "rgba(255,69,0,0.45)" : "rgba(255,255,255,0.08)"}`,
-              background: sessionTapeState !== "idle" ? "rgba(255,69,0,0.08)" : "rgba(10,10,10,0.75)",
+              border: `1px solid ${sessionTapeState !== "idle" ? "rgba(255,69,0,0.45)" : "rgba(239, 68, 68, 0.5)"}`,
+              background: sessionTapeState !== "idle" ? "rgba(255,69,0,0.08)" : "rgba(239, 68, 68, 0.06)",
               color: SESSION_COLORS[sessionTapeState],
               fontSize: 11,
               display: "flex",
@@ -2434,4 +2524,4 @@ export function KiteLoopV4Panel({
       `}</style>
     </div>
   );
-}
+});

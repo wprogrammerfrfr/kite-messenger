@@ -259,7 +259,7 @@ export default function KiteStudioWelcomeView({
             <LanguageDropdown value={language} onChange={onLanguageChange} />
 
             <Link
-              href="/chat?mode=login"
+              href="/chat?mode=login&next=%2Fstudio"
               style={{
                 color: "var(--muted)",
                 textDecoration: "none",
@@ -278,7 +278,7 @@ export default function KiteStudioWelcomeView({
             </Link>
 
             <Link
-              href="/chat?mode=signup"
+              href="/chat?mode=signup&next=%2Fstudio"
               style={{
                 position: "relative",
                 overflow: "hidden",
@@ -375,7 +375,7 @@ export default function KiteStudioWelcomeView({
         </p>
 
         <Link
-          href="/chat?mode=signup"
+          href="/chat?mode=signup&next=%2Fstudio"
           className="btn-shine"
           style={{
             position: "relative",
@@ -1287,7 +1287,7 @@ export default function KiteStudioWelcomeView({
           Create your free session in seconds. No credit card. No install. Just music.
         </p>
         <Link
-          href="/chat?mode=signup"
+          href="/chat?mode=signup&next=%2Fstudio"
           style={{
             position: "relative",
             overflow: "hidden",

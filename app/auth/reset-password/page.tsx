@@ -32,7 +32,7 @@ export default function ResetPasswordPage() {
       } else {
         setSuccess(true);
         setTimeout(() => {
-          router.push("/chat");
+          router.push("/studio");
         }, 2000);
       }
     } catch (err) {
@@ -89,7 +89,7 @@ export default function ResetPasswordPage() {
               className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200"
               role="status"
             >
-              Password updated. Redirecting you to chat…
+              Password updated. Redirecting you to Kite Studio…
             </div>
           )}
 

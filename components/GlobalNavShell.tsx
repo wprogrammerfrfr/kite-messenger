@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { CircleUser, MessageSquareText, Route, Film } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
 import {
   prefetchDashboardAliases,
@@ -40,7 +40,8 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
   const isStudioMode = typeof pathname === "string" && pathname.startsWith("/studio");
   const [navMounted, setNavMounted] = useState(false);
   const [hasSession, setHasSession] = useState<boolean | null>(null);
-  const [language, setLanguage] = useState<Language>(() => readStoredLanguage());
+  const lastAuthUserIdRef = useRef<string | null>(null);
+  const [language, setLanguage] = useState<Language>("en");
 
   useEffect(() => {
     setNavMounted(true);
@@ -82,13 +83,19 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
         data: { session },
       } = await supabase.auth.getSession();
       if (!mounted) return;
+      lastAuthUserIdRef.current = session?.user?.id ?? null;
       setHasSession(Boolean(session));
     })();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mounted) return;
+      const nextUserId = session?.user?.id ?? null;
+      if (event === "TOKEN_REFRESHED" && nextUserId === lastAuthUserIdRef.current) {
+        return;
+      }
+      lastAuthUserIdRef.current = nextUserId;
       setHasSession(Boolean(session));
     });
 
@@ -111,6 +118,9 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
       }
       if (href === "/dashboard") {
         prefetchDashboardAliases(uid);
+      }
+      if (href === "/studio") {
+        prefetchSettingsProfile(uid);
       }
       if (href === "/settings") {
         prefetchSettingsProfile(uid);
@@ -249,7 +259,9 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
           isStudioMode
             ? "min-h-screen w-full"
             : `min-h-screen ${
-                hasSession ? "lg:pl-[var(--desktop-sidebar-width)] pb-[var(--bottom-nav-height)]" : ""
+                navMounted && hasSession
+                  ? "lg:pl-[var(--desktop-sidebar-width)] pb-[var(--bottom-nav-height)]"
+                  : ""
               }`
         }
       >

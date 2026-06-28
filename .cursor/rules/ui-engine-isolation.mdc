@@ -1,0 +1,38 @@
+---
+description: UI redesign must not modify loopstation or P2P engine latency paths
+alwaysApply: true
+---
+
+# UI / Engine Isolation
+
+UI and UX work (layout, styling, animations, presenter shell) must **not** alter audio timing, looper transport, or P2P signaling latency.
+
+## Protected paths (no edits unless explicitly requested for engine work)
+
+- `public/worklets/**`
+- `lib/solo-looper-engine.ts`, `lib/looper-runway-scheduler.ts`, `lib/studio-metronome-pump.ts`
+- `lib/kite-interval-graph.ts`, `lib/kite-interval-math.ts`, `lib/studio-bridge-webrtc.ts`
+- `hooks/useKiteStudioEngine.ts` transport: `startSoloLooper`, `prepareSoloLooperForRecording`, `fireSoloLooperRecording`, `commitActiveRecording`, `handleEnterSoloStudio`, `ensureSoloLooperEngineBootstrapped`, P2P/grid pump callbacks
+- `hooks/useKiteSyncEngine.ts`, `hooks/useKiteP2PTransport.ts`
+- `hooks/useKiteStudioHost.ts` (AudioContext lifecycle)
+
+## UI-safe zones
+
+- `components/studio-bridge/**`, `components/kite-loop-v2/**` (presentation props only)
+- CSS / Tailwind, static copy, non-engine presenter wiring
+
+## If `app/studio-bridge/page.tsx` must change
+
+- JSX and presenter aliases only
+- No new `useEffect` RAF loops on the audio engine
+- Do not reorder engine init or add transport logic
+- Do not import engine internals beyond `useKiteStudioEngine` presenter API
+
+## Red flags (reject in UI-only PRs)
+
+- `performance.now()` or wall-clock math for musical transport
+- `setTimeout` / `setInterval` / RAF for downbeats or loop boundaries
+- `setStudioUiPhase("studio")` before solo engine bootstrap + warmup
+- Extra per-frame `postMessage` to worklets during idle startup
+
+Complements `.cursorrules` Rule of One and latency mandate.

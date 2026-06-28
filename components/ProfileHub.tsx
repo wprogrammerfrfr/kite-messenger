@@ -36,6 +36,10 @@ import {
   settingsProfileCacheKey,
   writeJsonCache,
 } from "@/lib/kite-tab-cache";
+import {
+  ProfileAvatarUploadError,
+  uploadProfileAvatar,
+} from "@/lib/profile-avatar-upload";
 
 /** Same storage key as chat (`app/chat/page.tsx`) for the local E2EE keypair. */
 const E2E_KEY_STORAGE_KEY = "kite-e2e-v1";
@@ -379,37 +383,24 @@ export const ProfileHub = memo(function ProfileHub() {
 
   const handleAvatarUpload = async (file: File) => {
     if (!session) return;
-    if (!file.type.startsWith("image/")) {
-      setError(t(language, "profileChooseImageFile"));
-      return;
-    }
     setAvatarUploading(true);
     setError(null);
     try {
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
-      const path = `${session.user.id}/profile-${Date.now()}-${safeName}`;
-      const { error: uploadError } = await supabase.storage
-        .from("chat-images")
-        .upload(path, file, {
-          cacheControl: "3600",
-          upsert: true,
-          contentType: file.type || "image/jpeg",
-        });
-      if (uploadError) {
-        setError(uploadError.message);
-        return;
-      }
-      const { data } = supabase.storage.from("chat-images").getPublicUrl(path);
-      if (!data?.publicUrl) {
-        setError(t(language, "profileCouldNotGenerateImageUrl"));
-        return;
-      }
-      setProfilePictureUrl(data.publicUrl);
+      const { publicUrl } = await uploadProfileAvatar(session.user.id, file);
+      setProfilePictureUrl(publicUrl);
       setSuccess(t(language, "profilePictureUpdatedSuccess"));
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : t(language, "profileUploadPictureFailed")
-      );
+      if (err instanceof ProfileAvatarUploadError) {
+        setError(
+          err.message === "Please choose an image file."
+            ? t(language, "profileChooseImageFile")
+            : err.message
+        );
+      } else {
+        setError(
+          err instanceof Error ? err.message : t(language, "profileUploadPictureFailed")
+        );
+      }
     } finally {
       setAvatarUploading(false);
     }
