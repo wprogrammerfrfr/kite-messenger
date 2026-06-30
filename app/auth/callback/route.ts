@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
   const appUrl = url.origin;
 
   function errorRedirect(description?: string) {
-    const target = new URL("/chat", appUrl);
+    const target = new URL("/", appUrl);
     target.searchParams.set("mode", "login");
     target.searchParams.set("next", "/studio");
     target.searchParams.set("error", "auth_callback");

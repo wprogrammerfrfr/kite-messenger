@@ -1,5 +1,6 @@
 import "@/components/kite-studio/welcome-scoped.css";
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import WelcomePage from "@/components/WelcomePage";
 
 const homeDescription =
@@ -30,6 +31,20 @@ export const metadata: Metadata = {
   },
 };
 
+function WelcomePageFallback() {
+  return (
+    <div
+      className="min-h-screen bg-black"
+      aria-busy="true"
+      aria-label="Loading"
+    />
+  );
+}
+
 export default function Home() {
-  return <WelcomePage />;
+  return (
+    <Suspense fallback={<WelcomePageFallback />}>
+      <WelcomePage />
+    </Suspense>
+  );
 }

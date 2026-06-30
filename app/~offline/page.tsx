@@ -6,14 +6,14 @@ export default function OfflinePage() {
       <p className="text-lg font-semibold text-[#FF4500]">Kite</p>
       <h1 className="text-xl font-medium">You&apos;re offline</h1>
       <p className="max-w-sm text-sm text-white/70">
-        Open the app again when you have a connection. Cached pages and your last messages may
-        still be available from the chat screen.
+        Open the app again when you have a connection. Cached studio pages may still be available
+        from your last session.
       </p>
       <Link
-        href="/chat"
+        href="/"
         className="rounded-xl bg-[#FF4500] px-5 py-2.5 text-sm font-semibold text-black"
       >
-        Try chat (cached)
+        Go to home
       </Link>
     </div>
   );

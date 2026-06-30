@@ -114,7 +114,7 @@ self.addEventListener("notificationclick", (event: NotificationEvent) => {
       for (const client of windowClients) {
         if ("focus" in client) return client.focus();
       }
-      return self.clients.openWindow("/chat");
+      return self.clients.openWindow("/");
     })
   );
 });

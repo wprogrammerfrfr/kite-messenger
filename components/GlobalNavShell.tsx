@@ -2,14 +2,9 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CircleUser, MessageSquareText, Route, Film } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Film } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
-import {
-  prefetchDashboardAliases,
-  prefetchDiscoverSidebar,
-  prefetchSettingsProfile,
-} from "@/lib/kite-prefetch";
 import {
   NEXUS_LANG_CHANGE_EVENT,
   readStoredLanguage,
@@ -29,10 +24,6 @@ const desktopSidebarWidthPx = 288; // 18rem
 function isActive(pathname: string, href: string) {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
-}
-
-function getStoredLangForPrefetch(): Language {
-  return readStoredLanguage();
 }
 
 export default function GlobalNavShell({ children }: { children: ReactNode }) {
@@ -105,50 +96,12 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const prefetchTab = useCallback((href: string) => {
-    void (async () => {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      if (!session?.user?.id) return;
-      const uid = session.user.id;
-      const lang = getStoredLangForPrefetch();
-      if (href === "/chat" || href === "/dashboard") {
-        prefetchDiscoverSidebar(uid, lang);
-      }
-      if (href === "/dashboard") {
-        prefetchDashboardAliases(uid);
-      }
-      if (href === "/studio") {
-        prefetchSettingsProfile(uid);
-      }
-      if (href === "/settings") {
-        prefetchSettingsProfile(uid);
-      }
-    })();
-  }, []);
-
   const items: NavItem[] = useMemo(
     () => [
-      {
-        href: "/chat",
-        label: t(language, "navTabChats"),
-        icon: <MessageSquareText className="h-5 w-5" aria-hidden />,
-      },
-      {
-        href: "/dashboard",
-        label: t(language, "navTabDiscover"),
-        icon: <Route className="h-5 w-5" aria-hidden />,
-      },
       {
         href: "/studio",
         label: t(language, "navTabStudio"),
         icon: <Film className="h-5 w-5" aria-hidden />,
-      },
-      {
-        href: "/settings",
-        label: t(language, "navTabProfile"),
-        icon: <CircleUser className="h-5 w-5" aria-hidden />,
       },
     ],
     [language]
@@ -188,8 +141,6 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
                   <Link
                     key={item.href}
                     href={item.href}
-                    onMouseEnter={() => prefetchTab(item.href)}
-                    onTouchStart={() => prefetchTab(item.href)}
                     className="rounded-xl p-3 flex items-center gap-3 transition hover:bg-white/5"
                     style={{
                       color: active ? "#FF4500" : "rgba(255,255,255,0.85)",
@@ -225,8 +176,6 @@ export default function GlobalNavShell({ children }: { children: ReactNode }) {
                   <Link
                     key={item.href}
                     href={item.href}
-                    onMouseEnter={() => prefetchTab(item.href)}
-                    onTouchStart={() => prefetchTab(item.href)}
                     aria-label={item.label}
                     className="flex flex-1 flex-col items-center justify-center gap-1 rounded-xl transition"
                     style={{
