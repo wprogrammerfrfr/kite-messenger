@@ -1386,27 +1386,24 @@ export default function KiteStudioWelcomeView({
           Kite<span style={{ color: "var(--amber)" }}>Studio</span>
         </span>
         <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
-          {["Privacy", "Terms", "Security", "GitHub", "Status", "Blog"].map((l) => (
-            <a
-              key={l}
-              href="#"
-              style={{
-                fontFamily: "'Sora', sans-serif",
-                fontSize: 13,
-                color: "var(--muted)",
-                textDecoration: "none",
-                transition: "color 0.15s",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.color = "var(--text)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.color = "var(--muted)";
-              }}
-            >
-              {l}
-            </a>
-          ))}
+          <Link
+            href="/privacy"
+            style={{
+              fontFamily: "'Sora', sans-serif",
+              fontSize: 13,
+              color: "var(--muted)",
+              textDecoration: "none",
+              transition: "color 0.15s",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = "var(--text)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = "var(--muted)";
+            }}
+          >
+            Privacy Policy
+          </Link>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <span
