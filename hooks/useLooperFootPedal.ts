@@ -14,6 +14,8 @@ export type LooperFootPedalArmContext = {
 
 export type UseLooperFootPedalOptions = {
   armContext: LooperFootPedalArmContext;
+  /** Runs synchronously on capture-phase keydown before `onPedalDown` (timing-critical sampling). */
+  onPedalDownPrepare?: () => void;
   /** Receives resolved track index in 1..4 (each keydown = one tap; no keyup). */
   onPedalDown: (targetTrackIndex: number) => void;
 };
@@ -81,10 +83,16 @@ function isEditableEventTarget(target: EventTarget | null): boolean {
  * for handled keys. A capture-phase keyup silencer blocks synthetic button activation on Space release without invoking
  * `onPedalDown`. Each handled keydown passes the current `pedalTargetTrackIndexRef` (default 1).
  */
-export function useLooperFootPedal({ armContext, onPedalDown }: UseLooperFootPedalOptions): void {
+export function useLooperFootPedal({
+  armContext,
+  onPedalDownPrepare,
+  onPedalDown,
+}: UseLooperFootPedalOptions): void {
   const onPedalDownRef = useRef(onPedalDown);
+  const onPedalDownPrepareRef = useRef(onPedalDownPrepare);
   const armContextRef = useRef(armContext);
   onPedalDownRef.current = onPedalDown;
+  onPedalDownPrepareRef.current = onPedalDownPrepare;
   armContextRef.current = armContext;
 
   useEffect(() => {
@@ -106,6 +114,7 @@ export function useLooperFootPedal({ armContext, onPedalDown }: UseLooperFootPed
       if (isRangeSliderFocus() || isRangeSliderTarget(e.target)) {
         return;
       }
+      onPedalDownPrepareRef.current?.();
       const target = resolvePedalTargetTrackIndex(armContextRef.current);
       onPedalDownRef.current(target);
     };

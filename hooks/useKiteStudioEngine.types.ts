@@ -81,6 +81,11 @@ export type KiteEngineState = {
   soloInputGain: number;
   soloLatencyCalibrationStatus: "idle" | "warning" | "listening" | "success" | "error";
   soloLatencyCalibrationMessage: string | null;
+  /** True when saved RTL fingerprint no longer matches live audio hardware. */
+  soloLatencyCalibrationStale: boolean;
+  soloLatencyStaleMessage: string | null;
+  /** Unclamped ms from last auto-calibration (entry gate + lobby quality feedback). */
+  soloLatencyLastRawMeasuredMs: number | null;
   soloLooperMode: SoloLooperMode;
   /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
   handsfreeSequenceActive: boolean;
@@ -119,6 +124,10 @@ export type KiteEngineRefs = {
   soloMeterElementRef: MutableRefObject<HTMLDivElement | null>;
   perChannelMeterRefs: MutableRefObject<Map<string, HTMLDivElement>>;
   masterLiveMeterElementRef: MutableRefObject<HTMLDivElement | null>;
+  /** Worklet slot snapshot for ref-driven lane progress (see timing drift audit). */
+  soloTrackSlotUiLatestRef: MutableRefObject<
+    import("@/lib/solo-looper-engine").SoloLooperPlaybackUiStateEvent["slots"] | null
+  >;
 };
 
 /** Legacy dashboard handlers/refs still referenced by presenter JSX (Phase 8 bridge). */

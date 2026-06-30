@@ -3,6 +3,7 @@
 import React, { memo, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronLeft, Mic, Volume2 } from "lucide-react";
+import { SoloLatencyCalibrationPanel } from "@/components/studio-bridge/SoloLatencyCalibrationPanel";
 
 type CheckRowState = "pending" | "done" | "error";
 
@@ -28,6 +29,15 @@ export type StudioPreflightLobbyProps = {
   handleEnterStudio: () => void;
   canPracticeAlone: boolean;
   handleEnterSoloStudio: () => void;
+  soloPracticeButtonLabel: string;
+  soloLooperLatencyMs: number;
+  soloLatencyEntryMs: number;
+  soloLatencyCalibrationStale: boolean;
+  soloLatencyStaleMessage: string | null;
+  soloLatencyCalibrationStatus: "idle" | "warning" | "listening" | "success" | "error";
+  soloLatencyCalibrationMessage: string | null;
+  onCalibrateSoloLatency: (mode: "acoustic" | "interface") => void;
+  calibrationDisabled?: boolean;
 };
 
 const BASELINE_LEVEL_BAR_HEIGHTS = [0.12, 0.12, 0.12, 0.12, 0.12] as const;
@@ -137,6 +147,15 @@ function StudioPreflightLobbyInner({
   handleEnterStudio,
   canPracticeAlone,
   handleEnterSoloStudio,
+  soloPracticeButtonLabel,
+  soloLooperLatencyMs,
+  soloLatencyEntryMs,
+  soloLatencyCalibrationStale,
+  soloLatencyStaleMessage,
+  soloLatencyCalibrationStatus,
+  soloLatencyCalibrationMessage,
+  onCalibrateSoloLatency,
+  calibrationDisabled = false,
 }: StudioPreflightLobbyProps) {
   return (
     <div
@@ -411,6 +430,18 @@ function StudioPreflightLobbyInner({
                   </li>
                 </ul>
               </div>
+
+              <SoloLatencyCalibrationPanel
+                variant="lobby"
+                latencyMs={soloLooperLatencyMs}
+                entryLatencyMs={soloLatencyEntryMs}
+                stale={soloLatencyCalibrationStale}
+                staleMessage={soloLatencyStaleMessage}
+                status={soloLatencyCalibrationStatus}
+                message={soloLatencyCalibrationMessage}
+                disabled={calibrationDisabled}
+                onCalibrate={onCalibrateSoloLatency}
+              />
             </div>
 
             <div className="flex min-h-0 flex-col gap-4 p-6">
@@ -442,15 +473,15 @@ function StudioPreflightLobbyInner({
                 type="button"
                 onClick={handleEnterSoloStudio}
                 disabled={!canPracticeAlone}
-                aria-label="Kite loopstation"
+                aria-label={soloPracticeButtonLabel}
                 whileTap={canPracticeAlone ? { scale: 0.97 } : undefined}
-                className={`flex flex-[1.35] items-center justify-center gap-2.5 rounded-2xl border px-6 py-10 text-lg font-semibold tracking-tight transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
+                className={`flex flex-[1.35] flex-col items-center justify-center gap-1 rounded-2xl border px-6 py-10 text-lg font-semibold tracking-tight transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
                   canPracticeAlone
                     ? "border-emerald-500/30 text-emerald-400 hover:border-emerald-500/50 hover:bg-emerald-500/8 active:scale-[0.99]"
                     : "cursor-not-allowed border-white/[0.06] text-stone-600"
                 }`}
               >
-                Kite loopstation
+                <span>{canPracticeAlone ? "Kite loopstation" : soloPracticeButtonLabel}</span>
               </motion.button>
             </div>
           </section>

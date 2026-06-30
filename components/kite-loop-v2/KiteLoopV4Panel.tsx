@@ -3,7 +3,6 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   memo,
@@ -32,6 +31,8 @@ import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
 import type { RunwayDisplayLabel } from "@/lib/looper-runway-scheduler";
 
 import type { LooperRunwayPhase } from "@/components/kite-loop-v2/LooperCountdownRunway";
+import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
+import { SoloLatencyCalibrationPanel } from "@/components/studio-bridge/SoloLatencyCalibrationPanel";
 import type { SoloLooperMode, SoloLooperState } from "@/hooks/useKiteStudioEngine.types";
 import KiteTunerPanel from "@/components/studio-bridge/KiteTunerPanel";
 import { DEFAULT_INSTRUMENT_ID, type KiteTunerInstrumentId } from "@/hooks/useKiteTunerEngine";
@@ -73,6 +74,7 @@ export type KiteLoopV4LooperState = {
   focusedTrackIndex: 1 | 2 | 3 | 4;
   soloTrackLanes: SoloTrackLaneView[];
   showCalibrationOnboardingHint: boolean;
+  latencyCalibrationStale: boolean;
 };
 
 export type KiteLoopV4LooperConfig = {
@@ -99,6 +101,9 @@ export type KiteLoopV4LooperHandlers = {
   onAutoCalibrateLatency: (mode: "acoustic" | "interface") => void;
   autoCalibrateLatencyStatus: "idle" | "warning" | "listening" | "success" | "error";
   autoCalibrateLatencyMessage: string | null;
+  latencyCalibrationStale: boolean;
+  latencyStaleMessage: string | null;
+  entryLatencyMs: number;
   onTempoSliderChange: (value: number) => void;
   onTempoPreset: (bpm: number) => void;
   onSelectTimeSignature: (option: { title: string; top: number; bottom: number; swing: boolean }) => void;
@@ -135,6 +140,10 @@ export type KiteLoopV4PanelProps = {
   metronome: KiteLoopV4MetronomeProps;
   studioAudioContextRef: MutableRefObject<AudioContext | null>;
   activeStreamsMapRef: MutableRefObject<Map<string, MediaStream>>;
+  /** Latest worklet slot snapshot for ref-driven lane progress fills. */
+  soloTrackSlotUiLatestRef: MutableRefObject<
+    SoloLooperPlaybackUiStateEvent["slots"] | null
+  >;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -638,6 +647,19 @@ function trackDisplayName(trackIndex: 1 | 2 | 3 | 4): string {
   return trackIndex === 1 ? "Master 1" : `Track ${trackIndex}`;
 }
 
+function laneFillScaleFromSlot(
+  slot: SoloLooperPlaybackUiStateEvent["slots"][number] | undefined
+): number {
+  if (!slot || slot.intervalFrames <= 0) return 0;
+  if (slot.mode === "recording") {
+    return Math.min(1, Math.max(0, slot.recordCursor / slot.intervalFrames));
+  }
+  if (slot.mode === "playing") {
+    return Math.min(1, Math.max(0, slot.playbackCursor / slot.intervalFrames));
+  }
+  return 0;
+}
+
 type AmbientBackdropStyle = {
   baseBackground: string;
   fillBackground: string;
@@ -674,9 +696,10 @@ function resolveAmbientBackdropStyle(
 
 type TrackColumnProps = {
   lane: SoloTrackLaneView;
+  registerTrackFillEl: (trackIndex: 1 | 2 | 3 | 4, el: HTMLDivElement | null) => void;
 };
 
-function TrackColumn({ lane }: TrackColumnProps): React.JSX.Element {
+function TrackColumn({ lane, registerTrackFillEl }: TrackColumnProps): React.JSX.Element {
   const visual = mapLaneToRecVisual(lane);
   const cfg = REC_CFG[visual];
   const isPulsing = visual === "waiting";
@@ -750,6 +773,7 @@ function TrackColumn({ lane }: TrackColumnProps): React.JSX.Element {
         }}
       />
       <div
+        ref={(el) => registerTrackFillEl(lane.trackIndex, el)}
         aria-hidden
         style={{
           position: "absolute",
@@ -759,9 +783,8 @@ function TrackColumn({ lane }: TrackColumnProps): React.JSX.Element {
           zIndex: 0,
           background: ambient.fillBackground,
           transformOrigin: "bottom",
-          transform: `scaleY(${ambient.fillScaleY})`,
+          transform: "scaleY(0)",
           willChange: "transform",
-          transition: "transform 70ms linear",
         }}
       />
       <span
@@ -910,7 +933,6 @@ function SettingsModal({
   runwayVisualOnly,
 }: SettingsModalProps): React.JSX.Element {
   const [showAdvancedLatency, setShowAdvancedLatency] = useState(false);
-  const [calibrationMode, setCalibrationMode] = useState<"acoustic" | "interface">("acoustic");
   const tapTimes = useRef<number[]>([]);
 
   const bpm = cfg.kiteSetupTempo;
@@ -920,32 +942,6 @@ function SettingsModal({
   const barCount = cfg.barCount;
   const rtlCompensation = cfg.latencyMs;
   const locked = cfg.isTimingLocked;
-  const calibrationStatus = handlers.autoCalibrateLatencyStatus;
-  const calibrationMessage = handlers.autoCalibrateLatencyMessage;
-  const calibrationBusy = calibrationStatus === "listening";
-  const calibrationStatusColor =
-    calibrationStatus === "success"
-      ? EMERALD
-      : calibrationStatus === "warning" || calibrationStatus === "error"
-        ? ORANGE
-        : "rgba(255,255,255,0.5)";
-  const selectedWarning =
-    calibrationMode === "acoustic"
-      ? "RTL CALIBRATION\n\n1. Keep your wired headphones plugged in.\n2. Find your laptop's built-in mic (usually a tiny hole next to the webcam or near the keyboard).\n3. Hold one headphone earcup directly against the mic.\n4. Hold it steady, then click OK to fire the ping."
-      : "Unplug your instrument. Plug a standard audio cable directly from your interface's Output into its Input. Turn the input gain up.";
-
-  const triggerCalibration = (mode: "acoustic" | "interface"): void => {
-    const warningText =
-      mode === "acoustic"
-        ? "RTL CALIBRATION\n\n1. Keep your wired headphones plugged in.\n2. Find your laptop's built-in mic (usually a tiny hole next to the webcam or near the keyboard).\n3. Hold one headphone earcup directly against the mic.\n4. Hold it steady, then click OK to fire the ping."
-        : "Unplug your instrument. Plug a standard audio cable directly from your interface's Output into its Input. Turn the input gain up.";
-    if (!window.confirm(`${warningText}\n\nStart calibration now?`)) {
-      return;
-    }
-    setCalibrationMode(mode);
-    handlers.onAutoCalibrateLatency(mode);
-  };
-
   const tap = (): void => {
     const now = Date.now();
     tapTimes.current.push(now);
@@ -1137,104 +1133,24 @@ function SettingsModal({
               ))}
             </div>
 
+            <SoloLatencyCalibrationPanel
+              variant="settings"
+              latencyMs={cfg.latencyMs}
+              entryLatencyMs={handlers.entryLatencyMs}
+              stale={handlers.latencyCalibrationStale}
+              staleMessage={handlers.latencyStaleMessage}
+              status={handlers.autoCalibrateLatencyStatus}
+              message={handlers.autoCalibrateLatencyMessage}
+              onCalibrate={handlers.onAutoCalibrateLatency}
+            />
+
             <div
               style={{
-                borderTop: "1px solid rgba(255,255,255,0.05)",
-                paddingTop: 12,
-                marginTop: 4,
                 display: "flex",
                 flexDirection: "column",
                 gap: 8,
               }}
             >
-              {sLabel("Latency Calibration")}
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <button
-                  type="button"
-                  disabled={calibrationBusy}
-                  onClick={() => triggerCalibration("acoustic")}
-                  title={calibrationBusy ? "Calibration in progress" : "Calibrate over laptop speaker/mic path"}
-                  style={{
-                    padding: "8px 14px",
-                    border: "1px solid rgba(34,197,94,0.35)",
-                    background:
-                      calibrationMode === "acoustic" ? "rgba(34,197,94,0.12)" : "rgba(34,197,94,0.07)",
-                    color: EMERALD,
-                    fontSize: 11,
-                    cursor: calibrationBusy ? "wait" : "pointer",
-                    opacity: calibrationBusy ? 0.6 : 1,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    borderRadius: 10,
-                    justifyContent: "center",
-                  }}
-                >
-                  <Zap size={12} color={EMERALD} />{" "}
-                  {calibrationBusy && calibrationMode === "acoustic"
-                    ? "Listening..."
-                    : "Calibrate Laptop/Mic (Acoustic)"}
-                </button>
-                <button
-                  type="button"
-                  disabled={calibrationBusy}
-                  onClick={() => triggerCalibration("interface")}
-                  title={calibrationBusy ? "Calibration in progress" : "Calibrate with interface cable loopback"}
-                  style={{
-                    padding: "8px 14px",
-                    border: "1px solid rgba(34,197,94,0.35)",
-                    background:
-                      calibrationMode === "interface" ? "rgba(34,197,94,0.12)" : "rgba(34,197,94,0.07)",
-                    color: EMERALD,
-                    fontSize: 11,
-                    cursor: calibrationBusy ? "wait" : "pointer",
-                    opacity: calibrationBusy ? 0.6 : 1,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    borderRadius: 10,
-                    justifyContent: "center",
-                  }}
-                >
-                  <Zap size={12} color={EMERALD} />{" "}
-                  {calibrationBusy && calibrationMode === "interface"
-                    ? "Listening..."
-                    : "Calibrate Interface (Cable Loopback)"}
-                </button>
-              </div>
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 5 }}>
-                <AlertTriangle size={10} color={ORANGE} style={{ marginTop: 1, flexShrink: 0 }} />
-                <span style={{ color: ORANGE, fontSize: 9, lineHeight: 1.5 }}>
-                  {selectedWarning}
-                </span>
-              </div>
-              {calibrationMessage ? (
-                <div
-                  style={{
-                    borderRadius: 8,
-                    border: `1px solid ${
-                      calibrationStatus === "success"
-                        ? "rgba(34,197,94,0.4)"
-                        : calibrationStatus === "warning" || calibrationStatus === "error"
-                          ? "rgba(255,69,0,0.35)"
-                          : "rgba(255,255,255,0.12)"
-                    }`,
-                    background:
-                      calibrationStatus === "success"
-                        ? "rgba(34,197,94,0.08)"
-                        : calibrationStatus === "warning" || calibrationStatus === "error"
-                          ? "rgba(255,69,0,0.08)"
-                          : "rgba(255,255,255,0.04)",
-                    color: calibrationStatusColor,
-                    fontSize: 9,
-                    lineHeight: 1.5,
-                    padding: "7px 8px",
-                  }}
-                >
-                  {calibrationMessage}
-                </div>
-              ) : null}
-
               <button
                 type="button"
                 onClick={() => setShowAdvancedLatency((v) => !v)}
@@ -1284,7 +1200,7 @@ function SettingsModal({
                       <input
                         type="range"
                         min={0}
-                        max={120}
+                        max={200}
                         value={rtlCompensation}
                         onChange={(e) => handlers.onLatencyMsChange(Number(e.target.value))}
                         style={{
@@ -1296,7 +1212,7 @@ function SettingsModal({
                           WebkitAppearance: "none",
                           borderRadius: 9999,
                           outline: "none",
-                          background: `linear-gradient(to right,${ORANGE} ${(rtlCompensation / 120) * 100}%,rgba(255,255,255,0.08) ${(rtlCompensation / 120) * 100}%)`,
+                          background: `linear-gradient(to right,${ORANGE} ${(rtlCompensation / 200) * 100}%,rgba(255,255,255,0.08) ${(rtlCompensation / 200) * 100}%)`,
                         }}
                       />
                       <span
@@ -1784,6 +1700,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   metronome,
   studioAudioContextRef,
   activeStreamsMapRef,
+  soloTrackSlotUiLatestRef,
 }: KiteLoopV4PanelProps): React.JSX.Element {
   const timing = looperConfig.kiteIntervalTimingRef.current;
 
@@ -1795,26 +1712,75 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [calibrationDismissed, setCalibrationDismissed] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const webcamFrameRef = useRef<HTMLDivElement>(null);
+  const videoAspectRatioRef = useRef(WEBCAM_FRAME_FALLBACK_ASPECT);
+  const trackFillRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [videoAspectRatio, setVideoAspectRatio] = useState<number | null>(null);
-  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+
+  const applyWebcamFrameLayout = useCallback(() => {
+    const frameEl = webcamFrameRef.current;
+    if (!frameEl) return;
+    const layout = getWebcamFrameLayoutStyle(
+      videoAspectRatioRef.current,
+      window.innerWidth,
+      window.innerHeight
+    );
+    frameEl.style.aspectRatio = String(layout.aspectRatio ?? "");
+    frameEl.style.maxWidth = layout.maxWidth as string;
+    frameEl.style.maxHeight = layout.maxHeight as string;
+    frameEl.style.borderRadius = String(layout.borderRadius ?? "");
+    frameEl.style.overflow = layout.overflow as string;
+    frameEl.style.boxShadow = layout.boxShadow as string;
+    if (layout.width) frameEl.style.width = layout.width as string;
+    if (layout.height) frameEl.style.height = layout.height as string;
+  }, []);
+
+  const registerTrackFillEl = useCallback(
+    (trackIndex: 1 | 2 | 3 | 4, el: HTMLDivElement | null) => {
+      if (el) {
+        trackFillRefs.current.set(trackIndex, el);
+      } else {
+        trackFillRefs.current.delete(trackIndex);
+      }
+    },
+    []
+  );
 
   const handleVideoMetadata = useCallback(() => {
     const el = videoRef.current;
     if (!el || el.videoWidth <= 0 || el.videoHeight <= 0) return;
-    setVideoAspectRatio(el.videoWidth / el.videoHeight);
-  }, []);
+    videoAspectRatioRef.current = el.videoWidth / el.videoHeight;
+    applyWebcamFrameLayout();
+  }, [applyWebcamFrameLayout]);
 
-  useLayoutEffect(() => {
-    const updateViewportSize = (): void => {
-      setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+  useEffect(() => {
+    let rafId = 0;
+    const tick = (): void => {
+      const slots = soloTrackSlotUiLatestRef.current;
+      for (let trackIndex = 1; trackIndex <= 4; trackIndex += 1) {
+        const fillEl = trackFillRefs.current.get(trackIndex);
+        if (!fillEl) continue;
+        const slot = slots?.find((s) => s.trackIndex === trackIndex);
+        const scaleY = laneFillScaleFromSlot(slot);
+        fillEl.style.transform = `scaleY(${scaleY})`;
+      }
+      rafId = requestAnimationFrame(tick);
     };
-    updateViewportSize();
-    window.addEventListener("resize", updateViewportSize);
-    return () => window.removeEventListener("resize", updateViewportSize);
-  }, []);
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [soloTrackSlotUiLatestRef]);
+
+  useEffect(() => {
+    if (!isCameraActive) return;
+    const onResize = (): void => {
+      applyWebcamFrameLayout();
+    };
+    window.addEventListener("resize", onResize);
+    applyWebcamFrameLayout();
+    return () => window.removeEventListener("resize", onResize);
+  }, [isCameraActive, applyWebcamFrameLayout]);
 
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
@@ -1836,15 +1802,17 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     }
   }, [cameraStream, isCameraActive]);
 
-  /** Webcam is UI-only aesthetic; stream must not be forwarded to audio / page.tsx. */
   useEffect(() => {
     const el = videoRef.current;
     if (el) el.srcObject = cameraStream;
-  }, [cameraStream]);
+    if (cameraStream) {
+      requestAnimationFrame(() => applyWebcamFrameLayout());
+    }
+  }, [cameraStream, applyWebcamFrameLayout]);
 
   useEffect(() => {
     if (!cameraStream) {
-      setVideoAspectRatio(null);
+      videoAspectRatioRef.current = WEBCAM_FRAME_FALLBACK_ASPECT;
     }
   }, [cameraStream]);
 
@@ -1876,7 +1844,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     Math.min(16, Math.round(looperConfig.kiteSetupTimeSignatureTop) || 4),
   );
   const showCalibrationOnboarding =
-    looperState.showCalibrationOnboardingHint &&
+    (looperState.showCalibrationOnboardingHint || looperState.latencyCalibrationStale) &&
     !calibrationDismissed &&
     !settingsOpen &&
     !inputsOpen &&
@@ -1914,12 +1882,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     return "WEBCAM OFF";
   };
 
-  const webcamFrameAspect = videoAspectRatio ?? WEBCAM_FRAME_FALLBACK_ASPECT;
-  const webcamFrameStyle = getWebcamFrameLayoutStyle(
-    webcamFrameAspect,
-    viewportSize.width,
-    viewportSize.height,
-  );
+  const webcamFrameAspect = videoAspectRatioRef.current;
 
   return (
     <div
@@ -1946,12 +1909,17 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           pointerEvents: "none",
           zIndex: 0,
           background: STUDIO_GLOW_STAGE_BG,
-          opacity: isCameraActive ? 1 : 0,
-          transition: "opacity 0.25s ease",
         }}
       >
         {isCameraActive ? (
-          <div style={webcamFrameStyle}>
+          <div
+            ref={webcamFrameRef}
+            style={getWebcamFrameLayoutStyle(
+              webcamFrameAspect,
+              typeof window !== "undefined" ? window.innerWidth : 0,
+              typeof window !== "undefined" ? window.innerHeight : 0
+            )}
+          >
             <video
               ref={videoRef}
               autoPlay
@@ -2244,7 +2212,11 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         <div style={{ position: "relative", width: "100%", maxWidth: 580 }}>
           <div style={{ display: "flex", gap: 8, width: "100%" }}>
             {looperState.soloTrackLanes.map((lane) => (
-              <TrackColumn key={lane.trackIndex} lane={lane} />
+              <TrackColumn
+                key={lane.trackIndex}
+                lane={lane}
+                registerTrackFillEl={registerTrackFillEl}
+              />
             ))}
           </div>
           {showCalibrationOnboarding ? (
@@ -2274,10 +2246,14 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 }}
               >
                 <div style={{ color: "rgba(255,255,255,0.78)", fontSize: 12, fontWeight: 600 }}>
-                  Latency not calibrated yet
+                  {looperState.latencyCalibrationStale
+                    ? "Latency calibration is stale"
+                    : "Latency not calibrated yet"}
                 </div>
                 <div style={{ color: "rgba(255,255,255,0.52)", fontSize: 10, lineHeight: 1.5 }}>
-                  Calibrate once for tighter loop timing on this device.
+                  {looperState.latencyCalibrationStale
+                    ? "Audio hardware changed. Re-calibrate in Settings for tighter loop timing."
+                    : "Calibrate once for tighter loop timing on this device."}
                 </div>
                 <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
                   <button

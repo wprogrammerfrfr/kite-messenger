@@ -17,6 +17,7 @@ import { StudioPreflightLobby } from "@/components/studio-bridge/StudioPreflight
 import dynamic from "next/dynamic";
 import type { KiteLoopV4InputDevicesProps, SoloTrackLaneView } from "@/components/kite-loop-v2/KiteLoopV4Panel";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
+import { isSoloLatencyEntryAllowed } from "@/lib/solo-latency-persistence";
 import { useKiteStudioEngine } from "@/hooks/useKiteStudioEngine";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
 import {
@@ -300,6 +301,9 @@ export default function StudioBridgePage() {
   const soloInputGain = engineState.soloInputGain;
   const soloLatencyCalibrationStatus = engineState.soloLatencyCalibrationStatus;
   const soloLatencyCalibrationMessage = engineState.soloLatencyCalibrationMessage;
+  const soloLatencyCalibrationStale = engineState.soloLatencyCalibrationStale;
+  const soloLatencyStaleMessage = engineState.soloLatencyStaleMessage;
+  const soloLatencyLastRawMeasuredMs = engineState.soloLatencyLastRawMeasuredMs;
   const soloLooperMode = engineState.soloLooperMode;
   const soloLooperBarCount = engineState.soloLooperBarCount;
   const isMasterPaused = engineState.isMasterPaused;
@@ -434,6 +438,7 @@ export default function StudioBridgePage() {
   const localMonitorAudioRef = engineRefs.localMonitorAudioRef;
   const metronomeBlinkElementRef = engineRefs.metronomeBlinkElementRef;
   const soloMeterElementRef = engineRefs.soloMeterElementRef;
+  const soloTrackSlotUiLatestRef = engineRefs.soloTrackSlotUiLatestRef;
 
   const localJamSetupOwnerId = user?.id ?? `${role ?? "unknown"}:${sessionId ?? "local"}`;
   const isInStudioPhase = studioUiPhase === "studio";
@@ -444,10 +449,40 @@ export default function StudioBridgePage() {
     Boolean(localMicStream) &&
     audioTestDone &&
     kiteSignalSecure;
+  const entryLatencyMs = soloLatencyLastRawMeasuredMs ?? soloLooperLatencyMs;
+  const soloLatencyEntryAllowed = isSoloLatencyEntryAllowed(entryLatencyMs);
+  const soloLatencyReady =
+    soloLooperLatencyMs > 0 &&
+    !soloLatencyCalibrationStale &&
+    soloLatencyEntryAllowed;
   const canPracticeAlone =
     studioUiPhase === "lobby" &&
     Boolean(localMicStream) &&
-    audioTestDone;
+    audioTestDone &&
+    soloLatencyReady &&
+    soloLatencyCalibrationStatus !== "listening";
+
+  const soloPracticeButtonLabel = ((): string => {
+    if (canPracticeAlone) {
+      return "Kite loopstation";
+    }
+    if (soloLatencyCalibrationStatus === "listening") {
+      return "Calibrating latency…";
+    }
+    if (!localMicStream || !audioTestDone) {
+      return "Complete preflight checks to enable session entry";
+    }
+    if (soloLooperLatencyMs <= 0) {
+      return "Calibrate latency in Session panel";
+    }
+    if (soloLatencyCalibrationStale) {
+      return "Re-calibrate latency — audio hardware changed";
+    }
+    if (!soloLatencyEntryAllowed) {
+      return "Latency out of bounds. Re-calibrate";
+    }
+    return "Complete preflight checks to enable session entry";
+  })();
   const showLobbyControls = studioUiPhase === "lobby";
   const localJamSetupOwnerName = role === "host" ? "Host" : "Bandmate";
   const canControlStop = !syncInitiatorId || syncInitiatorId === localJamSetupOwnerId;
@@ -983,6 +1018,15 @@ export default function StudioBridgePage() {
               handleEnterStudio={handleEnterStudio}
               canPracticeAlone={canPracticeAlone}
               handleEnterSoloStudio={handleEnterSoloStudio}
+              soloPracticeButtonLabel={soloPracticeButtonLabel}
+              soloLooperLatencyMs={soloLooperLatencyMs}
+              soloLatencyEntryMs={entryLatencyMs}
+              soloLatencyCalibrationStale={soloLatencyCalibrationStale}
+              soloLatencyStaleMessage={soloLatencyStaleMessage}
+              soloLatencyCalibrationStatus={soloLatencyCalibrationStatus}
+              soloLatencyCalibrationMessage={soloLatencyCalibrationMessage}
+              onCalibrateSoloLatency={handleAutoCalibrateSoloLatency}
+              calibrationDisabled={micPermissionDenied || !localMicStream}
             />
           ) : studioUiPhase === "kite-setup" ? (
             <motion.div
@@ -2002,6 +2046,7 @@ export default function StudioBridgePage() {
             focusedTrackIndex,
             soloTrackLanes,
             showCalibrationOnboardingHint: soloLooperLatencyMs <= 0,
+            latencyCalibrationStale: soloLatencyCalibrationStale,
           }}
           looperConfig={{
             loopMode: soloLooperMode,
@@ -2026,6 +2071,9 @@ export default function StudioBridgePage() {
             onAutoCalibrateLatency: handleAutoCalibrateSoloLatency,
             autoCalibrateLatencyStatus: soloLatencyCalibrationStatus,
             autoCalibrateLatencyMessage: soloLatencyCalibrationMessage,
+            latencyCalibrationStale: soloLatencyCalibrationStale,
+            latencyStaleMessage: soloLatencyStaleMessage,
+            entryLatencyMs,
             onTempoSliderChange: (v) => {
               setKiteSetupTempo(v);
               broadcastWizardStudioParam({ kiteSetupTempo: v, bpm: v });
@@ -2058,6 +2106,7 @@ export default function StudioBridgePage() {
           }}
           studioAudioContextRef={studioAudioContextRef}
           activeStreamsMapRef={activeStreamsMapRef}
+          soloTrackSlotUiLatestRef={soloTrackSlotUiLatestRef}
         />
         </div>
       ) : null}

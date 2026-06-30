@@ -1,8 +1,21 @@
 # Kite Studio — Audio Engine Sync Diagnostic
 
-**Date:** 2026-06-27  
+**Date:** 2026-06-27 (updated 2026-06-29)  
 **Scope:** Post–UI-loading optimization drift in Grid/Free looper modes  
-**Verdict:** Hypothesis **partially confirmed**. The worklet sample clock is not wrong, but **Grid/Free transport anchors cross the React bridge using main-thread timing**, and startup currently **overlaps heavy UI work with engine bootstrap and first transport commands**. Handsfree avoids this by keeping handoffs inside `process()`.
+**Verdict:** Hypothesis **confirmed**. The worklet sample clock is not wrong, but **Grid/Free transport anchors cross the React bridge using main-thread timing**, and startup **overlapped heavy UI work with engine bootstrap and first transport commands**. Handsfree avoids this by keeping handoffs inside `process()`.
+
+---
+
+## Historical regression audit
+
+| Item | Value |
+|------|-------|
+| Stable Vercel deployment | `dpl_8cMJxfbo1EQfUhnmERxA9dcFK1si` |
+| Stable git commit | **`6ff1722`** (handsfree mode, 2026-06-27 18:46:44 +0300) |
+| Regression commit | **`e31a944`** (new landing ui, 2026-06-29) — `useKiteStudioEngine` + `KiteLoopV4Panel` diffs |
+| Worklet | **`solo-looper-processor.js` identical** stable → HEAD — not the drift source |
+
+**Fix status (2026-06-29):** Engine bootstrap before studio UI phase; PLAYBACK_UI_STATE cursor isolation + ref-driven lane fills; panel perf without visual rollback; hardened Free stop anchor.
 
 ---
 
@@ -11,10 +24,24 @@
 | Mode | Transport authority | Drift risk |
 |------|---------------------|------------|
 | **Handsfree** | Worklet-only (`beginHandsfreeRecordingAtBoundary`) | Low |
-| **Grid** | Main → Worklet via `recordStartContextSec`, `targetLengthFrames`, pedal stop | **High at startup** |
-| **Free** | Main → Worklet via `recordStartContextSec` (start) + `stopAtContextSec` (stop) | **High at start + stop** |
+| **Grid** | Main → Worklet via `recordStartContextSec`, `targetLengthFrames`, pedal stop | **High at startup** (pre-fix) |
+| **Free** | Main → Worklet via `recordStartContextSec` (start) + `stopAtContextSec` (stop) | **High at start + stop** (pre-fix) |
 
 The worklet does **not** use `performance.now()` or `Date.now()`. Drift comes from **when** main thread posts messages and **what** `AudioContext.currentTime` values it stamps.
+
+---
+
+## UI preservation contract (do not regress)
+
+New loopstation UI from `e31a944` must remain intact when fixing timing:
+
+- Studio glow letterbox (`STUDIO_GLOW_*`), webcam aspect frame + shadow
+- Red idle Record Session button (`SESSION_COLORS.idle` `#ef4444`)
+- Handsfree Mode toggle, calibration under BPM column
+- Grid T1 metronome after auto-stop; Free T1 commit skips metronome stop
+- `computeGridTargetLengthFrames`, `freePedalStopContextSecRef`, PLAYBACK_UI_STATE throttle fallback
+
+**Out of scope:** landing page, auth, chat shell, worklet, P2P/Kite Sync.
 
 ---
 
@@ -39,8 +66,8 @@ Page mount (studio-bridge)
 User: Enter Solo Studio (handleEnterSoloStudio)
   ├─ ctx.resume()
   ├─ await rebuildMixerAndReplaceTrack()
-  ├─ setStudioUiPhase("studio")              ⚠️ UI FIRST (pre-fix)
-  └─ await ensureSoloLooperEngineBootstrapped()
+  ├─ await ensureSoloLooperEngineBootstrapped()   ✅ post-fix
+  └─ setStudioUiPhase("studio")
 
 User: Record (handleRecordFirstLoop)
   ├─ await startLooperRunway (metronome pump)
@@ -54,10 +81,10 @@ User: Record (handleRecordFirstLoop)
 
 | Call site | Sync impact |
 |-----------|-------------|
-| `setStudioUiPhase("studio")` before bootstrap | KiteLoopV4Panel hydrate + RAF loops compete with engine init |
+| `setStudioUiPhase("studio")` before bootstrap (pre-fix) | KiteLoopV4Panel hydrate + RAF loops compete with engine init |
 | `scheduleSoloCountInDownbeat` | RAF polling — late downbeat if main thread busy |
 | `await startSoloLooper` on GO | START_RECORDING posted after anchor time |
-| `commitActiveRecording` (Free) | `stopAtContextSec: ctx.currentTime` at pedal-up |
+| `commitActiveRecording` (Free) | `stopAtContextSec` from `freePedalStopContextSecRef` at pedal keydown |
 
 ---
 
@@ -65,23 +92,31 @@ User: Record (handleRecordFirstLoop)
 
 **Grid:** `recordStartContextSec` deferred start; auto-stop via `targetLengthFrames` in worklet (stable after arm).
 
-**Free:** stop boundary = main-thread `ctx.currentTime` at pedal handler — sensitive to event-loop delay.
+**Free:** stop boundary = `freePedalStopContextSecRef` sampled at earliest pedal keydown — sensitive to event-loop delay before sample.
 
 **Handsfree:** `beginHandsfreeRecordingAtBoundary` runs in same `process()` frame as finalize — no port round-trip for T2–T4.
 
 ---
 
-## Proposed Fix Summary
+## React bridge (post-fix)
 
-1. Bootstrap engine before `setStudioUiPhase("studio")`
-2. Prefetch idle engine during preflight lobby
-3. `LOOP_WARMED` handshake in worklet + `awaitWarmup()` in bridge
-4. Replace RAF downbeat with metronome pump callback
-5. Split `startSoloLooper` — sync `fireSoloLooperRecording` on downbeat
-6. Audio-aligned Free mode stop anchor (optional)
-7. Throttle startup RAF/port traffic
+| Path | Behavior |
+|------|----------|
+| `PLAYBACK_UI_STATE` | `soloTrackSlotUiLatestRef` always updated; `setSoloTrackSlotUi` only on mode / interval / gain change |
+| Lane fill animation | Ref-driven `scaleY` in panel rAF (reads latest ref snapshot) |
+| `loopProgress` state | Secondary; lane UI does not depend on it |
 
-See `.cursor/plans/audio_sync_startup_fix_7e4a8729.plan.md` for implementation batches.
+---
+
+## Proposed Fix Summary (implemented / remaining)
+
+1. ✅ Bootstrap engine before `setStudioUiPhase("studio")`
+2. ✅ PLAYBACK_UI_STATE structural isolation + ref-driven lane fills
+3. ✅ Panel perf without glow rollback (resize ref layout, camera-only frame DOM)
+4. ✅ Harden Free stop anchor (`onPedalDownPrepare` capture sampling)
+5. Prefetch idle engine during preflight lobby (future)
+6. `LOOP_WARMED` handshake (future)
+7. Replace RAF downbeat with metronome pump callback (future)
 
 ---
 
@@ -89,12 +124,25 @@ See `.cursor/plans/audio_sync_startup_fix_7e4a8729.plan.md` for implementation b
 
 Run `npm run build && npm run start`.
 
+### Audio
+
 | Check | Pass criteria |
 |-------|---------------|
 | Grid Track 1 start | Loop boundary aligns with metronome (±1 quantum) under CPU throttle |
 | Grid overdub T2 | Locks to master downbeat |
 | Free mode | Loop length stable across 3 pedal cycles |
 | Handsfree T1→T4 | No regression |
+| Grid metronome | Audible after T1 auto-stop |
 | P2P/Kite Sync | Host/guest jam unchanged |
+
+### UI (no regressions)
+
+| Check | Pass criteria |
+|-------|---------------|
+| Studio enter | Glow letterbox visible |
+| Webcam toggle | Frame + shadow on picture; glow remains when off |
+| Record Session idle | Red text/border |
+| Settings Grid/Handsfree | Mutual exclusivity, Bar Count |
+| Lane progress | Smooth fill during record/play |
 
 Test sequence: localhost Chrome 2 tabs → same WiFi 2 devices → cross-network → restrictive campus WiFi.
