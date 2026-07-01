@@ -1,5 +1,7 @@
+import "@/components/kite-studio/landing-scoped.css";
 import type { Metadata } from "next";
 import Link from "next/link";
+import { KiteStudioLandingFooter } from "@/components/kite-studio/KiteStudioLandingFooter";
 
 const description =
   "How Kite Studio handles your data: peer-to-peer jam sessions, Supabase authentication, and what we do not store on our servers.";
@@ -226,6 +228,9 @@ export default function PrivacyPolicyPage() {
             Back to Kite Studio
           </Link>
         </div>
+      </div>
+      <div className="kite-studio-landing">
+        <KiteStudioLandingFooter privacyPage />
       </div>
     </main>
   );

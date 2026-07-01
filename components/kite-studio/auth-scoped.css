@@ -1,0 +1,44 @@
+/**
+ * Kite Studio sign-in — scoped styles only.
+ * Import from app/signin/page.tsx only.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap");
+
+.kite-studio-auth {
+  box-sizing: border-box;
+  font-family: "Sora", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  caret-color: transparent;
+  user-select: none;
+}
+
+.kite-studio-auth *,
+.kite-studio-auth *::before,
+.kite-studio-auth *::after {
+  box-sizing: border-box;
+}
+
+.kite-studio-auth input::placeholder {
+  color: #6b6b72;
+}
+
+.kite-studio-auth input,
+.kite-studio-auth textarea {
+  caret-color: auto;
+  user-select: text;
+}
+
+.kite-studio-auth ::selection {
+  background: rgba(255, 69, 0, 0.33);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-studio-auth *,
+  .kite-studio-auth *::before,
+  .kite-studio-auth *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -56,7 +56,7 @@ function createSupabaseMiddlewareClient(
 /**
  * Public routes (no server-side auth redirect): `/`, `/welcome`, static files.
  * Legacy chat/discovery/profile routes redirect to `/` or `/studio-bridge`.
- * Unauthenticated studio access redirects to `/?mode=login`.
+ * Unauthenticated studio access redirects to `/signin?mode=login`.
  * Studio routes require a valid Supabase session before page assets are served.
  */
 export async function middleware(request: NextRequest) {
@@ -86,6 +86,7 @@ export async function middleware(request: NextRequest) {
   const isPublic =
     pathname === "/" ||
     pathname === "/welcome" ||
+    pathname === "/signin" ||
     pathname.startsWith("/auth/") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api") ||
@@ -105,7 +106,7 @@ export async function middleware(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    const loginUrl = new URL("/", request.url);
+    const loginUrl = new URL("/signin", request.url);
     loginUrl.searchParams.set("mode", "login");
     loginUrl.searchParams.set("next", `${pathname}${search}`);
     return NextResponse.redirect(loginUrl, 307);

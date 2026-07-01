@@ -1,4 +1,4 @@
-import "@/components/kite-studio/welcome-scoped.css";
+import "@/components/kite-studio/landing-scoped.css";
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import WelcomePage from "@/components/WelcomePage";

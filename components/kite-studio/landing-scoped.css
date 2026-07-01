@@ -1,0 +1,86 @@
+/**
+ * Kite Studio landing — scoped styles only.
+ * Every rule is prefixed under .kite-studio-landing to prevent bleed into /studio or /signin.
+ * Import from app/page.tsx only.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap");
+
+.kite-studio-landing {
+  --orange: #ff4500;
+  --orange-soft: #ff7a45;
+  --teal: #1a9e8f;
+  --teal-soft: #2fcbb8;
+  --ink: #050506;
+  --paper: #f5f1e8;
+  --mute: #9a9aa2;
+
+  box-sizing: border-box;
+  min-height: 100vh;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: "Sora", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  caret-color: transparent;
+  user-select: none;
+}
+
+.kite-studio-landing *,
+.kite-studio-landing *::before,
+.kite-studio-landing *::after {
+  box-sizing: border-box;
+}
+
+.kite-studio-landing ::selection {
+  background: rgba(255, 69, 0, 0.33);
+}
+
+.kite-studio-landing ::-webkit-scrollbar {
+  width: 4px;
+}
+
+.kite-studio-landing ::-webkit-scrollbar-track {
+  background: var(--ink);
+}
+
+.kite-studio-landing ::-webkit-scrollbar-thumb {
+  background: rgba(255, 69, 0, 0.3);
+  border-radius: 99px;
+}
+
+.kite-studio-landing input::placeholder {
+  color: #6b6b72;
+}
+
+.kite-studio-landing input:focus {
+  border-color: rgba(26, 158, 143, 0.53) !important;
+}
+
+@keyframes kiteMarquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.kite-studio-landing .kite-marquee {
+  animation: kiteMarquee 26s linear infinite;
+  width: max-content;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-studio-landing .kite-marquee {
+    animation: none;
+  }
+
+  .kite-studio-landing *,
+  .kite-studio-landing *::before,
+  .kite-studio-landing *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
