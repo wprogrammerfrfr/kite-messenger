@@ -184,6 +184,7 @@ export type SoloLooperEngine = {
   inputGain: GainNode;
   inputAnalyserNode: AnalyserNode;
   outputGain: GainNode;
+  recordingPlaybackDelayNode: DelayNode;
   recordingDestination: MediaStreamAudioDestinationNode;
   /** Loop-station playback only (no raw mic tap) for session export. */
   stationMixDestination: MediaStreamAudioDestinationNode;
@@ -224,6 +225,8 @@ export type SoloLooperEngine = {
   startRecording(params?: SoloLooperStartRecordingParams): void;
   stop(): void;
   reset(): void;
+  /** Delay loop playback on the session recording bus only (aligns with finalize-shifted buffers). */
+  setRecordingLatencyCompensation(latencyMs: number): void;
   teardown(): void;
 };
 
@@ -275,6 +278,15 @@ function clampGain(value: number | undefined): number {
   return Math.min(4, Math.max(0, value as number));
 }
 
+const RECORDING_PLAYBACK_DELAY_MAX_SEC = 2.0;
+const RECORDING_LATENCY_COMPENSATION_MAX_SEC = 1.5;
+
+function clampRecordingLatencyDelaySec(latencyMs: number): number {
+  if (!Number.isFinite(latencyMs)) return 0;
+  const sec = Math.max(0, latencyMs) / 1000;
+  return Math.min(RECORDING_LATENCY_COMPENSATION_MAX_SEC, sec);
+}
+
 /** Prefer "discrete" so multi-channel interface inputs are not mixed down by speaker layouts before the worklet. */
 function preserveDiscreteInputChannels(node: AudioNode): void {
   try {
@@ -322,6 +334,8 @@ export async function buildSoloLooperEngine(
   inputAnalyserNode.fftSize = 256;
 
   const outputGain = ctx.createGain();
+  const recordingPlaybackDelayNode = ctx.createDelay(RECORDING_PLAYBACK_DELAY_MAX_SEC);
+  recordingPlaybackDelayNode.delayTime.value = 0;
   const recordingDestination = ctx.createMediaStreamDestination();
   const stationMixDestination = ctx.createMediaStreamDestination();
   const recordingMicGainNode = ctx.createGain();
@@ -381,7 +395,8 @@ export async function buildSoloLooperEngine(
   inputAnalyserNode.connect(workletNode);
   workletNode.connect(outputGain);
   outputGain.connect(options.destinationNode);
-  outputGain.connect(recordingDestination);
+  outputGain.connect(recordingPlaybackDelayNode);
+  recordingPlaybackDelayNode.connect(recordingDestination);
   outputGain.connect(stationMixDestination);
   // Split-Mix: raw mic is captured to tape only. Headphones receive loop/worklet output
   // through monitorDestination; direct hardware monitoring handles zero-latency live foldback.
@@ -512,6 +527,7 @@ export async function buildSoloLooperEngine(
     inputGain,
     inputAnalyserNode,
     outputGain,
+    recordingPlaybackDelayNode,
     recordingDestination,
     stationMixDestination,
     recordingMicGainNode,
@@ -648,6 +664,10 @@ export async function buildSoloLooperEngine(
       if (tornDown) return;
       workletNode.port.postMessage({ type: "RESET_LOOP" });
     },
+    setRecordingLatencyCompensation(latencyMs: number): void {
+      if (tornDown || ctx.state === "closed") return;
+      recordingPlaybackDelayNode.delayTime.value = clampRecordingLatencyDelaySec(latencyMs);
+    },
     teardown(): void {
       if (tornDown) return;
       tornDown = true;
@@ -692,6 +712,11 @@ export function teardownSoloLooperEngine(engine: SoloLooperEngine | null): void 
   }
   try {
     engine.outputGain.disconnect();
+  } catch {
+    /* ignore */
+  }
+  try {
+    engine.recordingPlaybackDelayNode.disconnect();
   } catch {
     /* ignore */
   }

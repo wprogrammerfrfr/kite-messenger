@@ -916,6 +916,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     writeSoloLatencyMs(soloLooperLatencyMs);
   }, [soloLooperLatencyMs]);
 
+  const applySoloRecordingLatencyCompensation = useCallback(() => {
+    soloLooperEngineRef.current?.setRecordingLatencyCompensation(
+      soloLooperLatencyMsRef.current
+    );
+  }, []);
+
+  useEffect(() => {
+    applySoloRecordingLatencyCompensation();
+  }, [soloLooperLatencyMs, applySoloRecordingLatencyCompensation]);
+
   useEffect(() => {
     soloLooperModeRef.current = soloLooperMode;
   }, [soloLooperMode]);
@@ -3797,10 +3807,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     });
     soloLooperEngineRef.current = engine;
     engine.setMetronomeGainNode(metronomeGainRef.current);
+    applySoloRecordingLatencyCompensation();
     soloLooperEventIntervalIdRef.current = bootstrapIntervalId;
     soloLooperEventSequenceNumberRef.current = bootstrapSequenceNumber;
     return engine;
   }, [
+    applySoloRecordingLatencyCompensation,
     ensureMasterDestinationNode,
     ensureStudioAudioContext,
     handleSoloLooperEvent,
@@ -3944,6 +3956,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         });
         soloLooperEngineRef.current = engine;
         engine.setMetronomeGainNode(metronomeGainRef.current);
+        applySoloRecordingLatencyCompensation();
       }
       soloLooperEventIntervalIdRef.current = intervalId;
       soloLooperEventSequenceNumberRef.current = sequenceNumber;
@@ -4078,6 +4091,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       setKiteMode(kiteSetupMode === "sync" ? "sync" : "solo");
     },
     [
+      applySoloRecordingLatencyCompensation,
       ensureMasterDestinationNode,
       ensureStudioAudioContext,
       handleSoloLooperEvent,
@@ -5165,6 +5179,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         });
         soloLooperEngineRef.current = engine;
         engine.setMetronomeGainNode(metronomeGainRef.current);
+        applySoloRecordingLatencyCompensation();
         soloLooperEventIntervalIdRef.current = bootstrapIntervalId;
         soloLooperEventSequenceNumberRef.current = bootstrapSequenceNumber;
       }
@@ -5178,6 +5193,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       );
     }
   }, [
+    applySoloRecordingLatencyCompensation,
     echoSafetyMode,
     ensureMasterDestinationNode,
     ensureStudioAudioContext,
