@@ -34,6 +34,7 @@ import type { LooperRunwayPhase } from "@/components/kite-loop-v2/LooperCountdow
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { SoloLatencyCalibrationPanel } from "@/components/studio-bridge/SoloLatencyCalibrationPanel";
 import type { SoloLooperMode, SoloLooperState } from "@/hooks/useKiteStudioEngine.types";
+import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
 import KiteTunerPanel from "@/components/studio-bridge/KiteTunerPanel";
 import { DEFAULT_INSTRUMENT_ID, type KiteTunerInstrumentId } from "@/hooks/useKiteTunerEngine";
 
@@ -54,6 +55,12 @@ export type SoloTrackLaneView = {
   isOverdubArmedWaiting?: boolean;
   /** True when engine ref says this lane is capturing (before worklet slot.mode catches up). */
   isEngineRecording?: boolean;
+  /** Grid/handsfree loop length in bars (lane-local). */
+  barCount: number;
+  barCountLocked: boolean;
+  barCountDisabled: boolean;
+  barCountOptions: readonly number[];
+  onBarCountChange: (bars: number) => void;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,7 +86,6 @@ export type KiteLoopV4LooperState = {
 
 export type KiteLoopV4LooperConfig = {
   loopMode: SoloLooperMode;
-  barCount: number;
   latencyMs: number;
   kiteSetupTempo: number;
   kiteSetupTimeSignatureTop: number;
@@ -96,7 +102,6 @@ export type KiteLoopV4LooperHandlers = {
   onStopAndResetSoloLooper: () => void;
   onEndSession: () => void;
   onLoopModeChange: (value: SoloLooperMode) => void;
-  onBarCountChange: (value: number) => void;
   onLatencyMsChange: (value: number) => void;
   onAutoCalibrateLatency: (mode: "acoustic" | "interface") => void;
   autoCalibrateLatencyStatus: "idle" | "warning" | "listening" | "success" | "error";
@@ -697,9 +702,90 @@ function resolveAmbientBackdropStyle(
 type TrackColumnProps = {
   lane: SoloTrackLaneView;
   registerTrackFillEl: (trackIndex: 1 | 2 | 3 | 4, el: HTMLDivElement | null) => void;
+  gridLikeMode: boolean;
 };
 
-function TrackColumn({ lane, registerTrackFillEl }: TrackColumnProps): React.JSX.Element {
+type BarCountStripProps = {
+  options: readonly number[];
+  value: number;
+  disabled: boolean;
+  locked: boolean;
+  onChange: (bars: number) => void;
+};
+
+function BarCountStrip({
+  options,
+  value,
+  disabled,
+  locked,
+  onChange,
+}: BarCountStripProps): React.JSX.Element | null {
+  if (locked) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 4,
+          width: "100%",
+          padding: "3px 0",
+          borderRadius: 7,
+          border: "1px solid rgba(255,255,255,0.08)",
+          background: "rgba(0,0,0,0.22)",
+          color: "rgba(255,255,255,0.32)",
+          fontSize: 9,
+          fontFamily: "monospace",
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        {value} bar{value === 1 ? "" : "s"}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 3,
+        width: "100%",
+        justifyContent: "center",
+        opacity: disabled ? 0.4 : 1,
+        pointerEvents: disabled ? "none" : "auto",
+      }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {options.map((b) => (
+        <button
+          key={b}
+          type="button"
+          disabled={disabled}
+          onClick={() => onChange(b)}
+          style={{
+            flex: options.length > 4 ? "1 1 26%" : 1,
+            minWidth: options.length > 4 ? 22 : undefined,
+            borderRadius: 6,
+            padding: options.length > 4 ? "3px 0" : "4px 0",
+            border: `1px solid ${value === b ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.09)"}`,
+            background: value === b ? "rgba(34,197,94,0.1)" : "transparent",
+            color: value === b ? EMERALD : "rgba(255,255,255,0.32)",
+            fontSize: options.length > 4 ? 9 : 10,
+            fontFamily: "monospace",
+            cursor: disabled ? "default" : "pointer",
+            transition: "all 0.18s",
+          }}
+        >
+          {b}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnProps): React.JSX.Element {
   const visual = mapLaneToRecVisual(lane);
   const cfg = REC_CFG[visual];
   const isPulsing = visual === "waiting";
@@ -801,6 +887,18 @@ function TrackColumn({ lane, registerTrackFillEl }: TrackColumnProps): React.JSX
       >
         {trackDisplayName(lane.trackIndex)}
       </span>
+
+      {gridLikeMode ? (
+        <div style={{ position: "relative", zIndex: 1, width: "100%" }}>
+          <BarCountStrip
+            options={lane.barCountOptions}
+            value={lane.barCount}
+            disabled={lane.barCountDisabled}
+            locked={lane.barCountLocked}
+            onChange={lane.onBarCountChange}
+          />
+        </div>
+      ) : null}
 
       <button
         type="button"
@@ -939,7 +1037,6 @@ function SettingsModal({
   const gridMode = cfg.loopMode === "grid";
   const handsfreeMode = cfg.loopMode === "handsfree";
   const gridLikeMode = gridMode || handsfreeMode;
-  const barCount = cfg.barCount;
   const rtlCompensation = cfg.latencyMs;
   const locked = cfg.isTimingLocked;
   const tap = (): void => {
@@ -1334,35 +1431,9 @@ function SettingsModal({
                 label="Handsfree Mode"
                 sublabel="Auto-record tracks 1→4 at loop boundaries"
               />
-              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 9 }}>Bar Count</span>
-                <div style={{ display: "flex", gap: 5 }}>
-                  {([1, 2, 4, 8] as const).map((b) => (
-                    <button
-                      key={b}
-                      type="button"
-                      disabled={!gridLikeMode}
-                      onClick={() => handlers.onBarCountChange(b)}
-                      style={{
-                        flex: 1,
-                        borderRadius: 8,
-                        padding: "6px 0",
-                        border: `1px solid ${barCount === b ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.09)"}`,
-                        background: barCount === b ? "rgba(34,197,94,0.1)" : gridLikeMode ? "transparent" : "rgba(0,0,0,0.2)",
-                        color:
-                          barCount === b ? EMERALD : gridLikeMode ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.15)",
-                        fontSize: 12,
-                        fontFamily: "monospace",
-                        cursor: gridLikeMode ? "pointer" : "default",
-                        opacity: gridLikeMode ? 1 : 0.4,
-                        transition: "all 0.18s",
-                      }}
-                    >
-                      {b}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 9, lineHeight: 1.45 }}>
+                Set bar length on each track lane below.
+              </span>
             </div>
           </div>
         </div>
@@ -1703,6 +1774,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   soloTrackSlotUiLatestRef,
 }: KiteLoopV4PanelProps): React.JSX.Element {
   const timing = looperConfig.kiteIntervalTimingRef.current;
+  const gridLikeMode =
+    looperConfig.loopMode === "grid" || looperConfig.loopMode === "handsfree";
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inputsOpen, setInputsOpen] = useState(false);
@@ -2216,6 +2289,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 key={lane.trackIndex}
                 lane={lane}
                 registerTrackFillEl={registerTrackFillEl}
+                gridLikeMode={gridLikeMode}
               />
             ))}
           </div>

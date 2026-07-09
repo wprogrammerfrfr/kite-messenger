@@ -89,7 +89,10 @@ export type KiteEngineState = {
   soloLooperMode: SoloLooperMode;
   /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
   handsfreeSequenceActive: boolean;
-  soloLooperBarCount: number;
+  /** Per-track bar counts (1–4 lanes); global BPM/time signature apply. */
+  soloTrackBarCounts: [number, number, number, number];
+  /** Locked after each track's first LOOP_READY — prevents mid-playback length edits. */
+  soloTrackBarCountsLocked: [boolean, boolean, boolean, boolean];
   isMasterPaused: boolean;
   soloSessionRecorderState: SoloSessionRecorderState;
   kiteSyncCountInActive: boolean;
@@ -181,7 +184,7 @@ export type KiteEngineActions = {
   goToPreviousKiteSetupStep: () => void;
   setSoloInputGain: (gain: number) => void;
   setSoloLooperMode: (mode: SoloLooperMode) => void;
-  setSoloLooperBarCount: (bars: number) => void;
+  setSoloTrackBarCount: (trackIndex: 1 | 2 | 3 | 4, bars: number) => void;
   setKiteSetupTempo: (bpm: number) => void;
   setKiteSetupTimeSignatureTop: (top: number) => void;
   setKiteSetupTimeSignatureBottom: (bottom: number) => void;

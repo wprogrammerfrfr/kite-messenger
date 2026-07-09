@@ -165,6 +165,13 @@ export type SoloLooperStartRecordingParams = {
   latencyOffsetFrames?: number;
   /** AudioContext.currentTime at which the worklet should declare the recording downbeat. */
   recordStartContextSec?: number;
+  /** Handsfree: per-track frame targets [T1, T2, T3, T4] set before sequence starts. */
+  handsfreeTrackTargets?: readonly [number, number, number, number];
+};
+
+export type SoloLooperSetTrackTargetLengthParams = {
+  trackIndex: number;
+  targetLengthFrames: number;
 };
 
 export type SoloLooperStopRecordingParams = {
@@ -205,6 +212,8 @@ export type SoloLooperEngine = {
   stopRecording(params: SoloLooperStopRecordingParams): void;
   /** Per-track wet gain (0–4) applied in the worklet summing bus. */
   setTrackGain(trackIndex: number, gain: number): void;
+  /** Store per-track grid/handsfree target frames (no buffer allocation). */
+  setTrackTargetLength(trackIndex: number, targetLengthFrames: number): void;
   /** Ask the worklet to post a `PLAYBACK_UI_STATE` snapshot (poll from rAF). */
   requestPlaybackUiState(): void;
   /** Freeze or resume all worklet transport without tearing down the node. */
@@ -587,6 +596,17 @@ export async function buildSoloLooperEngine(
       const g = Number.isFinite(linearGain) ? Math.max(0, Math.min(4, linearGain)) : 1;
       workletNode.port.postMessage({ type: "SET_TRACK_GAIN", trackIndex, gain: g });
     },
+    setTrackTargetLength(trackIndex: number, targetLengthFrames: number): void {
+      if (tornDown) return;
+      assertValidTrackIndex(trackIndex);
+      const frames = Math.floor(Number(targetLengthFrames));
+      if (!Number.isFinite(frames) || frames <= 0) return;
+      workletNode.port.postMessage({
+        type: "SET_TRACK_TARGET_LENGTH",
+        trackIndex,
+        targetLengthFrames: frames,
+      });
+    },
     requestPlaybackUiState(): void {
       if (tornDown) return;
       workletNode.port.postMessage({ type: "REQUEST_PLAYBACK_UI_STATE" });
@@ -653,6 +673,9 @@ export async function buildSoloLooperEngine(
           : {}),
         ...(params?.recordStartContextSec !== undefined
           ? { recordStartContextSec: params.recordStartContextSec }
+          : {}),
+        ...(params?.handsfreeTrackTargets !== undefined
+          ? { handsfreeTrackTargets: params.handsfreeTrackTargets }
           : {}),
       });
     },

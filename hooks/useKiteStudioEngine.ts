@@ -36,6 +36,11 @@ import {
   resolvePrimaryInputDeviceId,
 } from "@/lib/solo-latency-hardware";
 import {
+  computeTrackTargetLengthFrames,
+  getBarCountOptionsForTimeSignature,
+  isAllowedBarCount,
+} from "@/lib/looper-math";
+import {
   buildSoloLooperEngine,
   type SoloLooperEngine,
   type SoloLooperEngineEvent,
@@ -121,20 +126,6 @@ type RetainedKiteLoopBuffer = {
   channelCount: number;
   buffer: ArrayBuffer;
 };
-
-/** Matches worklet framesPerBeat × totalBeats grid quantization (see solo-looper-processor). */
-function computeGridTargetLengthFrames(
-  sampleRate: number,
-  bpm: number,
-  beatsPerBar: number,
-  barCount: number
-): number {
-  const effectiveBpm = Math.max(1, Math.round(bpm));
-  const sr = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 44100;
-  const framesPerBeat = Math.round(sr * (60 / effectiveBpm));
-  const totalBeats = Math.max(1, Math.round(beatsPerBar * barCount));
-  return Math.max(1, framesPerBeat * totalBeats);
-}
 
 /** Mode / length / gain — excludes cursors (updated via ref + panel rAF). */
 function slotsPlaybackUiStructuralEqual(
@@ -523,10 +514,19 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloLooperModeRef = useRef(soloLooperMode);
   const [handsfreeSequenceActive, setHandsfreeSequenceActive] = useState(false);
   const handsfreeSequenceActiveRef = useRef(false);
-  const [soloLooperBarCount, setSoloLooperBarCount] = useState<number>(1);
-  const soloLooperBarCountRef = useRef(soloLooperBarCount);
+  const [soloTrackBarCounts, setSoloTrackBarCounts] = useState<[number, number, number, number]>([
+    1, 1, 1, 1,
+  ]);
+  const soloTrackBarCountsRef = useRef(soloTrackBarCounts);
+  const [soloTrackBarCountsLocked, setSoloTrackBarCountsLocked] = useState<
+    [boolean, boolean, boolean, boolean]
+  >([false, false, false, false]);
+  const soloTrackBarCountsLockedRef = useRef(soloTrackBarCountsLocked);
+  /** Precomputed handsfree per-track frame targets for progress UI on lane advance. */
+  const handsfreeTrackTargetFramesRef = useRef<[number, number, number, number] | null>(null);
   const kiteSetupTempoRef = useRef(kiteSetupTempo);
   const kiteSetupTimeSignatureTopRef = useRef(kiteSetupTimeSignatureTop);
+  const kiteSetupTimeSignatureBottomRef = useRef(kiteSetupTimeSignatureBottom);
   /** Lane the spacebar / foot pedal arms (1–4); kept in sync with `soloPedalTargetTrackIndexRef`. */
   const [focusedTrackIndex, setFocusedTrackIndex] = useState<1 | 2 | 3 | 4>(1);
   /** Secondary track index (2–4) armed for quantized overdub; recording starts on Track 1 loop wrap. */
@@ -713,6 +713,48 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const syncHandsfreeSequenceActive = useCallback((active: boolean) => {
     handsfreeSequenceActiveRef.current = active;
     setHandsfreeSequenceActive(active);
+  }, []);
+
+  const lockSoloTrackBarCount = useCallback((trackIndex: number) => {
+    const idx = trackIndex - 1;
+    if (idx < 0 || idx > 3) return;
+    setSoloTrackBarCountsLocked((prev) => {
+      if (prev[idx]) return prev;
+      const next: [boolean, boolean, boolean, boolean] = [...prev];
+      next[idx] = true;
+      return next;
+    });
+  }, []);
+
+  const clearAllSoloTrackBarCountLocks = useCallback(() => {
+    setSoloTrackBarCountsLocked([false, false, false, false]);
+  }, []);
+
+  const setSoloTrackBarCount = useCallback((trackIndex: 1 | 2 | 3 | 4, bars: number) => {
+    if (
+      handsfreeSequenceActiveRef.current &&
+      soloLooperStateRef.current === "recording"
+    ) {
+      return;
+    }
+    const idx = trackIndex - 1;
+    if (soloTrackBarCountsLockedRef.current[idx]) return;
+    if (
+      !isAllowedBarCount(
+        bars,
+        kiteSetupTimeSignatureTopRef.current,
+        kiteSetupTimeSignatureBottomRef.current
+      )
+    ) {
+      return;
+    }
+    const normalized = Math.round(bars);
+    setSoloTrackBarCounts((prev) => {
+      if (prev[idx] === normalized) return prev;
+      const next: [number, number, number, number] = [...prev];
+      next[idx] = normalized;
+      return next;
+    });
   }, []);
 
   const loopProgressRafRef = useRef<number | null>(null);
@@ -931,8 +973,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [soloLooperMode]);
 
   useEffect(() => {
-    soloLooperBarCountRef.current = soloLooperBarCount;
-  }, [soloLooperBarCount]);
+    soloTrackBarCountsRef.current = soloTrackBarCounts;
+  }, [soloTrackBarCounts]);
+
+  useEffect(() => {
+    soloTrackBarCountsLockedRef.current = soloTrackBarCountsLocked;
+  }, [soloTrackBarCountsLocked]);
 
   useEffect(() => {
     kiteSetupTempoRef.current = kiteSetupTempo;
@@ -941,6 +987,33 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   useEffect(() => {
     kiteSetupTimeSignatureTopRef.current = kiteSetupTimeSignatureTop;
   }, [kiteSetupTimeSignatureTop]);
+
+  useEffect(() => {
+    kiteSetupTimeSignatureBottomRef.current = kiteSetupTimeSignatureBottom;
+  }, [kiteSetupTimeSignatureBottom]);
+
+  useEffect(() => {
+    const options = getBarCountOptionsForTimeSignature(
+      kiteSetupTimeSignatureTop,
+      kiteSetupTimeSignatureBottom
+    );
+    setSoloTrackBarCounts((prev) => {
+      const locked = soloTrackBarCountsLockedRef.current;
+      let changed = false;
+      const next: [number, number, number, number] = [...prev];
+      for (let i = 0; i < 4; i += 1) {
+        if (locked[i]) continue;
+        if (!options.includes(next[i])) {
+          const nearest = options.reduce((best, opt) =>
+            Math.abs(opt - next[i]) < Math.abs(best - next[i]) ? opt : best
+          );
+          next[i] = nearest;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [kiteSetupTimeSignatureTop, kiteSetupTimeSignatureBottom]);
 
   useEffect(() => {
     kiteModeRef.current = kiteMode;
@@ -3502,6 +3575,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             setLoopProgress(0);
             soloLooperStateRef.current = "idle";
             setSoloLooperState("idle");
+            clearAllSoloTrackBarCountLocks();
+          } else if (event.trackIndex !== undefined) {
+            setSoloTrackBarCountsLocked((prev) => {
+              const idx = event.trackIndex! - 1;
+              if (idx < 0 || idx > 3 || !prev[idx]) return prev;
+              const next: [boolean, boolean, boolean, boolean] = [...prev];
+              next[idx] = false;
+              return next;
+            });
           }
           if (soloOverdubArmedTrackIndexRef.current === event.trackIndex || event.trackIndex === 1) {
             soloOverdubArmedTrackIndexRef.current = null;
@@ -3581,12 +3663,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         const masterFrames = masterLoopIntervalFramesRef.current;
         const progressSampleRate =
           Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
+        const advancingTrackFrames =
+          handsfreeTrackTargetFramesRef.current?.[event.toTrack - 1] ?? null;
         const progressDurationSec =
-          masterFrames != null && masterFrames > 0
-            ? masterFrames / progressSampleRate
-            : loopProgressDurationSecRef.current > 0
-              ? loopProgressDurationSecRef.current
-              : 1;
+          advancingTrackFrames != null && advancingTrackFrames > 0
+            ? advancingTrackFrames / progressSampleRate
+            : masterFrames != null && masterFrames > 0
+              ? masterFrames / progressSampleRate
+              : loopProgressDurationSecRef.current > 0
+                ? loopProgressDurationSecRef.current
+                : 1;
         const anchorSec = ctx.currentTime;
         loopProgressAnchorContextSecRef.current = anchorSec;
         loopProgressDurationSecRef.current = progressDurationSec;
@@ -3709,6 +3795,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       syncActiveRecordTrackIndex(null);
       if (soloLooperStateRef.current !== "recording") return;
       const ti = event.trackIndex ?? 1;
+      lockSoloTrackBarCount(ti);
       if (soloLooperModeRef.current === "free") {
         const masterSlot = soloTrackSlotUiLatestRef.current?.find((s) => s.trackIndex === 1);
         logDriftDiagnostic("LOOP_READY", "free", {
@@ -3755,7 +3842,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloLooperStateRef.current = "captured";
       setSoloLooperState("captured");
     },
-    [cancelScheduledMetronomeClicks, sessionId, syncActiveRecordTrackIndex, syncHandsfreeSequenceActive, buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale]
+    [cancelScheduledMetronomeClicks, sessionId, syncActiveRecordTrackIndex, syncHandsfreeSequenceActive, buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale, lockSoloTrackBarCount, clearAllSoloTrackBarCountLocks]
   );
 
   const ensureSoloLooperEngineBootstrapped = useCallback(async (): Promise<SoloLooperEngine> => {
@@ -3990,6 +4077,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           Math.round((soloLooperLatencyMsRef.current / 1000) * startSampleRate)
         );
         let targetLengthFrames: number | undefined;
+        let handsfreeTrackTargets: [number, number, number, number] | undefined;
         if (soloLooperModeRef.current === "grid" || soloLooperModeRef.current === "handsfree") {
           const timingSnapshot = kiteIntervalTimingRef.current;
           const bpm = Math.max(
@@ -4014,19 +4102,51 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
                 4
             )
           );
-          const barCount = Math.max(1, Math.round(soloLooperBarCountRef.current || 1));
-          targetLengthFrames = computeGridTargetLengthFrames(
-            startSampleRate,
-            bpm,
-            beatsPerBar,
-            barCount
-          );
+          const tsTop = kiteSetupTimeSignatureTopRef.current;
+          const tsBottom = kiteSetupTimeSignatureBottomRef.current;
+          if (soloLooperModeRef.current === "handsfree") {
+            const targets: [number, number, number, number] = [0, 0, 0, 0];
+            for (let t = 0; t < 4; t += 1) {
+              const barCount = Math.max(1, Math.round(soloTrackBarCountsRef.current[t] || 1));
+              if (!isAllowedBarCount(barCount, tsTop, tsBottom)) {
+                return {
+                  loopMode: soloLooperModeRef.current,
+                  latencyOffsetFrames,
+                };
+              }
+              targets[t] = computeTrackTargetLengthFrames(
+                startSampleRate,
+                bpm,
+                beatsPerBar,
+                barCount
+              );
+            }
+            handsfreeTrackTargetFramesRef.current = targets;
+            handsfreeTrackTargets = targets;
+            targetLengthFrames = targets[0];
+          } else {
+            const recordTrackIndex = Math.max(
+              1,
+              Math.min(4, soloPedalTargetTrackIndexRef.current || 1)
+            );
+            const barCount = Math.max(
+              1,
+              Math.round(soloTrackBarCountsRef.current[recordTrackIndex - 1] || 1)
+            );
+            targetLengthFrames = computeTrackTargetLengthFrames(
+              startSampleRate,
+              bpm,
+              beatsPerBar,
+              barCount
+            );
+          }
         }
 
         return {
           loopMode: soloLooperModeRef.current,
           latencyOffsetFrames,
           ...(targetLengthFrames !== undefined ? { targetLengthFrames } : {}),
+          ...(handsfreeTrackTargets !== undefined ? { handsfreeTrackTargets } : {}),
         };
       };
 
@@ -4046,6 +4166,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         );
       }
       const startParams = buildStartRecordingParams();
+      if (
+        soloLooperModeRef.current === "handsfree" &&
+        startParams.handsfreeTrackTargets === undefined
+      ) {
+        return;
+      }
+      if (startParams.targetLengthFrames !== undefined) {
+        engine.setTrackTargetLength(1, startParams.targetLengthFrames);
+      }
       engine.startRecording({
         ...startParams,
         ...(hasRecordAnchor ? { recordStartContextSec: recordStartAt } : {}),
@@ -5238,8 +5367,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setLoopProgress(0);
     hasCapturedFirstKiteLoopRef.current = false;
     syncHandsfreeSequenceActive(false);
+    handsfreeTrackTargetFramesRef.current = null;
+    clearAllSoloTrackBarCountLocks();
     setKiteMode("solo");
-  }, [applyPedalFocus, cancelScheduledMetronomeClicks, cleanupKiteEngine, clearSoloRunwayDisplay, syncHandsfreeSequenceActive]);
+  }, [applyPedalFocus, cancelScheduledMetronomeClicks, cleanupKiteEngine, clearSoloRunwayDisplay, syncHandsfreeSequenceActive, clearAllSoloTrackBarCountLocks]);
 
   const handleSoloTrackVolumeChange = useCallback((trackIndex: 1 | 2 | 3 | 4, linear: number) => {
     const g = Math.max(0, Math.min(1, linear));
@@ -5292,6 +5423,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       engine.setPaused(false);
       soloOverdubArmedTrackIndexRef.current = null;
       setSoloOverdubArmedTrackIndex(null);
+      clearAllSoloTrackBarCountLocks();
       setSoloTrackSlotUi((prev) =>
         prev?.map((s) => ({
           ...s,
@@ -5306,6 +5438,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         soloOverdubArmedTrackIndexRef.current = null;
         setSoloOverdubArmedTrackIndex(null);
       }
+      setSoloTrackBarCountsLocked((prev) => {
+        const idx = trackIndex - 1;
+        if (!prev[idx]) return prev;
+        const next: [boolean, boolean, boolean, boolean] = [...prev];
+        next[idx] = false;
+        return next;
+      });
       setSoloTrackSlotUi((prev) =>
         prev?.map((s) =>
           s.trackIndex === trackIndex
@@ -5353,6 +5492,30 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           0,
           Math.round((soloLooperLatencyMsRef.current / 1000) * localSr)
         );
+        const timingSnapshot = kiteIntervalTimingRef.current;
+        const bpm = Math.max(
+          1,
+          Math.round(
+            timingSnapshot?.bpm ?? kiteSetupTempoRef.current ?? 120
+          )
+        );
+        const beatsPerBar = Math.max(
+          1,
+          Math.round(
+            timingSnapshot?.beatsPerBar ??
+              timingSnapshot?.timeSignatureTop ??
+              kiteSetupTimeSignatureTopRef.current ??
+              4
+          )
+        );
+        const barCount = Math.max(1, Math.round(soloTrackBarCountsRef.current[trackIndex - 1] || 1));
+        const targetFrames = computeTrackTargetLengthFrames(
+          localSr,
+          bpm,
+          beatsPerBar,
+          barCount
+        );
+        engine.setTrackTargetLength(trackIndex, targetFrames);
         engine.armOverdub({
           trackIndex,
           intervalFrames: maxProvisionFrames,
@@ -7580,7 +7743,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloLatencyLastRawMeasuredMs,
     soloLooperMode,
     handsfreeSequenceActive,
-    soloLooperBarCount,
+    soloTrackBarCounts,
+    soloTrackBarCountsLocked,
     isMasterPaused,
     soloSessionRecorderState,
     kiteSyncCountInActive,
@@ -7644,7 +7808,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloLatencyLastRawMeasuredMs,
       soloLooperMode,
       handsfreeSequenceActive,
-      soloLooperBarCount,
+      soloTrackBarCounts,
+      soloTrackBarCountsLocked,
       isMasterPaused,
       soloSessionRecorderState,
       kiteSyncCountInActive,
@@ -7692,7 +7857,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     goToPreviousKiteSetupStep,
     setSoloInputGain,
     setSoloLooperMode,
-    setSoloLooperBarCount,
+    setSoloTrackBarCount,
     setKiteSetupTempo,
     setKiteSetupTimeSignatureTop,
     setKiteSetupTimeSignatureBottom,
@@ -7751,7 +7916,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       goToPreviousKiteSetupStep,
       setSoloInputGain,
       setSoloLooperMode,
-      setSoloLooperBarCount,
+      setSoloTrackBarCount,
       setKiteSetupTempo,
       setKiteSetupTimeSignatureTop,
       setKiteSetupTimeSignatureBottom,

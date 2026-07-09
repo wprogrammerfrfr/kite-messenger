@@ -337,7 +337,8 @@ export default function StudioBridgePage() {
   const soloLatencyCalibrationStatus = engineState.soloLatencyCalibrationStatus;
   const soloLatencyCalibrationMessage = engineState.soloLatencyCalibrationMessage;
   const soloLooperMode = engineState.soloLooperMode;
-  const soloLooperBarCount = engineState.soloLooperBarCount;
+  const soloTrackBarCounts = engineState.soloTrackBarCounts;
+  const soloTrackBarCountsLocked = engineState.soloTrackBarCountsLocked;
   const isMasterPaused = engineState.isMasterPaused;
   const soloSessionRecorderState = engineState.soloSessionRecorderState;
   const kiteSyncCountInActive = engineState.kiteSyncCountInActive;
@@ -430,7 +431,7 @@ export default function StudioBridgePage() {
   const goToPreviousKiteSetupStep = engineActions.goToPreviousKiteSetupStep;
   const setSoloInputGain = engineActions.setSoloInputGain;
   const setSoloLooperMode = engineActions.setSoloLooperMode;
-  const setSoloLooperBarCount = engineActions.setSoloLooperBarCount;
+  const setSoloTrackBarCount = engineActions.setSoloTrackBarCount;
   const setKiteSetupTempo = engineActions.setKiteSetupTempo;
   const setKiteSetupTimeSignatureTop = engineActions.setKiteSetupTimeSignatureTop;
   const setKiteSetupTimeSignatureBottom = engineActions.setKiteSetupTimeSignatureBottom;

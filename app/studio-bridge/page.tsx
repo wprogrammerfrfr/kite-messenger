@@ -17,6 +17,7 @@ import { StudioPreflightLobby } from "@/components/studio-bridge/StudioPreflight
 import dynamic from "next/dynamic";
 import type { KiteLoopV4InputDevicesProps, SoloTrackLaneView } from "@/components/kite-loop-v2/KiteLoopV4Panel";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
+import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
 import { isSoloLatencyEntryAllowed } from "@/lib/solo-latency-persistence";
 import { useKiteStudioEngine } from "@/hooks/useKiteStudioEngine";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
@@ -305,7 +306,9 @@ export default function StudioBridgePage() {
   const soloLatencyStaleMessage = engineState.soloLatencyStaleMessage;
   const soloLatencyLastRawMeasuredMs = engineState.soloLatencyLastRawMeasuredMs;
   const soloLooperMode = engineState.soloLooperMode;
-  const soloLooperBarCount = engineState.soloLooperBarCount;
+  const soloTrackBarCounts = engineState.soloTrackBarCounts;
+  const soloTrackBarCountsLocked = engineState.soloTrackBarCountsLocked;
+  const handsfreeSequenceActive = engineState.handsfreeSequenceActive;
   const isMasterPaused = engineState.isMasterPaused;
   const soloSessionRecorderState = engineState.soloSessionRecorderState;
   const kiteSyncCountInActive = engineState.kiteSyncCountInActive;
@@ -389,7 +392,7 @@ export default function StudioBridgePage() {
   const goToPreviousKiteSetupStep = engineActions.goToPreviousKiteSetupStep;
   const setSoloInputGain = engineActions.setSoloInputGain;
   const setSoloLooperMode = engineActions.setSoloLooperMode;
-  const setSoloLooperBarCount = engineActions.setSoloLooperBarCount;
+  const setSoloTrackBarCount = engineActions.setSoloTrackBarCount;
   const setKiteSetupTempo = engineActions.setKiteSetupTempo;
   const setKiteSetupTimeSignatureTop = engineActions.setKiteSetupTimeSignatureTop;
   const setKiteSetupTimeSignatureBottom = engineActions.setKiteSetupTimeSignatureBottom;
@@ -544,6 +547,12 @@ export default function StudioBridgePage() {
     const soloTrackLanes = useMemo((): SoloTrackLaneView[] => {
     const slotMap = new Map<number, SoloLooperSlotRow>();
     soloTrackSlotUi?.forEach((s) => slotMap.set(s.trackIndex, s));
+    const barCountOptions = getBarCountOptionsForTimeSignature(
+      kiteSetupTimeSignatureTop,
+      kiteSetupTimeSignatureBottom
+    );
+    const barCountsDisabled =
+      handsfreeSequenceActive && soloLooperState === "recording";
     return [1, 2, 3, 4].map((n) => {
       const slot = slotMap.get(n);
       const progress = soloSlotProgressPct(slot);
@@ -563,18 +572,19 @@ export default function StudioBridgePage() {
         isMasterPaused ||
         isRecordingArmed ||
         (soloLooperState === "recording" && !isThisTrackRecording);
+      const trackIndex = n as 1 | 2 | 3 | 4;
       return {
-        trackIndex: n as 1 | 2 | 3 | 4,
+        trackIndex,
         volume: soloTrackVolumes[n - 1],
         progress,
         workletMode: slot?.mode ?? "idle",
-        onVolumeChange: (lin: number) => handleSoloTrackVolumeChange(n as 1 | 2 | 3 | 4, lin),
-        onArmRecord: () => handleTrackTransportTap(n as 1 | 2 | 3 | 4),
+        onVolumeChange: (lin: number) => handleSoloTrackVolumeChange(trackIndex, lin),
+        onArmRecord: () => handleTrackTransportTap(trackIndex),
         armDisabled: n === 1 ? track1ArmDisabled : secondaryBlocked,
         armLabel: n === 1 ? "Record" : "Overdub",
         isFocused: focusedTrackIndex === n,
-        onRequestFocus: () => applyPedalFocus(n as 1 | 2 | 3 | 4),
-        onResetTrack: () => handleResetSoloTrack(n as 1 | 2 | 3 | 4),
+        onRequestFocus: () => applyPedalFocus(trackIndex),
+        onResetTrack: () => handleResetSoloTrack(trackIndex),
         resetDisabled: isRecordingArmed || soloLooperState === "idle",
         isOverdubArmedWaiting:
           slot?.mode === "armed_overdub" ||
@@ -584,6 +594,11 @@ export default function StudioBridgePage() {
           (soloLooperState === "recording" &&
             soloActiveRecordTrackIndex == null &&
             n === 1),
+        barCount: soloTrackBarCounts[n - 1],
+        barCountLocked: soloTrackBarCountsLocked[n - 1],
+        barCountDisabled: barCountsDisabled,
+        barCountOptions,
+        onBarCountChange: (bars: number) => setSoloTrackBarCount(trackIndex, bars),
       };
     });
   }, [
@@ -597,9 +612,15 @@ export default function StudioBridgePage() {
     isMasterPaused,
     soloLooperState,
     soloActiveRecordTrackIndex,
+    soloTrackBarCounts,
+    soloTrackBarCountsLocked,
+    handsfreeSequenceActive,
+    kiteSetupTimeSignatureTop,
+    kiteSetupTimeSignatureBottom,
     handleSoloTrackVolumeChange,
     handleTrackTransportTap,
     handleResetSoloTrack,
+    setSoloTrackBarCount,
   ]);
 
     const copyInviteLink = async () => {
@@ -2050,7 +2071,6 @@ export default function StudioBridgePage() {
           }}
           looperConfig={{
             loopMode: soloLooperMode,
-            barCount: soloLooperBarCount,
             latencyMs: soloLooperLatencyMs,
             kiteSetupTempo,
             kiteSetupTimeSignatureTop,
@@ -2066,7 +2086,6 @@ export default function StudioBridgePage() {
             onStopAndResetSoloLooper: handleStopAndResetSoloLooper,
             onEndSession: returnToLobby,
             onLoopModeChange: setSoloLooperMode,
-            onBarCountChange: setSoloLooperBarCount,
             onLatencyMsChange: handleSoloLatencyMsChange,
             onAutoCalibrateLatency: handleAutoCalibrateSoloLatency,
             autoCalibrateLatencyStatus: soloLatencyCalibrationStatus,
