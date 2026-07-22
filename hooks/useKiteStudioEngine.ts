@@ -83,6 +83,12 @@ import {
 } from "@/lib/looper-runway-scheduler";
 import { forceMusicModeOpus } from "@/lib/sdp-utils";
 import type { BridgeStatus, Role } from "@/lib/p2p/transport-port";
+import type {
+  KiteChatDataPayload,
+  KiteSessionChatMessage,
+} from "@/lib/p2p/kite-chat-message-types";
+import { attachKiteChatChannel } from "@/lib/p2p/kite-chat-channel";
+import type { KiteChatChannelHandle } from "@/lib/p2p/kite-chat-channel";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
 import type {
   KiteEngineActions,
@@ -93,6 +99,7 @@ import type {
   KitePresenterState,
   KitePresenterActions,
   KiteEngineLegacyApi,
+  KiteSessionChatPort,
   StudioUiPhase,
   KiteSetupStep,
   BroadcastStatus,
@@ -549,6 +556,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [kiteSyncMetronomeResumeNonce, setKiteSyncMetronomeResumeNonce] = useState(0);
   /** True while metronome is stopped due to inbound loss hysteresis (UX hint). */
   const [kiteSyncNetworkMetronomePaused, setKiteSyncNetworkMetronomePaused] = useState(false);
+  /** Dedicated kite-chat-channel RTCDataChannel is open (Phase A session chat). */
+  const [kiteChatReady, setKiteChatReady] = useState(false);
   const [metronomeVolume, setMetronomeVolume] = useState(0.85);
   const isInStudioPhase = studioUiPhase === "studio";
 
@@ -557,6 +566,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const peerRef = useRef<Peer.Instance | null>(null);
   /** Underlying PC for `getStats` polling; cleared with peer teardown. */
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const kiteChatHandleRef = useRef<KiteChatChannelHandle | null>(null);
+  const kiteChatSubscribersRef = useRef<Set<(msg: KiteSessionChatMessage) => void>>(
+    new Set()
+  );
   /** Wall-clock expiry (ms) for current TURN bundle when `/api/turn-credentials` provides it. */
   const turnCredentialExpiresAtMsRef = useRef<number | null>(null);
   /** When the active TURN bundle was fetched (ms since epoch). */
@@ -2223,15 +2236,22 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       source.connect(delayNode);
     }
     delayNode.connect(gain);
-    const compressor = ctx.createDynamicsCompressor();
-    compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
-    compressor.knee.value      = REMOTE_COMPRESSOR_KNEE;
-    compressor.ratio.value     = REMOTE_COMPRESSOR_RATIO;
-    compressor.attack.value    = REMOTE_COMPRESSOR_ATTACK;
-    compressor.release.value   = REMOTE_COMPRESSOR_RELEASE;
-    gain.connect(compressor);
-    compressor.connect(ctx.destination);
-    remotePlaybackCompressorRef.current = compressor;
+    // Live P2P zero-buffer gate (mirrors useMeteredDelayPlayback): skip DynamicsCompressor
+    // when worklet buffering is off. Buffered / Kite Sync path keeps compressor unchanged.
+    if (!isBufferingEnabledRef.current) {
+      gain.connect(ctx.destination);
+      remotePlaybackCompressorRef.current = null;
+    } else {
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
+      compressor.knee.value      = REMOTE_COMPRESSOR_KNEE;
+      compressor.ratio.value     = REMOTE_COMPRESSOR_RATIO;
+      compressor.attack.value    = REMOTE_COMPRESSOR_ATTACK;
+      compressor.release.value   = REMOTE_COMPRESSOR_RELEASE;
+      gain.connect(compressor);
+      compressor.connect(ctx.destination);
+      remotePlaybackCompressorRef.current = compressor;
+    }
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 128;
     analyser.smoothingTimeConstant = 0.62;
@@ -2294,6 +2314,33 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const localJamSetupOwnerName = role === "host" ? "Host" : "Bandmate";
   const canControlStop = !syncInitiatorId || syncInitiatorId === localJamSetupOwnerId;
   const canStartSync = broadcastStatus === "idle" && Boolean(remoteStream);
+
+  const sessionChatPort = useMemo((): KiteSessionChatPort => {
+    return {
+      subscribe(handler) {
+        kiteChatSubscribersRef.current.add(handler);
+        return () => {
+          kiteChatSubscribersRef.current.delete(handler);
+        };
+      },
+      sendMessage(text) {
+        const trimmed = text.trim();
+        if (!trimmed) return null;
+        const handle = kiteChatHandleRef.current;
+        if (!handle?.isOpen()) return null;
+        const payload: KiteChatDataPayload = {
+          type: "KITE_CHAT",
+          id: crypto.randomUUID(),
+          text: trimmed,
+          senderId: localJamSetupOwnerId,
+          senderName: localJamSetupOwnerName,
+          sentAt: Date.now(),
+        };
+        return handle.send(payload) ? payload : null;
+      },
+    };
+  }, [localJamSetupOwnerId, localJamSetupOwnerName]);
+
   useEffect(() => {
     if (!kiteSyncEnabled) {
       kiteSyncCountInCompletionHandledRef.current = false;
@@ -6099,6 +6146,18 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     let transportIsHost = true;
     let transportForceRelay = false;
     let sessionUserId: string | null = null;
+
+    const tearDownChatChannel = (clearSubscribers = false) => {
+      kiteChatHandleRef.current?.close();
+      kiteChatHandleRef.current = null;
+      if (clearSubscribers) {
+        kiteChatSubscribersRef.current.clear();
+      }
+      if (mountedRef.current) {
+        setKiteChatReady(false);
+      }
+    };
+
     leaveSignalSentRef.current = false;
     leaveSignalReceivedRef.current = false;
     bridgeActiveRoleRef.current = null;
@@ -6251,6 +6310,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           channelRef.current?.unsubscribe();
           channelRef.current = null;
 
+          tearDownChatChannel(true);
           peerRef.current?.destroy();
           peerRef.current = null;
 
@@ -6521,9 +6581,28 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       peer.on("error", (err) => {
         console.error("[PEER-ERROR]", err);
       });
-      // Attach raw RTCPeerConnection diagnostic listeners
+      // Attach raw RTCPeerConnection diagnostic listeners + dedicated chat channel
       if ((peer as any)._pc) {
         const pc = (peer as any)._pc;
+        tearDownChatChannel();
+        kiteChatHandleRef.current = attachKiteChatChannel({
+          pc,
+          isInitiator: transportIsHost,
+          onMessage: (payload: KiteChatDataPayload) => {
+            const msg: KiteSessionChatMessage = {
+              ...payload,
+              receivedAt: Date.now(),
+              isLocal: false,
+            };
+            kiteChatSubscribersRef.current.forEach((handler) => handler(msg));
+          },
+          onOpen: () => {
+            if (mountedRef.current) setKiteChatReady(true);
+          },
+          onClose: () => {
+            if (mountedRef.current) setKiteChatReady(false);
+          },
+        });
         pc.addEventListener("icegatheringstatechange", () =>
           console.log("[ICE-GATHER]", pc.iceGatheringState)
         );
@@ -7246,6 +7325,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
       channelRef.current?.unsubscribe();
       channelRef.current = null;
+      tearDownChatChannel();
       peerRef.current?.destroy();
       peerRef.current = null;
       peerConnectionRef.current = null;
@@ -8002,6 +8082,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloOverdubArmedTrackIndex,
     syncInitiatorId,
     kiteSyncNetworkMetronomePaused,
+    kiteChatReady,
     }),
     [
       statusNote,
@@ -8043,6 +8124,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloOverdubArmedTrackIndex,
       syncInitiatorId,
       kiteSyncNetworkMetronomePaused,
+      kiteChatReady,
     ]
   );
 
@@ -8082,6 +8164,6 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     ]
   );
 
-  return { engineState, engineActions, engineRefs, presenterState, presenterActions, engineLegacy };
+  return { engineState, engineActions, engineRefs, presenterState, presenterActions, engineLegacy, sessionChatPort };
 
 }

@@ -7,6 +7,10 @@ import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
 import type { RunwayDisplayLabel } from "@/lib/looper-runway-scheduler";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import type { BridgeStatus, Role } from "@/lib/p2p/transport-port";
+import type {
+  KiteSessionChatMessage,
+  KiteChatDataPayload,
+} from "@/lib/p2p/kite-chat-message-types";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
 
 export type SoloLooperMode = "free" | "grid" | "handsfree";
@@ -133,6 +137,25 @@ export type KiteEngineRefs = {
   >;
 };
 
+/** P2P session chat transport surface (Phase A — UI consumes via useKiteSessionChat). */
+export type KiteSessionChatPort = {
+  subscribe: (handler: (msg: KiteSessionChatMessage) => void) => () => void;
+  sendMessage: (text: string) => KiteChatDataPayload | null;
+};
+
+export type UseKiteSessionChatOptions = {
+  enabled: boolean;
+  sessionId: string | null;
+  chatReady: boolean;
+  port: KiteSessionChatPort;
+};
+
+export type UseKiteSessionChatResult = {
+  messages: KiteSessionChatMessage[];
+  sendMessage: (text: string) => void;
+  clearMessages: () => void;
+};
+
 /** Legacy dashboard handlers/refs still referenced by presenter JSX (Phase 8 bridge). */
 export type KiteEngineLegacyApi = {
   broadcastWizardStudioParam: (patch: Record<string, number>) => void;
@@ -248,6 +271,8 @@ export type KitePresenterState = {
   soloOverdubArmedTrackIndex: number | null;
   syncInitiatorId: string | null;
   kiteSyncNetworkMetronomePaused: boolean;
+  /** True when the dedicated kite-chat-channel RTCDataChannel is open. */
+  kiteChatReady: boolean;
 };
 
 export type KitePresenterActions = {
@@ -265,4 +290,5 @@ export type UseKiteStudioEngineResult = {
   presenterState: KitePresenterState;
   presenterActions: KitePresenterActions;
   engineLegacy: KiteEngineLegacyApi;
+  sessionChatPort: KiteSessionChatPort;
 };

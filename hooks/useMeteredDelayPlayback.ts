@@ -342,15 +342,23 @@ export function useMeteredDelayPlayback(
         source.connect(delayNode);
       }
       delayNode.connect(gain);
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
-      compressor.knee.value = REMOTE_COMPRESSOR_KNEE;
-      compressor.ratio.value = REMOTE_COMPRESSOR_RATIO;
-      compressor.attack.value = REMOTE_COMPRESSOR_ATTACK;
-      compressor.release.value = REMOTE_COMPRESSOR_RELEASE;
-      gain.connect(compressor);
-      compressor.connect(ctx.destination);
-      remotePlaybackCompressorRef.current = compressor;
+      // Live P2P zero-buffer gate: when worklet buffering is off, skip DynamicsCompressor
+      // so remote audio reaches destination with only source → delay(0) → gain.
+      // Buffered / Kite Sync path keeps the compressor for existing voicing behavior.
+      if (!isBufferingEnabledRef.current) {
+        gain.connect(ctx.destination);
+        remotePlaybackCompressorRef.current = null;
+      } else {
+        const compressor = ctx.createDynamicsCompressor();
+        compressor.threshold.value = REMOTE_COMPRESSOR_THRESHOLD;
+        compressor.knee.value = REMOTE_COMPRESSOR_KNEE;
+        compressor.ratio.value = REMOTE_COMPRESSOR_RATIO;
+        compressor.attack.value = REMOTE_COMPRESSOR_ATTACK;
+        compressor.release.value = REMOTE_COMPRESSOR_RELEASE;
+        gain.connect(compressor);
+        compressor.connect(ctx.destination);
+        remotePlaybackCompressorRef.current = compressor;
+      }
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 128;
       analyser.smoothingTimeConstant = 0.62;
