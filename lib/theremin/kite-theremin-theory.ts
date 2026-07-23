@@ -193,16 +193,18 @@ export function chordLabelsInKey(key: MusicalKey): string[] {
 /** Diatonic degree in key → chord frequencies (major key, octave 4). */
 export function degreeInKeyToFrequencies(key: MusicalKey, degree: DiatonicDegree, rootOctave = 4): number[] {
   const degreeIdx = DEGREE_INDEX[degree];
-  const spec = MAJOR_SCALE_DEGREES[degreeIdx]!;
   const chordRootSemitone = chordRootSemitoneInKey(key, degreeIdx);
-  const root = semitoneToRootNote(chordRootSemitone);
-  let type = spec.type;
+  const rootMidi = noteNameToMidi(semitoneToRootNote(chordRootSemitone), rootOctave);
+
+  let intervals: number[];
   if (degree === "vii°") {
-    type = "m7";
-  } else if (degree === "I" || degree === "IV") {
-    type = "maj7";
-  } else if (degree === "V") {
-    type = "maj";
+    intervals = [0, 3, 6, 12];
+  } else if (degree === "ii" || degree === "iii" || degree === "vi") {
+    intervals = [0, 3, 7, 12];
+  } else {
+    // I, IV, V — power chord + octave
+    intervals = [0, 7, 12];
   }
-  return rootAndTypeToFrequencies(root, type, rootOctave);
+
+  return midiNotesToHz(intervals.map((i) => rootMidi + i));
 }
