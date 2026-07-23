@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   Settings,
   Mic,
@@ -21,6 +22,8 @@ import {
   Volume2,
   Zap,
   ChevronRight,
+  ChevronDown,
+  Check,
   AlertTriangle,
   Video,
   VideoOff,
@@ -36,7 +39,15 @@ import { SoloLatencyCalibrationPanel } from "@/components/studio-bridge/SoloLate
 import type { SoloLooperMode, SoloLooperState } from "@/hooks/useKiteStudioEngine.types";
 import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
 import KiteTunerPanel from "@/components/studio-bridge/KiteTunerPanel";
+import KiteAirSynthPanel from "@/components/studio-bridge/KiteAirSynthPanel";
 import { DEFAULT_INSTRUMENT_ID, type KiteTunerInstrumentId } from "@/hooks/useKiteTunerEngine";
+import { useKiteAirSynthEngine } from "@/hooks/useKiteAirSynthEngine";
+import type {
+  AirSynthErrorCode,
+  AirSynthMode,
+  MusicalKey,
+} from "@/lib/theremin/kite-theremin-types";
+import { MUSICAL_KEYS } from "@/lib/theremin/kite-theremin-types";
 
 export type SoloTrackLaneView = {
   trackIndex: 1 | 2 | 3 | 4;
@@ -109,6 +120,8 @@ export type KiteLoopV4LooperHandlers = {
   latencyCalibrationStale: boolean;
   latencyStaleMessage: string | null;
   entryLatencyMs: number;
+  latencyFloorApplied?: boolean;
+  latencyRawMeasuredMs?: number | null;
   onTempoSliderChange: (value: number) => void;
   onTempoPreset: (bpm: number) => void;
   onSelectTimeSignature: (option: { title: string; top: number; bottom: number; swing: boolean }) => void;
@@ -149,6 +162,18 @@ export type KiteLoopV4PanelProps = {
   soloTrackSlotUiLatestRef: MutableRefObject<
     SoloLooperPlaybackUiStateEvent["slots"] | null
   >;
+  airSynth?: KiteLoopV4AirSynthProps;
+};
+
+export type KiteLoopV4AirSynthProps = {
+  enabled: boolean;
+  mode: AirSynthMode;
+  key: MusicalKey;
+  onEnabledChange: (enabled: boolean) => void;
+  onModeChange: (mode: AirSynthMode) => void;
+  onKeyChange: (key: MusicalKey) => void;
+  registerVirtualInput: (deviceId: string, stream: MediaStream) => Promise<void>;
+  unregisterVirtualInput: (deviceId: string) => Promise<void>;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,23 +197,27 @@ function getWebcamFrameLayoutStyle(
   aspect: number,
   viewportWidth: number,
   viewportHeight: number,
+  options?: { airSynthBoost?: boolean },
 ): CSSProperties {
+  const boost = options?.airSynthBoost === true ? 1.12 : 1;
+  const maxPct = `${100 * boost}%`;
   const base: CSSProperties = {
     aspectRatio: aspect,
-    maxWidth: "100%",
-    maxHeight: "100%",
+    maxWidth: maxPct,
+    maxHeight: maxPct,
     borderRadius: 14,
     overflow: "hidden",
     boxShadow: STUDIO_GLOW_FRAME_SHADOW,
   };
   if (viewportWidth <= 0 || viewportHeight <= 0) {
-    return { ...base, width: "100%", height: "auto" };
+    return { ...base, width: maxPct, height: "auto" };
   }
-  const viewportAspect = viewportWidth / viewportHeight;
+  const effectiveHeight = viewportHeight / boost;
+  const viewportAspect = viewportWidth / effectiveHeight;
   if (aspect >= viewportAspect) {
-    return { ...base, width: "100%", height: "auto" };
+    return { ...base, width: maxPct, height: "auto" };
   }
-  return { ...base, height: "100%", width: "auto" };
+  return { ...base, height: maxPct, width: "auto" };
 }
 
 const INLINE_LABEL: React.CSSProperties = {
@@ -567,16 +596,18 @@ function LiveSoundBar({
   );
 }
 
-type VertSliderProps = { value: number; onChange: (v: number) => void };
+type VertSliderProps = { value: number; onChange: (v: number) => void; compact?: boolean };
 
-function VertSlider({ value, onChange }: VertSliderProps): React.JSX.Element {
+function VertSlider({ value, onChange, compact = false }: VertSliderProps): React.JSX.Element {
+  const trackHeight = compact ? 42 : 60;
+  const wrapHeight = compact ? 46 : 64;
   return (
     <div
       style={{
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        height: 64,
+        height: wrapHeight,
         justifyContent: "center",
       }}
     >
@@ -593,7 +624,7 @@ function VertSlider({ value, onChange }: VertSliderProps): React.JSX.Element {
           writingMode: "vertical-lr",
           direction: "rtl",
           width: 5,
-          height: 60,
+          height: trackHeight,
           borderRadius: 9999,
           outline: "none",
           background: `linear-gradient(to top,${ORANGE} ${value}%,rgba(255,255,255,0.09) ${value}%)`,
@@ -703,6 +734,7 @@ type TrackColumnProps = {
   lane: SoloTrackLaneView;
   registerTrackFillEl: (trackIndex: 1 | 2 | 3 | 4, el: HTMLDivElement | null) => void;
   gridLikeMode: boolean;
+  compact?: boolean;
 };
 
 type BarCountStripProps = {
@@ -785,7 +817,7 @@ function BarCountStrip({
   );
 }
 
-function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnProps): React.JSX.Element {
+function TrackColumn({ lane, registerTrackFillEl, gridLikeMode, compact = false }: TrackColumnProps): React.JSX.Element {
   const visual = mapLaneToRecVisual(lane);
   const cfg = REC_CFG[visual];
   const isPulsing = visual === "waiting";
@@ -838,13 +870,13 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnPro
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        padding: "12px 8px",
-        gap: 8,
+        padding: compact ? "6px 6px" : "12px 8px",
+        gap: compact ? 4 : 8,
         position: "relative",
         overflow: "hidden",
         cursor: "pointer",
         borderColor: lane.isFocused ? "rgba(255,69,0,0.45)" : "rgba(255,255,255,0.08)",
-        transition: "border-color 0.2s",
+        transition: "border-color 0.2s, padding 0.18s, gap 0.18s",
       }}
     >
       <div
@@ -878,7 +910,7 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnPro
           position: "relative",
           zIndex: 1,
           color: EMERALD,
-          fontSize: 9,
+          fontSize: compact ? 8 : 9,
           letterSpacing: "0.14em",
           textTransform: "uppercase",
           fontWeight: 600,
@@ -929,7 +961,7 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnPro
       </button>
 
       <div style={{ position: "relative", zIndex: 1 }}>
-        <VertSlider value={faderPct} onChange={(v) => lane.onVolumeChange(v / 100)} />
+        <VertSlider value={faderPct} onChange={(v) => lane.onVolumeChange(v / 100)} compact={compact} />
       </div>
 
       <motion.button
@@ -943,8 +975,8 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnPro
         style={{
           position: "relative",
           zIndex: 1,
-          width: 80,
-          height: 80,
+          width: compact ? 56 : 80,
+          height: compact ? 56 : 80,
           borderRadius: "50%",
           display: "flex",
           flexDirection: "column",
@@ -963,8 +995,8 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnPro
       >
         <div
           style={{
-            width: 18,
-            height: 18,
+            width: compact ? 14 : 18,
+            height: compact ? 14 : 18,
             borderRadius: "50%",
             background: cfg.col,
             opacity: visual === "idle" && !lane.isEngineRecording ? 0.25 : 1,
@@ -989,7 +1021,7 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode }: TrackColumnPro
           border: `1px solid ${lane.isFocused ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.07)"}`,
           background: lane.isFocused ? "rgba(34,197,94,0.08)" : "transparent",
           color: lane.isFocused ? EMERALD : "rgba(255,255,255,0.2)",
-          fontSize: 7,
+          fontSize: compact ? 6 : 7,
           letterSpacing: "0.16em",
           textTransform: "uppercase",
           transition: "all 0.18s",
@@ -1009,7 +1041,24 @@ type SettingsModalProps = {
   metronomeVolume: number;
   onMetronomeVolumeChange: (value: number) => void;
   runwayVisualOnly: boolean;
+  airSynth?: KiteLoopV4AirSynthProps;
+  isAirSynthActive: boolean;
+  isCameraActive: boolean;
+  airSynthStatusLine: string;
+  airSynthError: AirSynthErrorCode;
+  onAirSynthRetry: () => void;
+  airSynthVolume: number;
+  onAirSynthVolumeChange: (level: number) => void;
+  airSynthWaveform: OscillatorType;
+  onAirSynthWaveformChange: (type: OscillatorType) => void;
 };
+
+const AIR_SYNTH_WAVEFORM_OPTIONS: { value: OscillatorType; label: string }[] = [
+  { value: "sine", label: "Sine" },
+  { value: "square", label: "Square" },
+  { value: "sawtooth", label: "Sawtooth" },
+  { value: "triangle", label: "Triangle" },
+];
 
 /** Time signatures aligned with `LooperCountdownConfig` options. */
 const TIME_SIG_SHORT: {
@@ -1029,8 +1078,20 @@ function SettingsModal({
   metronomeVolume,
   onMetronomeVolumeChange,
   runwayVisualOnly,
+  airSynth,
+  isAirSynthActive,
+  isCameraActive,
+  airSynthStatusLine,
+  airSynthError,
+  onAirSynthRetry,
+  airSynthVolume,
+  onAirSynthVolumeChange,
+  airSynthWaveform,
+  onAirSynthWaveformChange,
 }: SettingsModalProps): React.JSX.Element {
   const [showAdvancedLatency, setShowAdvancedLatency] = useState(false);
+  const [airSynthKeyMenuOpen, setAirSynthKeyMenuOpen] = useState(false);
+  const [airSynthWaveformMenuOpen, setAirSynthWaveformMenuOpen] = useState(false);
   const tapTimes = useRef<number[]>([]);
 
   const bpm = cfg.kiteSetupTempo;
@@ -1039,6 +1100,28 @@ function SettingsModal({
   const gridLikeMode = gridMode || handsfreeMode;
   const rtlCompensation = cfg.latencyMs;
   const locked = cfg.isTimingLocked;
+  const handleGridToggle = (on: boolean): void => {
+    if (isAirSynthActive) {
+      if (!on) {
+        handlers.onLoopModeChange(handsfreeMode ? "handsfree" : "grid");
+      } else {
+        handlers.onLoopModeChange("grid");
+      }
+      return;
+    }
+    handlers.onLoopModeChange(on ? "grid" : "free");
+  };
+  const handleHandsfreeToggle = (on: boolean): void => {
+    if (isAirSynthActive) {
+      if (!on) {
+        handlers.onLoopModeChange(gridMode ? "grid" : "handsfree");
+      } else {
+        handlers.onLoopModeChange("handsfree");
+      }
+      return;
+    }
+    handlers.onLoopModeChange(on ? "handsfree" : "free");
+  };
   const tap = (): void => {
     const now = Date.now();
     tapTimes.current.push(now);
@@ -1238,6 +1321,8 @@ function SettingsModal({
               staleMessage={handlers.latencyStaleMessage}
               status={handlers.autoCalibrateLatencyStatus}
               message={handlers.autoCalibrateLatencyMessage}
+              floorApplied={handlers.latencyFloorApplied}
+              rawMeasuredMs={handlers.latencyRawMeasuredMs}
               onCalibrate={handlers.onAutoCalibrateLatency}
             />
 
@@ -1421,13 +1506,17 @@ function SettingsModal({
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <Toggle
                 checked={gridMode}
-                onChange={(on) => handlers.onLoopModeChange(on ? "grid" : "free")}
+                onChange={handleGridToggle}
                 label="Grid Mode"
-                sublabel="Off = Free Mode (no quantize)"
+                sublabel={
+                  isAirSynthActive
+                    ? "Free Mode unavailable while Air Synth is active — use Grid or Handsfree."
+                    : "Off = Free Mode (no quantize)"
+                }
               />
               <Toggle
                 checked={handsfreeMode}
-                onChange={(on) => handlers.onLoopModeChange(on ? "handsfree" : "free")}
+                onChange={handleHandsfreeToggle}
                 label="Handsfree Mode"
                 sublabel="Auto-record tracks 1→4 at loop boundaries"
               />
@@ -1435,6 +1524,301 @@ function SettingsModal({
                 Set bar length on each track lane below.
               </span>
             </div>
+
+            {airSynth ? (
+              <div
+                style={{
+                  borderTop: "1px solid rgba(255,255,255,0.05)",
+                  paddingTop: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                  marginTop: 4,
+                }}
+              >
+                {sLabel("Air Synth")}
+                <div
+                  style={{
+                    opacity: isCameraActive ? 1 : 0.45,
+                    pointerEvents: isCameraActive ? "auto" : "none",
+                  }}
+                >
+                  <Toggle
+                    checked={airSynth.enabled}
+                    onChange={airSynth.onEnabledChange}
+                    label="Air Synth"
+                    sublabel="Webcam chord input — requires Camera on"
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {(
+                    [
+                      { label: "1-Dial", mode: "single-hand" as const },
+                      { label: "2-Dial", mode: "two-hand" as const },
+                    ] as const
+                  ).map(({ label, mode }) => {
+                    const sel = airSynth.mode === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => airSynth.onModeChange(mode)}
+                        style={{
+                          flex: 1,
+                          borderRadius: 9,
+                          padding: "8px 0",
+                          border: `1px solid ${sel ? "rgba(255,69,0,0.55)" : "rgba(255,255,255,0.09)"}`,
+                          background: sel ? "rgba(255,69,0,0.1)" : "transparent",
+                          color: sel ? ORANGE : "rgba(255,255,255,0.38)",
+                          fontSize: 11,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <DropdownMenu.Root open={airSynthKeyMenuOpen} onOpenChange={setAirSynthKeyMenuOpen}>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        aria-label="Select key"
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          borderRadius: 9,
+                          padding: "8px 10px",
+                          border: `1px solid ${
+                            airSynthKeyMenuOpen
+                              ? "rgba(255,69,0,0.55)"
+                              : "rgba(255,255,255,0.09)"
+                          }`,
+                          background: airSynthKeyMenuOpen
+                            ? "rgba(255,69,0,0.1)"
+                            : "rgba(0,0,0,0.35)",
+                          color: airSynthKeyMenuOpen ? ORANGE : "rgba(255,255,255,0.6)",
+                          fontSize: 11,
+                          fontFamily: "monospace",
+                          cursor: "pointer",
+                          outline: "none",
+                        }}
+                      >
+                        <span>{airSynth.key} major</span>
+                        <ChevronDown
+                          size={12}
+                          style={{
+                            opacity: 0.55,
+                            flexShrink: 0,
+                            transform: airSynthKeyMenuOpen ? "rotate(180deg)" : undefined,
+                            transition: "transform 0.15s",
+                          }}
+                          aria-hidden
+                        />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content
+                        sideOffset={6}
+                        align="start"
+                        style={{
+                          ...glassSharp,
+                          zIndex: 80,
+                          minWidth: "var(--radix-dropdown-menu-trigger-width)",
+                          padding: 4,
+                          boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+                        }}
+                      >
+                        {MUSICAL_KEYS.map((k) => {
+                          const selected = airSynth.key === k;
+                          return (
+                            <DropdownMenu.Item
+                              key={k}
+                              onSelect={() => airSynth.onKeyChange(k)}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                borderRadius: 7,
+                                padding: "8px 10px",
+                                fontSize: 11,
+                                fontFamily: "monospace",
+                                cursor: "pointer",
+                                outline: "none",
+                                color: selected ? EMERALD : "rgba(255,255,255,0.55)",
+                                background: selected ? "rgba(34,197,94,0.08)" : "transparent",
+                              }}
+                            >
+                              <span>{k} major</span>
+                              {selected ? (
+                                <Check size={12} color={EMERALD} aria-hidden />
+                              ) : null}
+                            </DropdownMenu.Item>
+                          );
+                        })}
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={INLINE_LABEL}>Air Synth Volume</span>
+                  <HSlider
+                    value={Math.round(airSynthVolume * 100)}
+                    onChange={(v) => onAirSynthVolumeChange(v / 100)}
+                    min={0}
+                    max={100}
+                    accent={EMERALD}
+                    disabled={!airSynth.enabled}
+                    title="Air Synth output level before looper sum (0–100%)"
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={INLINE_LABEL}>Waveform</span>
+                  <DropdownMenu.Root
+                    open={airSynthWaveformMenuOpen}
+                    onOpenChange={(open) => {
+                      if (!airSynth.enabled) return;
+                      setAirSynthWaveformMenuOpen(open);
+                    }}
+                  >
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        aria-label="Select waveform"
+                        disabled={!airSynth.enabled}
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          borderRadius: 9,
+                          padding: "8px 10px",
+                          border: `1px solid ${
+                            airSynthWaveformMenuOpen
+                              ? "rgba(255,69,0,0.55)"
+                              : "rgba(255,255,255,0.09)"
+                          }`,
+                          background: airSynthWaveformMenuOpen
+                            ? "rgba(255,69,0,0.1)"
+                            : "rgba(0,0,0,0.35)",
+                          color: !airSynth.enabled
+                            ? "rgba(255,255,255,0.28)"
+                            : airSynthWaveformMenuOpen
+                              ? ORANGE
+                              : "rgba(255,255,255,0.6)",
+                          fontSize: 11,
+                          fontFamily: "monospace",
+                          cursor: airSynth.enabled ? "pointer" : "not-allowed",
+                          outline: "none",
+                          opacity: airSynth.enabled ? 1 : 0.55,
+                        }}
+                      >
+                        <span>
+                          {AIR_SYNTH_WAVEFORM_OPTIONS.find((o) => o.value === airSynthWaveform)
+                            ?.label ?? "Triangle"}
+                        </span>
+                        <ChevronDown
+                          size={12}
+                          style={{
+                            opacity: 0.55,
+                            flexShrink: 0,
+                            transform: airSynthWaveformMenuOpen ? "rotate(180deg)" : undefined,
+                            transition: "transform 0.15s",
+                          }}
+                          aria-hidden
+                        />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content
+                        sideOffset={6}
+                        align="start"
+                        style={{
+                          ...glassSharp,
+                          zIndex: 80,
+                          minWidth: "var(--radix-dropdown-menu-trigger-width)",
+                          padding: 4,
+                          boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+                        }}
+                      >
+                        {AIR_SYNTH_WAVEFORM_OPTIONS.map(({ value, label }) => {
+                          const selected = airSynthWaveform === value;
+                          return (
+                            <DropdownMenu.Item
+                              key={value}
+                              onSelect={() => onAirSynthWaveformChange(value)}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                borderRadius: 7,
+                                padding: "8px 10px",
+                                fontSize: 11,
+                                fontFamily: "monospace",
+                                cursor: "pointer",
+                                outline: "none",
+                                color: selected ? EMERALD : "rgba(255,255,255,0.55)",
+                                background: selected ? "rgba(34,197,94,0.08)" : "transparent",
+                              }}
+                            >
+                              <span>{label}</span>
+                              {selected ? (
+                                <Check size={12} color={EMERALD} aria-hidden />
+                              ) : null}
+                            </DropdownMenu.Item>
+                          );
+                        })}
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={INLINE_LABEL}>Status</span>
+                  <span
+                    style={{
+                      fontFamily: "monospace",
+                      fontSize: 11,
+                      color:
+                        airSynth.enabled && airSynthError === "none"
+                          ? EMERALD
+                          : "rgba(255,255,255,0.55)",
+                    }}
+                  >
+                    {airSynthStatusLine}
+                  </span>
+                </div>
+                {airSynthError !== "none" ? (
+                  <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 5,
+                        paddingLeft: 21,
+                        color: ORANGE,
+                        fontSize: 9,
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 1 }} />
+                      {airSynthError === "vision_load_failed"
+                        ? "Vision engine failed to load."
+                        : airSynthError === "webcam_missing"
+                          ? "Webcam not available."
+                          : airSynthError === "audio_suspended"
+                            ? "Tap to resume audio context."
+                            : airSynthError === "audio_context_missing"
+                              ? "Audio context not ready."
+                              : "Air Synth error."}
+                    </div>
+                    <button type="button" onClick={onAirSynthRetry} style={RESET_BTN}>
+                      Retry
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -1772,10 +2156,12 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   studioAudioContextRef,
   activeStreamsMapRef,
   soloTrackSlotUiLatestRef,
+  airSynth,
 }: KiteLoopV4PanelProps): React.JSX.Element {
   const timing = looperConfig.kiteIntervalTimingRef.current;
   const gridLikeMode =
     looperConfig.loopMode === "grid" || looperConfig.loopMode === "handsfree";
+  const isAirSynthActive = airSynth?.enabled === true;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inputsOpen, setInputsOpen] = useState(false);
@@ -1791,6 +2177,31 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [videoReady, setVideoReady] = useState(false);
+
+  const noopRegister = useCallback(async () => {}, []);
+  const airSynthEngine = useKiteAirSynthEngine({
+    audioContext: studioAudioContextRef.current,
+    videoElement: videoReady ? videoRef.current : null,
+    enabled: isAirSynthActive && isCameraActive && videoReady,
+    mode: airSynth?.mode ?? "two-hand",
+    key: airSynth?.key ?? "C",
+    registerVirtualInput: airSynth?.registerVirtualInput ?? noopRegister,
+    unregisterVirtualInput: airSynth?.unregisterVirtualInput ?? noopRegister,
+  });
+
+  const airSynthStatusLine = ((): string => {
+    if (!airSynth?.enabled) return "Off";
+    if (airSynthEngine.error !== "none") return "Error";
+    if (airSynthEngine.status === "booting") return "Starting…";
+    if (airSynthEngine.activeZone?.mode === "two-hand") {
+      return `${airSynthEngine.activeZone.root} · ${airSynthEngine.activeZone.chordType}`;
+    }
+    if (airSynthEngine.activeZone?.mode === "single-hand") {
+      return airSynthEngine.activeZone.degree;
+    }
+    return airSynthEngine.isVisionReady ? "Ready — move hands" : "Waiting…";
+  })();
 
   const applyWebcamFrameLayout = useCallback(() => {
     const frameEl = webcamFrameRef.current;
@@ -1798,7 +2209,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     const layout = getWebcamFrameLayoutStyle(
       videoAspectRatioRef.current,
       window.innerWidth,
-      window.innerHeight
+      window.innerHeight,
+      { airSynthBoost: isAirSynthActive }
     );
     frameEl.style.aspectRatio = String(layout.aspectRatio ?? "");
     frameEl.style.maxWidth = layout.maxWidth as string;
@@ -1808,7 +2220,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     frameEl.style.boxShadow = layout.boxShadow as string;
     if (layout.width) frameEl.style.width = layout.width as string;
     if (layout.height) frameEl.style.height = layout.height as string;
-  }, []);
+  }, [isAirSynthActive]);
 
   const registerTrackFillEl = useCallback(
     (trackIndex: 1 | 2 | 3 | 4, el: HTMLDivElement | null) => {
@@ -1825,6 +2237,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     const el = videoRef.current;
     if (!el || el.videoWidth <= 0 || el.videoHeight <= 0) return;
     videoAspectRatioRef.current = el.videoWidth / el.videoHeight;
+    setVideoReady(true);
     applyWebcamFrameLayout();
   }, [applyWebcamFrameLayout]);
 
@@ -1861,6 +2274,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
       setCameraStream(null);
       setIsCameraActive(false);
       setCameraError(null);
+      setVideoReady(false);
       return;
     }
 
@@ -1944,13 +2358,16 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   };
 
   const centerWebcamLedColor = (): string => {
+    if (isAirSynthActive && !isCameraActive) return ORANGE;
     if (cameraError) return ORANGE;
     if (isCameraActive) return EMERALD;
     return "rgba(255,255,255,0.15)";
   };
 
   const centerWebcamLabel = (): string => {
+    if (isAirSynthActive && !isCameraActive) return "AIR SYNTH · NO CAMERA";
     if (cameraError) return "WEBCAM ERROR";
+    if (isCameraActive && isAirSynthActive) return "WEBCAM ON · AIR SYNTH ON";
     if (isCameraActive) return "WEBCAM ON";
     return "WEBCAM OFF";
   };
@@ -1987,25 +2404,45 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         {isCameraActive ? (
           <div
             ref={webcamFrameRef}
-            style={getWebcamFrameLayoutStyle(
-              webcamFrameAspect,
-              typeof window !== "undefined" ? window.innerWidth : 0,
-              typeof window !== "undefined" ? window.innerHeight : 0
-            )}
+            style={{
+              ...getWebcamFrameLayoutStyle(
+                webcamFrameAspect,
+                typeof window !== "undefined" ? window.innerWidth : 0,
+                typeof window !== "undefined" ? window.innerHeight : 0,
+                { airSynthBoost: isAirSynthActive }
+              ),
+              position: "relative",
+            }}
           >
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              onLoadedMetadata={handleVideoMetadata}
+            <div
               style={{
-                display: "block",
+                position: "relative",
                 width: "100%",
                 height: "100%",
-                objectFit: "cover",
-                background: "#000",
+                transform: "scaleX(-1)",
               }}
+            >
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                onLoadedMetadata={handleVideoMetadata}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  background: "#000",
+                }}
+              />
+            </div>
+            <KiteAirSynthPanel
+              visible={isAirSynthActive && isCameraActive}
+              mode={airSynth?.mode ?? "two-hand"}
+              musicalKey={airSynth?.key ?? "C"}
+              activeZone={airSynthEngine.activeZone}
+              fingerPointersRef={airSynthEngine.fingerPointersRef}
             />
           </div>
         ) : null}
@@ -2223,8 +2660,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "flex-end",
-          padding: "0 60px 18px",
-          gap: 12,
+          padding: isAirSynthActive ? "0 60px 10px" : "0 60px 18px",
+          gap: isAirSynthActive ? 8 : 12,
         }}
       >
         <p
@@ -2283,6 +2720,75 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         </div>
 
         <div style={{ position: "relative", width: "100%", maxWidth: 580 }}>
+          {showCalibrationOnboarding ? (
+            <div
+              style={{
+                ...glass,
+                marginBottom: 8,
+                zIndex: 35,
+                width: "100%",
+                boxSizing: "border-box",
+                padding: "8px 10px",
+                border: "1px solid rgba(255,69,0,0.32)",
+                background: "rgba(8,8,8,0.82)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
+                <div style={{ color: "rgba(255,255,255,0.78)", fontSize: 11, fontWeight: 600 }}>
+                  {looperState.latencyCalibrationStale
+                    ? "Latency calibration is stale"
+                    : "Latency not calibrated yet"}
+                </div>
+                <div style={{ color: "rgba(255,255,255,0.52)", fontSize: 10, lineHeight: 1.4 }}>
+                  {looperState.latencyCalibrationStale
+                    ? "Audio hardware changed. Re-calibrate in Settings for tighter loop timing."
+                    : "Calibrate once for tighter loop timing on this device."}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputsOpen(false);
+                    setSettingsOpen(true);
+                  }}
+                  style={{
+                    padding: "6px 9px",
+                    borderRadius: 8,
+                    border: "1px solid rgba(255,69,0,0.4)",
+                    background: "rgba(255,69,0,0.12)",
+                    color: ORANGE,
+                    fontSize: 10,
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Go to Settings
+                </button>
+                <button
+                  type="button"
+                  onClick={dismissCalibrationOnboarding}
+                  style={{
+                    padding: "6px 9px",
+                    borderRadius: 8,
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    background: "rgba(255,255,255,0.04)",
+                    color: "rgba(255,255,255,0.7)",
+                    fontSize: 10,
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ) : null}
           <div style={{ display: "flex", gap: 8, width: "100%" }}>
             {looperState.soloTrackLanes.map((lane) => (
               <TrackColumn
@@ -2290,83 +2796,10 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 lane={lane}
                 registerTrackFillEl={registerTrackFillEl}
                 gridLikeMode={gridLikeMode}
+                compact={isAirSynthActive}
               />
             ))}
           </div>
-          {showCalibrationOnboarding ? (
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                zIndex: 35,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                pointerEvents: "none",
-              }}
-            >
-              <div
-                style={{
-                  ...glass,
-                  pointerEvents: "auto",
-                  width: "min(440px, 92%)",
-                  padding: "14px 16px",
-                  border: "1px solid rgba(255,69,0,0.38)",
-                  background: "rgba(8,8,8,0.88)",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 10,
-                  textAlign: "center",
-                }}
-              >
-                <div style={{ color: "rgba(255,255,255,0.78)", fontSize: 12, fontWeight: 600 }}>
-                  {looperState.latencyCalibrationStale
-                    ? "Latency calibration is stale"
-                    : "Latency not calibrated yet"}
-                </div>
-                <div style={{ color: "rgba(255,255,255,0.52)", fontSize: 10, lineHeight: 1.5 }}>
-                  {looperState.latencyCalibrationStale
-                    ? "Audio hardware changed. Re-calibrate in Settings for tighter loop timing."
-                    : "Calibrate once for tighter loop timing on this device."}
-                </div>
-                <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setInputsOpen(false);
-                      setSettingsOpen(true);
-                    }}
-                    style={{
-                      padding: "7px 10px",
-                      borderRadius: 9,
-                      border: "1px solid rgba(255,69,0,0.4)",
-                      background: "rgba(255,69,0,0.12)",
-                      color: ORANGE,
-                      fontSize: 10,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Go to Settings
-                  </button>
-                  <button
-                    type="button"
-                    onClick={dismissCalibrationOnboarding}
-                    style={{
-                      padding: "7px 10px",
-                      borderRadius: 9,
-                      border: "1px solid rgba(255,255,255,0.15)",
-                      background: "rgba(255,255,255,0.04)",
-                      color: "rgba(255,255,255,0.7)",
-                      fontSize: 10,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Dismiss for now
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : null}
         </div>
       </main>
 
@@ -2525,6 +2958,16 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             metronomeVolume={metronome.metronomeVolume}
             onMetronomeVolumeChange={metronome.onMetronomeVolumeChange}
             runwayVisualOnly={looperState.runwayVisualOnly}
+            airSynth={airSynth}
+            isAirSynthActive={isAirSynthActive}
+            isCameraActive={isCameraActive}
+            airSynthStatusLine={airSynthStatusLine}
+            airSynthError={airSynthEngine.error}
+            onAirSynthRetry={airSynthEngine.retry}
+            airSynthVolume={airSynthEngine.volume}
+            onAirSynthVolumeChange={airSynthEngine.setVolume}
+            airSynthWaveform={airSynthEngine.waveform}
+            onAirSynthWaveformChange={airSynthEngine.setWaveform}
           />
         )}
       </AnimatePresence>

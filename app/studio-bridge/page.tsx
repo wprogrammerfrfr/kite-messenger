@@ -15,10 +15,10 @@ import type { User } from "@supabase/supabase-js";
 import { BroadcastDashboard } from "@/components/studio-bridge/BroadcastDashboard";
 import { StudioPreflightLobby } from "@/components/studio-bridge/StudioPreflightLobby";
 import dynamic from "next/dynamic";
-import type { KiteLoopV4InputDevicesProps, SoloTrackLaneView } from "@/components/kite-loop-v2/KiteLoopV4Panel";
+import type { KiteLoopV4InputDevicesProps, KiteLoopV4AirSynthProps, SoloTrackLaneView } from "@/components/kite-loop-v2/KiteLoopV4Panel";
+import type { AirSynthMode, MusicalKey } from "@/lib/theremin/kite-theremin-types";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
-import { isSoloLatencyEntryAllowed } from "@/lib/solo-latency-persistence";
 import { useKiteStudioEngine } from "@/hooks/useKiteStudioEngine";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
 import {
@@ -249,6 +249,10 @@ export default function StudioBridgePage() {
       ui: engineUiConfig,
     });
 
+  const [airSynthEnabled, setAirSynthEnabled] = useState(false);
+  const [airSynthMode, setAirSynthMode] = useState<AirSynthMode>("two-hand");
+  const [airSynthKey, setAirSynthKey] = useState<MusicalKey>("C");
+
   useEffect(() => {
     userRef.current = presenterState.user;
   }, [presenterState.user]);
@@ -305,6 +309,7 @@ export default function StudioBridgePage() {
   const soloLatencyCalibrationStale = engineState.soloLatencyCalibrationStale;
   const soloLatencyStaleMessage = engineState.soloLatencyStaleMessage;
   const soloLatencyLastRawMeasuredMs = engineState.soloLatencyLastRawMeasuredMs;
+  const soloLatencyFloorApplied = engineState.soloLatencyFloorApplied;
   const soloLooperMode = engineState.soloLooperMode;
   const soloTrackBarCounts = engineState.soloTrackBarCounts;
   const soloTrackBarCountsLocked = engineState.soloTrackBarCountsLocked;
@@ -367,6 +372,8 @@ export default function StudioBridgePage() {
   const confirmEndSession = engineActions.confirmEndSession;
   const returnToLobby = engineActions.returnToLobby;
   const toggleAudioDevice = engineActions.toggleAudioDevice;
+  const registerVirtualInputStream = engineActions.registerVirtualInputStream;
+  const unregisterVirtualInputStream = engineActions.unregisterVirtualInputStream;
   const handleVolumeChange = engineActions.handleVolumeChange;
   const setInterfaceInputDeviceFlag = engineActions.setInterfaceInputDeviceFlag;
   const setInterfaceLiveMonitorEnabledFlag = engineActions.setInterfaceLiveMonitorEnabledFlag;
@@ -453,38 +460,20 @@ export default function StudioBridgePage() {
     audioTestDone &&
     kiteSignalSecure;
   const entryLatencyMs = soloLatencyLastRawMeasuredMs ?? soloLooperLatencyMs;
-  const soloLatencyEntryAllowed = isSoloLatencyEntryAllowed(entryLatencyMs);
-  const soloLatencyReady =
-    soloLooperLatencyMs > 0 &&
-    !soloLatencyCalibrationStale &&
-    soloLatencyEntryAllowed;
   const canPracticeAlone =
     studioUiPhase === "lobby" &&
     Boolean(localMicStream) &&
     audioTestDone &&
-    soloLatencyReady &&
     soloLatencyCalibrationStatus !== "listening";
 
   const soloPracticeButtonLabel = ((): string => {
-    if (canPracticeAlone) {
-      return "Kite loopstation";
-    }
     if (soloLatencyCalibrationStatus === "listening") {
       return "Calibrating latency…";
     }
     if (!localMicStream || !audioTestDone) {
       return "Complete preflight checks to enable session entry";
     }
-    if (soloLooperLatencyMs <= 0) {
-      return "Calibrate latency in Session panel";
-    }
-    if (soloLatencyCalibrationStale) {
-      return "Re-calibrate latency — audio hardware changed";
-    }
-    if (!soloLatencyEntryAllowed) {
-      return "Latency out of bounds. Re-calibrate";
-    }
-    return "Complete preflight checks to enable session entry";
+    return "Kite loopstation";
   })();
   const showLobbyControls = studioUiPhase === "lobby";
   const localJamSetupOwnerName = role === "host" ? "Host" : "Bandmate";
@@ -644,6 +633,33 @@ export default function StudioBridgePage() {
       window.setTimeout(() => setRoomCopyNote(null), 1400);
     }
   };
+
+    const airSynthForPanel = useMemo<KiteLoopV4AirSynthProps>(
+      () => ({
+        enabled: airSynthEnabled,
+        mode: airSynthMode,
+        key: airSynthKey,
+        onEnabledChange: (enabled) => {
+          if (enabled && soloLooperMode === "free") {
+            setSoloLooperMode("grid");
+          }
+          setAirSynthEnabled(enabled);
+        },
+        onModeChange: setAirSynthMode,
+        onKeyChange: setAirSynthKey,
+        registerVirtualInput: registerVirtualInputStream,
+        unregisterVirtualInput: unregisterVirtualInputStream,
+      }),
+      [
+        airSynthEnabled,
+        airSynthMode,
+        airSynthKey,
+        soloLooperMode,
+        setSoloLooperMode,
+        registerVirtualInputStream,
+        unregisterVirtualInputStream,
+      ]
+    );
 
     const inputDevicesForPanel = useMemo<KiteLoopV4InputDevicesProps>(() => {
     if (kiteMode === "solo") {
@@ -1046,6 +1062,8 @@ export default function StudioBridgePage() {
               soloLatencyStaleMessage={soloLatencyStaleMessage}
               soloLatencyCalibrationStatus={soloLatencyCalibrationStatus}
               soloLatencyCalibrationMessage={soloLatencyCalibrationMessage}
+              soloLatencyFloorApplied={soloLatencyFloorApplied}
+              soloLatencyRawMeasuredMs={soloLatencyLastRawMeasuredMs}
               onCalibrateSoloLatency={handleAutoCalibrateSoloLatency}
               calibrationDisabled={micPermissionDenied || !localMicStream}
             />
@@ -2093,6 +2111,8 @@ export default function StudioBridgePage() {
             latencyCalibrationStale: soloLatencyCalibrationStale,
             latencyStaleMessage: soloLatencyStaleMessage,
             entryLatencyMs,
+            latencyFloorApplied: soloLatencyFloorApplied,
+            latencyRawMeasuredMs: soloLatencyLastRawMeasuredMs,
             onTempoSliderChange: (v) => {
               setKiteSetupTempo(v);
               broadcastWizardStudioParam({ kiteSetupTempo: v, bpm: v });
@@ -2126,6 +2146,7 @@ export default function StudioBridgePage() {
           studioAudioContextRef={studioAudioContextRef}
           activeStreamsMapRef={activeStreamsMapRef}
           soloTrackSlotUiLatestRef={soloTrackSlotUiLatestRef}
+          airSynth={airSynthForPanel}
         />
         </div>
       ) : null}

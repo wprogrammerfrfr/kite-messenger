@@ -90,6 +90,8 @@ export type KiteEngineState = {
   soloLatencyStaleMessage: string | null;
   /** Unclamped ms from last auto-calibration (entry gate + lobby quality feedback). */
   soloLatencyLastRawMeasuredMs: number | null;
+  /** True when Windows RTL floor was applied to the last calibration result. */
+  soloLatencyFloorApplied: boolean;
   soloLooperMode: SoloLooperMode;
   /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
   handsfreeSequenceActive: boolean;
@@ -176,6 +178,8 @@ export type KiteEngineActions = {
   confirmEndSession: () => void;
   returnToLobby: () => void;
   toggleAudioDevice: (deviceId: string) => void;
+  registerVirtualInputStream: (deviceId: string, stream: MediaStream) => Promise<void>;
+  unregisterVirtualInputStream: (deviceId: string) => Promise<void>;
   handleVolumeChange: (laneKey: string, value: number) => void;
   setInterfaceInputDeviceFlag: (deviceId: string, isInterface: boolean) => void;
   setInterfaceLiveMonitorEnabledFlag: (deviceId: string, enabled: boolean) => void;

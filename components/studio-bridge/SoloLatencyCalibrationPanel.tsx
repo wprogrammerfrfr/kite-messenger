@@ -13,11 +13,15 @@ export type SoloLatencyCalibrationPanelProps = {
   status: "idle" | "warning" | "listening" | "success" | "error";
   message: string | null;
   disabled?: boolean;
+  /** True when Windows floor was applied to the last measurement. */
+  floorApplied?: boolean;
+  /** Raw measured ms before floor (for adjusted messaging). */
+  rawMeasuredMs?: number | null;
   onCalibrate: (mode: "acoustic" | "interface") => void;
 };
 
 const ACOUSTIC_WARNING =
-  "RTL CALIBRATION\n\n1. Keep your wired headphones plugged in.\n2. Find your laptop's built-in mic (usually a tiny hole next to the webcam or near the keyboard).\n3. Hold one headphone earcup directly against the mic.\n4. Hold it steady, then click OK to fire the ping.";
+  "RTL CALIBRATION (recommended)\n\n1. Unplug headphones so sound plays from the laptop speakers.\n2. Keep the built-in mic uncovered (near webcam or keyboard).\n3. Raise speaker volume so the mic can hear the ping in the room.\n4. Click OK to fire the ping.\n\nWindows tip: headphone paths often under-report; speaker→mic is more accurate.";
 
 const INTERFACE_WARNING =
   "Unplug your instrument. Plug a standard audio cable directly from your interface's Output into its Input. Turn the input gain up.";
@@ -45,6 +49,8 @@ export function SoloLatencyCalibrationPanel({
   status,
   message,
   disabled = false,
+  floorApplied = false,
+  rawMeasuredMs = null,
   onCalibrate,
 }: SoloLatencyCalibrationPanelProps): React.JSX.Element {
   const [calibrationMode, setCalibrationMode] = useState<"acoustic" | "interface">("acoustic");
@@ -63,7 +69,10 @@ export function SoloLatencyCalibrationPanel({
   const showLobbyQuality =
     isLobby && status === "success" && entryLatencyMs > 0;
   const qualityFeedback = showLobbyQuality
-    ? getSoloLatencyQualityFeedback(entryLatencyMs)
+    ? getSoloLatencyQualityFeedback(floorApplied ? latencyMs : entryLatencyMs, {
+        floored: floorApplied,
+        rawMs: rawMeasuredMs ?? undefined,
+      })
     : null;
 
   if (isLobby) {
@@ -101,7 +110,7 @@ export function SoloLatencyCalibrationPanel({
             <Zap size={12} />
             {calibrationBusy && calibrationMode === "acoustic"
               ? "Listening..."
-              : "Calibrate Laptop/Mic (Acoustic)"}
+              : "Calibrate Speakers/Mic (Acoustic)"}
           </button>
           <button
             type="button"
@@ -121,7 +130,7 @@ export function SoloLatencyCalibrationPanel({
         </div>
 
         <p className="text-[10px] leading-relaxed text-orange-400/90">
-          Hold wired headphones against the built-in mic, or loop interface out → in before calibrating.
+          Prefer speakers → built-in mic (headphones unplugged). Or loop interface out → in. Optional.
         </p>
 
         {message ? (
@@ -189,7 +198,11 @@ export function SoloLatencyCalibrationPanel({
           type="button"
           disabled={disabled || calibrationBusy}
           onClick={() => triggerCalibration("acoustic")}
-          title={calibrationBusy ? "Calibration in progress" : "Calibrate over laptop speaker/mic path"}
+          title={
+            calibrationBusy
+              ? "Calibration in progress"
+              : "Calibrate speakers → mic (headphones unplugged)"
+          }
           style={{
             padding: "8px 14px",
             border: "1px solid rgba(34,197,94,0.35)",
@@ -209,7 +222,7 @@ export function SoloLatencyCalibrationPanel({
           <Zap size={12} color="#22c55e" />{" "}
           {calibrationBusy && calibrationMode === "acoustic"
             ? "Listening..."
-            : "Calibrate Laptop/Mic (Acoustic)"}
+            : "Calibrate Speakers/Mic (Acoustic)"}
         </button>
         <button
           type="button"
@@ -275,6 +288,9 @@ export function SoloLatencyCalibrationPanel({
       {latencyMs > 0 ? (
         <span style={{ color: "rgba(255,255,255,0.35)", fontSize: 9 }}>
           Applied RTL: {latencyMs} ms
+          {floorApplied && rawMeasuredMs != null
+            ? ` (floor applied; measured ${Math.round(rawMeasuredMs)} ms)`
+            : ""}
         </span>
       ) : null}
     </div>

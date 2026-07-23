@@ -5,12 +5,23 @@ export const SOLO_LATENCY_APPLIED_MIN_MS = 0;
 export const SOLO_LATENCY_APPLIED_MAX_MS = 200;
 export const SOLO_LATENCY_ENTRY_MIN_MS = 15;
 export const SOLO_LATENCY_ENTRY_MAX_MS = 200;
+/** Windows often under-reports headphone RTL; floor applied measurements. */
+export const WINDOWS_RTL_FLOOR_MS = 100;
+
+export type SoloLatencyClientOs = "windows" | "mac" | "other";
 
 export type SoloLatencyQualityTone = "error" | "good" | "fair";
 
 export type SoloLatencyQualityFeedback = {
   message: string;
   tone: SoloLatencyQualityTone;
+};
+
+export type SoloLatencyNormalizedMeasurement = {
+  rawMs: number;
+  appliedMs: number;
+  floored: boolean;
+  os: SoloLatencyClientOs;
 };
 
 export type SoloLatencyHwFingerprint = {
@@ -32,6 +43,58 @@ export function clampSoloLatencyMs(value: number): number {
   );
 }
 
+export function detectSoloLatencyClientOs(): SoloLatencyClientOs {
+  if (typeof navigator === "undefined") {
+    return "other";
+  }
+  const uaData = (
+    navigator as Navigator & {
+      userAgentData?: { platform?: string };
+    }
+  ).userAgentData;
+  const platform = (uaData?.platform ?? navigator.userAgent ?? "").toLowerCase();
+  if (platform.includes("win")) {
+    return "windows";
+  }
+  if (platform.includes("mac")) {
+    return "mac";
+  }
+  return "other";
+}
+
+/**
+ * Post-measure policy: Windows under-reports with headphones; floor at 100ms.
+ * Mac/other trust the measured value (still clamped).
+ */
+export function normalizeSoloLatencyMeasurement(
+  rawMs: number,
+  os: SoloLatencyClientOs = detectSoloLatencyClientOs()
+): SoloLatencyNormalizedMeasurement {
+  const roundedRaw = Number.isFinite(rawMs) ? Math.round(rawMs) : 0;
+  if (roundedRaw <= 0) {
+    return {
+      rawMs: roundedRaw,
+      appliedMs: SOLO_LATENCY_APPLIED_MIN_MS,
+      floored: false,
+      os,
+    };
+  }
+  if (os === "windows" && roundedRaw < WINDOWS_RTL_FLOOR_MS) {
+    return {
+      rawMs: roundedRaw,
+      appliedMs: clampSoloLatencyMs(WINDOWS_RTL_FLOOR_MS),
+      floored: true,
+      os,
+    };
+  }
+  return {
+    rawMs: roundedRaw,
+    appliedMs: clampSoloLatencyMs(roundedRaw),
+    floored: false,
+    os,
+  };
+}
+
 export function isSoloLatencyCalibrated(ms: number): boolean {
   return ms > 0;
 }
@@ -44,7 +107,10 @@ export function isSoloLatencyEntryAllowed(ms: number): boolean {
   return rounded >= SOLO_LATENCY_ENTRY_MIN_MS && rounded <= SOLO_LATENCY_ENTRY_MAX_MS;
 }
 
-export function getSoloLatencyQualityFeedback(ms: number): SoloLatencyQualityFeedback {
+export function getSoloLatencyQualityFeedback(
+  ms: number,
+  options?: { floored?: boolean; rawMs?: number }
+): SoloLatencyQualityFeedback {
   if (!Number.isFinite(ms)) {
     return {
       tone: "error",
@@ -52,6 +118,16 @@ export function getSoloLatencyQualityFeedback(ms: number): SoloLatencyQualityFee
     };
   }
   const rounded = Math.round(ms);
+  if (options?.floored) {
+    const raw = options.rawMs != null && Number.isFinite(options.rawMs) ? Math.round(options.rawMs) : null;
+    return {
+      tone: "fair",
+      message:
+        raw != null
+          ? `Adjusted to ${WINDOWS_RTL_FLOOR_MS}ms floor (measured ${raw}ms — Windows headphone under-report)`
+          : `Adjusted to ${WINDOWS_RTL_FLOOR_MS}ms floor (Windows headphone under-report)`,
+    };
+  }
   if (rounded < SOLO_LATENCY_ENTRY_MIN_MS) {
     return {
       tone: "error",

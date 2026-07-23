@@ -2,6 +2,11 @@
 * Studio bridge WebRTC helpers (browser-only callers must guard with typeof window).
 */
 
+import {
+  isLikelyBluetoothAudioInputLabel,
+  pickPreferredAudioInputDeviceId,
+} from "@/lib/studio-prefer-audio-input";
+
 export const STUDIO_ICE_SERVERS_FALLBACK: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -18,7 +23,11 @@ export const STUDIO_PEER_CONNECTION_CONFIG: RTCConfiguration = {
   iceCandidatePoolSize: 10,
 };
 
-type RtpReceiverWithJitter = RTCRtpReceiver & { jitterBufferTarget?: number };
+type RtpReceiverWithJitter = RTCRtpReceiver & {
+  jitterBufferTarget?: number;
+  playoutDelayHint?: number;
+  jitterBufferDelayHint?: number;
+};
 
 export type LowLatencyReceiverOptions = {
   /** Desktop Safari / WebKit where UA includes Safari but not Chromium-based browsers. */
@@ -42,8 +51,9 @@ function inboundAudioJitterBufferTargetMs(options?: LowLatencyReceiverOptions): 
 }
 
 /**
- * Tune inbound audio playout buffering where `jitterBufferTarget` is supported (no-op otherwise).
- * Safari/WebKit uses a slightly higher target to reduce playout instability; others minimize buffering.
+ * Tune inbound audio playout buffering where supported (no-op otherwise).
+ * Always requests zero playout/jitter delay hints; Safari/WebKit may still use a
+ * slightly higher `jitterBufferTarget` to reduce playout instability.
  */
 export function applyLowLatencyInboundAudioReceivers(
   pc: RTCPeerConnection,
@@ -52,11 +62,27 @@ export function applyLowLatencyInboundAudioReceivers(
   const targetMs = inboundAudioJitterBufferTargetMs(options);
   for (const receiver of pc.getReceivers()) {
     if (receiver.track?.kind !== "audio") continue;
-    if (!("jitterBufferTarget" in receiver)) continue;
-    try {
-      (receiver as RtpReceiverWithJitter).jitterBufferTarget = targetMs;
-    } catch {
-      // Setting may throw on some builds; ignore.
+    const tuned = receiver as RtpReceiverWithJitter;
+    if ("jitterBufferTarget" in tuned) {
+      try {
+        tuned.jitterBufferTarget = targetMs;
+      } catch {
+        // Setting may throw on some builds; ignore.
+      }
+    }
+    if ("playoutDelayHint" in tuned) {
+      try {
+        tuned.playoutDelayHint = 0;
+      } catch {
+        // Setting may throw on some builds; ignore.
+      }
+    }
+    if ("jitterBufferDelayHint" in tuned) {
+      try {
+        tuned.jitterBufferDelayHint = 0;
+      } catch {
+        // Setting may throw on some builds; ignore.
+      }
     }
   }
 }
@@ -141,14 +167,42 @@ export function parseSelectedCandidatePairRttMs(
   return rttMs === null ? null : { rttMs };
 }
 
-/** Same constraint object as historical desktop (zero drift for non-mobile paths). */
+/**
+ * Desktop capture constraints.
+ * Pro (echoSafetyMode=false): exact-false DSP — no AEC/NS/AGC coloring.
+ * Casual (echoSafetyMode=true): soft AEC/NS on for feedback protection; AGC stays off.
+ */
 function desktopStudioAudioConstraints(echoSafetyMode: boolean): MediaTrackConstraints {
+  if (echoSafetyMode) {
+    return {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: false,
+      ...({ latency: { ideal: 0 } } as unknown as MediaTrackConstraints),
+      channelCount: 2,
+      sampleRate: { ideal: 48000 },
+    };
+  }
   return {
-    echoCancellation: echoSafetyMode,
-    noiseSuppression: echoSafetyMode,
-    autoGainControl: false,
-    ...({ latency: { ideal: 0.05 } } as unknown as MediaTrackConstraints),
+    echoCancellation: { exact: false },
+    noiseSuppression: { exact: false },
+    autoGainControl: { exact: false },
+    ...({ latency: { ideal: 0 } } as unknown as MediaTrackConstraints),
     channelCount: 2,
+    sampleRate: { ideal: 48000 },
+  };
+}
+
+/**
+ * Soft Pro fallback for mobile OverconstrainedError — DSP off preferred, never exact,
+ * never injects artificial capture delay.
+ */
+function mobileProSoftFallbackAudioConstraints(): MediaTrackConstraints {
+  return {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    ...({ latency: { ideal: 0 } } as unknown as MediaTrackConstraints),
     sampleRate: { ideal: 48000 },
   };
 }
@@ -187,13 +241,54 @@ export function getStudioAudioConstraints(
   return {
     echoCancellation: { exact: false },
     noiseSuppression: { exact: false },
-    autoGainControl: false,
+    autoGainControl: { exact: false },
     sampleRate: { ideal: 48000 },
   };
 }
 
 // SDP munging (e.g. Opus reorder) was removed after it caused negotiation failures;
 // reintroduce via simple-peer `sdpTransform` only with careful browser testing.
+
+async function enumerateAudioInputDevices(): Promise<MediaDeviceInfo[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter((d) => d.kind === "audioinput" && Boolean(d.deviceId));
+}
+
+/**
+ * Resolve a preferred mic for auto-select. May briefly open a permission probe
+ * (then stop tracks) when labels are still empty.
+ */
+async function resolveAutoPreferredAudioInputDeviceId(): Promise<string | null> {
+  let inputs = await enumerateAudioInputDevices();
+  const hasLabels = inputs.some((d) => d.label.trim().length > 0);
+  if (!hasLabels && navigator.mediaDevices?.getUserMedia) {
+    const probe = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: false,
+    });
+    probe.getTracks().forEach((track) => track.stop());
+    inputs = await enumerateAudioInputDevices();
+  }
+  return pickPreferredAudioInputDeviceId(inputs);
+}
+
+/** Ordered fallback ids after the primary preferred pick fails. */
+function autoSelectFallbackDeviceIds(
+  inputs: MediaDeviceInfo[],
+  primaryId: string
+): string[] {
+  const nonBt = inputs
+    .filter(
+      (d) =>
+        d.deviceId !== primaryId && !isLikelyBluetoothAudioInputLabel(d.label)
+    )
+    .map((d) => d.deviceId);
+  const rest = inputs
+    .filter((d) => d.deviceId !== primaryId && !nonBt.includes(d.deviceId))
+    .map((d) => d.deviceId);
+  return [...nonBt, ...rest];
+}
 
 export async function acquireStudioMicStream(options?: {
   echoSafetyMode?: boolean;
@@ -205,30 +300,72 @@ export async function acquireStudioMicStream(options?: {
   const requestedDeviceId = options?.deviceId?.trim();
   const echoSafetyMode = options?.echoSafetyMode ?? false;
 
-  const buildAudioConstraints = (base: MediaTrackConstraints): MediaTrackConstraints => ({
-    ...base,
-    ...(requestedDeviceId ? { deviceId: { exact: requestedDeviceId } } : {}),
-  });
-
-  const primary = buildAudioConstraints(
-    getStudioAudioConstraints(echoSafetyMode) as MediaTrackConstraints
-  );
-
-  try {
-    return await navigator.mediaDevices.getUserMedia({
-      audio: primary,
-      video: false,
+  const openWithDeviceId = async (exactDeviceId?: string): Promise<MediaStream> => {
+    const buildAudioConstraints = (base: MediaTrackConstraints): MediaTrackConstraints => ({
+      ...base,
+      ...(exactDeviceId ? { deviceId: { exact: exactDeviceId } } : {}),
     });
-  } catch (err) {
-    const isOverconstrained =
-      err instanceof DOMException && err.name === "OverconstrainedError";
-    if (isMobileDevice() && !echoSafetyMode && isOverconstrained) {
+
+    const primary = buildAudioConstraints(
+      getStudioAudioConstraints(echoSafetyMode) as MediaTrackConstraints
+    );
+
+    try {
       return await navigator.mediaDevices.getUserMedia({
-        audio: buildAudioConstraints(desktopStudioAudioConstraints(echoSafetyMode)),
+        audio: primary,
         video: false,
       });
+    } catch (err) {
+      const isOverconstrained =
+        err instanceof DOMException && err.name === "OverconstrainedError";
+      if (isMobileDevice() && !echoSafetyMode && isOverconstrained) {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: buildAudioConstraints(mobileProSoftFallbackAudioConstraints()),
+          video: false,
+        });
+      }
+      throw err;
     }
+  };
+
+  // Manual / re-acquire path: exact deviceId, no Bluetooth filtering.
+  if (requestedDeviceId) {
+    return openWithDeviceId(requestedDeviceId);
+  }
+
+  // Auto path: prefer built-in/USB over Bluetooth Hands-Free mics.
+  let preferredId: string | null = null;
+  let inputs: MediaDeviceInfo[] = [];
+  try {
+    preferredId = await resolveAutoPreferredAudioInputDeviceId();
+    inputs = await enumerateAudioInputDevices();
+  } catch (err) {
+    // Permission denied on probe — same failure surface as a normal getUserMedia deny.
     throw err;
+  }
+
+  const candidateIds = preferredId
+    ? [preferredId, ...autoSelectFallbackDeviceIds(inputs, preferredId)]
+    : [];
+
+  let lastErr: unknown = null;
+  for (const candidateId of candidateIds) {
+    try {
+      return await openWithDeviceId(candidateId);
+    } catch (err) {
+      lastErr = err;
+      const name = err instanceof DOMException ? err.name : "";
+      if (name !== "OverconstrainedError" && name !== "NotFoundError") {
+        throw err;
+      }
+    }
+  }
+
+  // Empty list or all exact candidates failed — unconstrained open (legacy boot behavior).
+  try {
+    return await openWithDeviceId();
+  } catch (err) {
+    throw lastErr ?? err;
   }
 }
 

@@ -24,6 +24,7 @@ import {
 import { buildKiteIntervalGraph, type KiteIntervalGraph } from "@/lib/kite-interval-graph";
 import {
   clampSoloLatencyMs,
+  normalizeSoloLatencyMeasurement,
   readSoloLatencyMs,
   readSoloLatencyHwFingerprint,
   writeSoloLatencyMs,
@@ -67,6 +68,7 @@ import {
   fetchTurnCredentialsWithMeta,
   type StereoProbeResult,
 } from "@/lib/studio-bridge-webrtc";
+import { isLikelyBluetoothAudioInputLabel } from "@/lib/studio-prefer-audio-input";
 import {
   createMetronomePump,
   type MetronomePumpHandle,
@@ -516,6 +518,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [soloLatencyLastRawMeasuredMs, setSoloLatencyLastRawMeasuredMs] = useState<number | null>(
     null
   );
+  const [soloLatencyFloorApplied, setSoloLatencyFloorApplied] = useState(false);
   const soloLatencyCalibrationStaleRef = useRef(false);
   const [soloLooperMode, setSoloLooperMode] = useState<SoloLooperMode>("free");
   const soloLooperModeRef = useRef(soloLooperMode);
@@ -869,6 +872,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const activeStreamsMapRef =
     kiteStudioHost.activeStreamsMapRef as MutableRefObject<Map<string, MediaStream>>;
   const resolveSoloLooperInputStream = kiteStudioHost.resolveSoloLooperInputStream;
+  const rebuildSoloLooperSumGraph = kiteStudioHost.rebuildSoloLooperSumGraph;
   const mutedVoipCloneTrackRef =
     kiteStudioHost.mutedVoipCloneTrackRef as MutableRefObject<MediaStreamTrack | null>;
   const originalVoipSenderTrackRef =
@@ -1866,6 +1870,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
         clearMixerDeviceVolumeState(requestedDeviceId);
         removeAndCleanupDevice(requestedDeviceId);
+        rebuildSoloLooperSumGraph();
         void rebuildMixerAndReplaceTrack();
         return;
       }
@@ -1908,6 +1913,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
             removeAndCleanupDevice(requestedDeviceId);
             clearMixerDeviceVolumeState(requestedDeviceId);
+            rebuildSoloLooperSumGraph();
           };
         });
         setDeviceVolumes((prev) => {
@@ -1922,6 +1928,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           }
           return { ...prev, [lane0]: 100, [lane1]: 100 };
         });
+        rebuildSoloLooperSumGraph();
         await rebuildMixerAndReplaceTrack();
         if (process.env.NODE_ENV !== "production") {
           console.assert(
@@ -1946,7 +1953,82 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       echoSafetyMode,
       ensureStudioAudioContext,
       rebuildMixerAndReplaceTrack,
+      rebuildSoloLooperSumGraph,
       refreshAudioInputDevices,
+      removeAndCleanupDevice,
+      clearMixerDeviceVolumeState,
+      markSoloLatencyStale,
+    ]
+  );
+
+  const registerVirtualInputStream = useCallback(
+    async (deviceId: string, stream: MediaStream) => {
+      if (mixerRebuildInFlightRef.current) return;
+      const requestedDeviceId = deviceId.trim();
+      if (!requestedDeviceId) return;
+
+      const audioTrack = stream.getAudioTracks()[0] ?? null;
+      if (!audioTrack || audioTrack.readyState !== "live") {
+        console.warn("[Kite] Virtual input stream has no live audio track.");
+        return;
+      }
+
+      if (!activeDeviceIdsRef.current.includes(requestedDeviceId)) {
+        if (activeDeviceIdsRef.current.length >= 3) {
+          console.warn("Maximum 3 active input devices supported.");
+          return;
+        }
+        setActiveDeviceIds((prev) => {
+          if (prev.includes(requestedDeviceId)) return prev;
+          return [...prev, requestedDeviceId];
+        });
+      }
+
+      markSoloLatencyStale();
+      activeStreamsMapRef.current.set(requestedDeviceId, stream);
+      audioTrack.onended = () => {
+        if (!activeDeviceIdsRef.current.includes(requestedDeviceId)) return;
+        markSoloLatencyStale();
+        setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
+        removeAndCleanupDevice(requestedDeviceId);
+        clearMixerDeviceVolumeState(requestedDeviceId);
+        rebuildSoloLooperSumGraph();
+      };
+      setDeviceVolumes((prev) => {
+        const lane0 = `${requestedDeviceId}:ch0`;
+        const lane1 = `${requestedDeviceId}:ch1`;
+        if (prev[lane0] !== undefined || prev[lane1] !== undefined) return prev;
+        return { ...prev, [lane0]: 100, [lane1]: 100 };
+      });
+      rebuildSoloLooperSumGraph();
+      await rebuildMixerAndReplaceTrack();
+    },
+    [
+      rebuildMixerAndReplaceTrack,
+      rebuildSoloLooperSumGraph,
+      removeAndCleanupDevice,
+      clearMixerDeviceVolumeState,
+      markSoloLatencyStale,
+    ]
+  );
+
+  const unregisterVirtualInputStream = useCallback(
+    async (deviceId: string) => {
+      if (mixerRebuildInFlightRef.current) return;
+      const requestedDeviceId = deviceId.trim();
+      if (!requestedDeviceId) return;
+      if (!activeDeviceIdsRef.current.includes(requestedDeviceId)) return;
+
+      markSoloLatencyStale();
+      setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
+      clearMixerDeviceVolumeState(requestedDeviceId);
+      removeAndCleanupDevice(requestedDeviceId);
+      rebuildSoloLooperSumGraph();
+      await rebuildMixerAndReplaceTrack();
+    },
+    [
+      rebuildMixerAndReplaceTrack,
+      rebuildSoloLooperSumGraph,
       removeAndCleanupDevice,
       clearMixerDeviceVolumeState,
       markSoloLatencyStale,
@@ -2665,9 +2747,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
                 setActiveDeviceIds((prev) => prev.filter((id) => id !== deviceId));
                 removeAndCleanupDevice(deviceId);
                 clearMixerDeviceVolumeState(deviceId);
+                rebuildSoloLooperSumGraph();
               };
             });
           }
+          rebuildSoloLooperSumGraph();
         } else if (localStreamRef.current) {
           const prevStream = localStreamRef.current;
           const prevTrack = prevStream.getAudioTracks()[0] ?? null;
@@ -2693,8 +2777,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
               setActiveDeviceIds((prev) => prev.filter((id) => id !== deviceId));
               removeAndCleanupDevice(deviceId);
               clearMixerDeviceVolumeState(deviceId);
+              rebuildSoloLooperSumGraph();
             };
           });
+          rebuildSoloLooperSumGraph();
           setActiveDeviceIds((prev) => (prev.includes(deviceId) ? prev : [...prev, deviceId]));
         }
 
@@ -3816,16 +3902,22 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         const resultSampleRate =
           Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
         const measuredMs = Math.round((event.latencyFrames / resultSampleRate) * 1000);
-        const trueOverdubMs = measuredMs;
-        const clampedMs = clampSoloLatencyMs(trueOverdubMs);
+        const { appliedMs, floored, rawMs } = normalizeSoloLatencyMeasurement(measuredMs);
         console.log(
-          `Latency Calibrated | RTL: ${measuredMs}ms | Applied Overdub Latency: ${clampedMs}ms`
+          `Latency Calibrated | RTL: ${rawMs}ms | Applied Overdub Latency: ${appliedMs}ms${
+            floored ? " (Windows floor)" : ""
+          }`
         );
-        soloLooperLatencyMsRef.current = clampedMs;
-        setSoloLooperLatencyMs(clampedMs);
-        setSoloLatencyLastRawMeasuredMs(measuredMs);
+        soloLooperLatencyMsRef.current = appliedMs;
+        setSoloLooperLatencyMs(appliedMs);
+        setSoloLatencyLastRawMeasuredMs(rawMs);
+        setSoloLatencyFloorApplied(floored);
         setSoloLatencyCalibrationStatus("success");
-        setSoloLatencyCalibrationMessage(`RTL ${measuredMs} ms, applied overdub latency ${clampedMs} ms.`);
+        setSoloLatencyCalibrationMessage(
+          floored
+            ? `Measured ${rawMs} ms; applied ${appliedMs} ms (Windows headphone under-report floor).`
+            : `RTL ${rawMs} ms, applied overdub latency ${appliedMs} ms.`
+        );
         clearSoloLatencyStale();
         void (async () => {
           try {
@@ -5382,6 +5474,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     const clamped = clampSoloLatencyMs(value);
     setSoloLooperLatencyMs(clamped);
     setSoloLatencyLastRawMeasuredMs(clamped);
+    setSoloLatencyFloorApplied(false);
   }, []);
 
   const handleStopAndResetSoloLooper = useCallback(() => {
@@ -7549,8 +7642,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           throw new Error("Microphone stream has no audio tracks.");
         }
         const deviceId = audioTracks[0]?.getSettings().deviceId || "default";
+        const trackLabel = audioTracks[0]?.label?.trim() || "(unlabeled)";
+        const btLastResort = isLikelyBluetoothAudioInputLabel(trackLabel);
+        addLog(
+          btLastResort
+            ? `Phase 1 mic (BT last-resort): ${trackLabel} [${deviceId}]`
+            : `Phase 1 mic: ${trackLabel} [${deviceId}]`
+        );
         activeStreamsMapRef.current.set(deviceId, mediaStream);
         setActiveDeviceIds((prev) => (prev.includes(deviceId) ? prev : [...prev, deviceId]));
+        rebuildSoloLooperSumGraph();
         void rebuildMixerAndReplaceTrack();
 
         micStream = mediaStream;
@@ -7821,6 +7922,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloLatencyCalibrationStale,
     soloLatencyStaleMessage,
     soloLatencyLastRawMeasuredMs,
+    soloLatencyFloorApplied,
     soloLooperMode,
     handsfreeSequenceActive,
     soloTrackBarCounts,
@@ -7886,6 +7988,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloLatencyCalibrationStale,
       soloLatencyStaleMessage,
       soloLatencyLastRawMeasuredMs,
+      soloLatencyFloorApplied,
       soloLooperMode,
       handsfreeSequenceActive,
       soloTrackBarCounts,
@@ -7906,6 +8009,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     confirmEndSession,
     returnToLobby,
     toggleAudioDevice,
+    registerVirtualInputStream,
+    unregisterVirtualInputStream,
     handleVolumeChange,
     setInterfaceInputDeviceFlag,
     setInterfaceLiveMonitorEnabledFlag,
@@ -7965,6 +8070,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       confirmEndSession,
       returnToLobby,
       toggleAudioDevice,
+      registerVirtualInputStream,
+      unregisterVirtualInputStream,
       handleVolumeChange,
       setInterfaceInputDeviceFlag,
       setInterfaceLiveMonitorEnabledFlag,

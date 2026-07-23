@@ -62,6 +62,7 @@ export type KiteStudioHostApi = {
   resolveSoloLooperInputStream: (
     destinationNode: MediaStreamAudioDestinationNode
   ) => { inputStream: MediaStream | null; masterStream: MediaStream };
+  rebuildSoloLooperSumGraph: () => void;
   mutedVoipCloneTrackRef: RefObject<MediaStreamTrack | null>;
   originalVoipSenderTrackRef: RefObject<MediaStreamTrack | null>;
   voipSenderMutedForKiteRef: RefObject<boolean>;
@@ -87,6 +88,10 @@ export function useKiteStudioHost(config: UseKiteStudioHostConfig): KiteStudioHo
   const mixerKiteTapStreamRef = useRef<MediaStream | null>(null);
 
   const activeStreamsMapRef = useRef<Map<string, MediaStream>>(new Map());
+  const soloInputSumDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const soloInputSumSourcesRef = useRef<
+    Map<string, { source: MediaStreamAudioSourceNode; stream: MediaStream }>
+  >(new Map());
   const originalVoipSenderTrackRef = useRef<MediaStreamTrack | null>(null);
   const mutedVoipCloneTrackRef = useRef<MediaStreamTrack | null>(null);
   const voipSenderMutedForKiteRef = useRef(false);
@@ -212,6 +217,20 @@ export function useKiteStudioHost(config: UseKiteStudioHostConfig): KiteStudioHo
     } catch {
       /* ignore */
     }
+    for (const entry of Array.from(soloInputSumSourcesRef.current.values())) {
+      try {
+        entry.source.disconnect();
+      } catch {
+        /* ignore */
+      }
+    }
+    soloInputSumSourcesRef.current.clear();
+    try {
+      soloInputSumDestinationRef.current?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    soloInputSumDestinationRef.current = null;
     mixerMasterDestinationRef.current = null;
     mixerMasterStreamRef.current = null;
     mixerKiteTapDestinationRef.current = null;
@@ -243,12 +262,88 @@ export function useKiteStudioHost(config: UseKiteStudioHostConfig): KiteStudioHo
     return destinationNode;
   }, []);
 
+  const ensureSoloInputSumDestination = useCallback((): MediaStreamAudioDestinationNode | null => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return null;
+    let dest = soloInputSumDestinationRef.current;
+    if (!dest) {
+      dest = ctx.createMediaStreamDestination();
+      soloInputSumDestinationRef.current = dest;
+    }
+    return dest;
+  }, []);
+
+  const rebuildSoloLooperSumGraph = useCallback((): void => {
+    const cfg = configRef.current;
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
+
+    const dest = ensureSoloInputSumDestination();
+    if (!dest) return;
+
+    const desiredIds = new Set<string>();
+    for (const deviceId of cfg.activeDeviceIdsRef.current ?? []) {
+      const stream = activeStreamsMapRef.current.get(deviceId) ?? null;
+      const hasLiveAudioTrack = stream
+        ? stream.getAudioTracks().some((track) => track.readyState === "live")
+        : false;
+      if (!stream || !hasLiveAudioTrack) continue;
+      desiredIds.add(deviceId);
+
+      const existing = soloInputSumSourcesRef.current.get(deviceId);
+      if (existing && existing.stream === stream) continue;
+
+      if (existing) {
+        try {
+          existing.source.disconnect();
+        } catch {
+          /* ignore */
+        }
+        soloInputSumSourcesRef.current.delete(deviceId);
+      }
+
+      try {
+        const source = ctx.createMediaStreamSource(stream);
+        source.connect(dest);
+        soloInputSumSourcesRef.current.set(deviceId, { source, stream });
+      } catch (error) {
+        console.warn("[Kite] Could not connect solo sum source:", deviceId, error);
+      }
+    }
+
+    for (const [deviceId, entry] of Array.from(soloInputSumSourcesRef.current.entries())) {
+      if (desiredIds.has(deviceId)) continue;
+      try {
+        entry.source.disconnect();
+      } catch {
+        /* ignore */
+      }
+      soloInputSumSourcesRef.current.delete(deviceId);
+    }
+  }, [ensureSoloInputSumDestination]);
+
   const resolveSoloLooperInputStream = useCallback(
     (
       destinationNode: MediaStreamAudioDestinationNode
     ): { inputStream: MediaStream | null; masterStream: MediaStream } => {
       const cfg = configRef.current;
       const masterStream = mixerMasterDestinationRef.current?.stream ?? destinationNode.stream;
+
+      rebuildSoloLooperSumGraph();
+
+      const sumDest = soloInputSumDestinationRef.current;
+      const sumHasSources = soloInputSumSourcesRef.current.size > 0;
+      if (sumDest && sumHasSources) {
+        const sumStream = sumDest.stream;
+        if (
+          sumStream !== masterStream &&
+          sumStream !== destinationNode.stream &&
+          sumStream.getAudioTracks().some((track) => track.readyState === "live")
+        ) {
+          return { inputStream: sumStream, masterStream };
+        }
+      }
+
       let inputStream: MediaStream | null = null;
       for (const deviceId of cfg.activeDeviceIdsRef.current ?? []) {
         const stream = activeStreamsMapRef.current.get(deviceId) ?? null;
@@ -271,7 +366,7 @@ export function useKiteStudioHost(config: UseKiteStudioHostConfig): KiteStudioHo
       }
       return { inputStream, masterStream };
     },
-    []
+    [rebuildSoloLooperSumGraph]
   );
 
   const runSynchronousHardwareKillSwitch = useCallback((opts: KillSwitchOpts = {}): void => {
@@ -300,6 +395,21 @@ export function useKiteStudioHost(config: UseKiteStudioHostConfig): KiteStudioHo
         stopStreamTracksSafe(stream);
       }
       activeStreamsMapRef.current.clear();
+
+      for (const entry of Array.from(soloInputSumSourcesRef.current.values())) {
+        try {
+          entry.source.disconnect();
+        } catch {
+          /* ignore */
+        }
+      }
+      soloInputSumSourcesRef.current.clear();
+      try {
+        soloInputSumDestinationRef.current?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      soloInputSumDestinationRef.current = null;
 
       if (opts.localMicStreamRef?.current !== undefined) {
         stopStreamTracksSafe(opts.localMicStreamRef.current);
@@ -349,6 +459,7 @@ export function useKiteStudioHost(config: UseKiteStudioHostConfig): KiteStudioHo
     mixerKiteTapStreamRef,
     activeStreamsMapRef,
     resolveSoloLooperInputStream,
+    rebuildSoloLooperSumGraph,
     mutedVoipCloneTrackRef,
     originalVoipSenderTrackRef,
     voipSenderMutedForKiteRef,

@@ -36,6 +36,8 @@ export type StudioPreflightLobbyProps = {
   soloLatencyStaleMessage: string | null;
   soloLatencyCalibrationStatus: "idle" | "warning" | "listening" | "success" | "error";
   soloLatencyCalibrationMessage: string | null;
+  soloLatencyFloorApplied?: boolean;
+  soloLatencyRawMeasuredMs?: number | null;
   onCalibrateSoloLatency: (mode: "acoustic" | "interface") => void;
   calibrationDisabled?: boolean;
 };
@@ -154,6 +156,8 @@ function StudioPreflightLobbyInner({
   soloLatencyStaleMessage,
   soloLatencyCalibrationStatus,
   soloLatencyCalibrationMessage,
+  soloLatencyFloorApplied = false,
+  soloLatencyRawMeasuredMs = null,
   onCalibrateSoloLatency,
   calibrationDisabled = false,
 }: StudioPreflightLobbyProps) {
@@ -422,13 +426,16 @@ function StudioPreflightLobbyInner({
                   </li>
                   <li className="flex items-center gap-2">
                     <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
-                    <span>calibrate before looping</span>
+                    <span>calibrate recommended for tighter loops</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
                     <span>Ethernet for best performance</span>
                   </li>
                 </ul>
+                <p className="mt-3 text-[11px] leading-relaxed text-stone-500">
+                  You can enter now; calibrate anytime in Settings for tighter timing.
+                </p>
               </div>
 
               <SoloLatencyCalibrationPanel
@@ -440,6 +447,8 @@ function StudioPreflightLobbyInner({
                 status={soloLatencyCalibrationStatus}
                 message={soloLatencyCalibrationMessage}
                 disabled={calibrationDisabled}
+                floorApplied={soloLatencyFloorApplied}
+                rawMeasuredMs={soloLatencyRawMeasuredMs}
                 onCalibrate={onCalibrateSoloLatency}
               />
             </div>
