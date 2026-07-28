@@ -41,6 +41,7 @@ const CHORD_INTERVALS: Record<ChordType, number[]> = {
   m: [0, 3, 7],
   maj7: [0, 4, 7, 11],
   m7: [0, 3, 7, 10],
+  m6: [0, 3, 7, 9],
 };
 
 /** Root + type → frequencies (default octave 4 for root). */

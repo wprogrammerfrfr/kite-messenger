@@ -18,12 +18,13 @@ import type { AirSynthFingerPointers } from "@/lib/theremin/kite-theremin-vision
 const EMERALD = "#22c55e";
 const ORANGE = "#ff4500";
 
-/** Display-only labels for 2-Dial chord types (engine values stay maj/m/maj7/m7). */
+/** Display-only labels for 2-Dial chord types (engine values stay maj/m/maj7/m7/m6). */
 const CHORD_TYPE_DISPLAY: Record<ChordType, string> = {
   maj: "M",
   m: "min",
   maj7: "M7",
   m7: "min7",
+  m6: "min6",
 };
 
 const ACTIVE_LABEL_FILL = ORANGE;

@@ -2,7 +2,7 @@ export const KITE_AIR_SYNTH_DEVICE_ID = "kite:air-synth";
 
 export type AirSynthMode = "two-hand" | "single-hand";
 
-export type ChordType = "maj" | "m" | "maj7" | "m7";
+export type ChordType = "maj" | "m" | "maj7" | "m7" | "m6";
 
 export type RootNote =
   | "C"
@@ -74,7 +74,7 @@ export const ROOT_NOTES: readonly RootNote[] = [
   "B",
 ] as const;
 
-export const CHORD_TYPES: readonly ChordType[] = ["maj", "m", "maj7", "m7"] as const;
+export const CHORD_TYPES: readonly ChordType[] = ["maj", "m", "maj7", "m7", "m6"] as const;
 
 export const DIATONIC_DEGREES: readonly DiatonicDegree[] = [
   "I",
