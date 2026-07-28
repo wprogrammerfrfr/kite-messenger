@@ -301,6 +301,7 @@ export default function StudioBridgePage() {
   const soloActiveRecordTrackIndex = engineState.soloActiveRecordTrackIndex;
   const isRecordingArmed = engineState.isRecordingArmed;
   const soloTrackVolumes = engineState.soloTrackVolumes;
+  const masterLoopVolume = engineState.masterLoopVolume;
   const soloMasterLoopFrames = engineState.soloMasterLoopFrames;
   const soloLooperLatencyMs = engineState.soloLooperLatencyMs;
   const soloInputGain = engineState.soloInputGain;
@@ -389,6 +390,7 @@ export default function StudioBridgePage() {
   const handleResetSoloTrack = engineActions.handleResetSoloTrack;
   const handleTrackTransportTap = engineActions.handleTrackTransportTap;
   const handleSoloTrackVolumeChange = engineActions.handleSoloTrackVolumeChange;
+  const setMasterLoopVolume = engineActions.setMasterLoopVolume;
   const handleToggleSoloSessionRecording = engineActions.handleToggleSoloSessionRecording;
   const handleStartKiteSetup = engineActions.handleStartKiteSetup;
   const handleCancelKiteSetup = engineActions.handleCancelKiteSetup;
@@ -2146,6 +2148,8 @@ export default function StudioBridgePage() {
           studioAudioContextRef={studioAudioContextRef}
           activeStreamsMapRef={activeStreamsMapRef}
           soloTrackSlotUiLatestRef={soloTrackSlotUiLatestRef}
+          masterLoopVolume={masterLoopVolume}
+          onMasterLoopVolumeChange={setMasterLoopVolume}
           airSynth={airSynthForPanel}
         />
         </div>

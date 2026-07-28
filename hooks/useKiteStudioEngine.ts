@@ -499,6 +499,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [soloTrackVolumes, setSoloTrackVolumes] = useState<[number, number, number, number]>([
     1, 1, 1, 1,
   ]);
+  /** Linear 0–1 master loop playback volume (post-worklet bus; live mic unaffected). */
+  const [masterLoopVolume, setMasterLoopVolumeState] = useState(1);
   /** Track 1 closed loop length in frames (drives overdub arm + snapping UI). */
   const [soloMasterLoopFrames, setSoloMasterLoopFrames] = useState<number | null>(null);
   /** Temporary RTL calibration control for hardware Clap Test. */
@@ -775,6 +777,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
   const loopProgressRafRef = useRef<number | null>(null);
   const soloTrackVolumesRef = useRef<[number, number, number, number]>([1, 1, 1, 1]);
+  const masterLoopVolumeRef = useRef(1);
   const isRecordingArmedRef = useRef(false);
   /** Solo looper 4-beat runway: metronome pump tick; transport arms after beat 4 via `startLooperRunway`. */
   const soloCountInPumpRef = useRef<MetronomePumpHandle | null>(null);
@@ -949,6 +952,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   useEffect(() => {
     soloTrackVolumesRef.current = soloTrackVolumes;
   }, [soloTrackVolumes]);
+
+  useEffect(() => {
+    masterLoopVolumeRef.current = masterLoopVolume;
+  }, [masterLoopVolume]);
 
   useEffect(() => {
     soloLooperLatencyMsRef.current = soloLooperLatencyMs;
@@ -4028,6 +4035,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       channelCount: 2,
       monitorDestination: ctx.destination,
       monitorGain: 1,
+      outputGain: masterLoopVolumeRef.current,
       inputGain: (soloInputGain / 10) * 2,
       onEvent: (event) => handleSoloLooperEvent(event, ctx),
     });
@@ -4177,6 +4185,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           channelCount: 2,
           monitorDestination: ctx.destination,
           monitorGain: 1,
+          outputGain: masterLoopVolumeRef.current,
           inputGain: (soloInputGain / 10) * 2,
           onEvent: (event) => handleSoloLooperEvent(event, ctx),
         });
@@ -5520,6 +5529,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       return next;
     });
     soloLooperEngineRef.current?.setTrackGain(trackIndex, g);
+  }, []);
+
+  const setMasterLoopVolume = useCallback((linear: number) => {
+    const clamped = Math.max(0, Math.min(1, linear));
+    masterLoopVolumeRef.current = clamped;
+    setMasterLoopVolumeState(clamped);
+    soloLooperEngineRef.current?.setMasterLoopVolume(clamped);
   }, []);
 
   const handleToggleMasterPause = useCallback(() => {
@@ -7914,6 +7930,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloActiveRecordTrackIndex,
     isRecordingArmed,
     soloTrackVolumes,
+    masterLoopVolume,
     soloMasterLoopFrames,
     soloLooperLatencyMs,
     soloInputGain,
@@ -7980,6 +7997,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloActiveRecordTrackIndex,
       isRecordingArmed,
       soloTrackVolumes,
+      masterLoopVolume,
       soloMasterLoopFrames,
       soloLooperLatencyMs,
       soloInputGain,
@@ -8031,6 +8049,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     onLooperPedalDown: () => onLooperPedalDown(soloPedalTargetTrackIndexRef.current),
     handleTrackTransportTap,
     handleSoloTrackVolumeChange,
+    setMasterLoopVolume,
     handleToggleSoloSessionRecording,
     downloadSoloSessionBlob,
     handleStartKiteSetup,
@@ -8092,6 +8111,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       onLooperPedalDown,
       handleTrackTransportTap,
       handleSoloTrackVolumeChange,
+      setMasterLoopVolume,
       handleToggleSoloSessionRecording,
       downloadSoloSessionBlob,
       handleStartKiteSetup,

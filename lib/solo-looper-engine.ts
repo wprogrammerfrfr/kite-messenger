@@ -190,6 +190,7 @@ export type SoloLooperEngine = {
   sourceNode: MediaStreamAudioSourceNode;
   inputGain: GainNode;
   inputAnalyserNode: AnalyserNode;
+  /** Post-worklet master loop bus; does not affect raw mic tap. */
   outputGain: GainNode;
   recordingPlaybackDelayNode: DelayNode;
   recordingDestination: MediaStreamAudioDestinationNode;
@@ -212,6 +213,8 @@ export type SoloLooperEngine = {
   stopRecording(params: SoloLooperStopRecordingParams): void;
   /** Per-track wet gain (0–4) applied in the worklet summing bus. */
   setTrackGain(trackIndex: number, gain: number): void;
+  /** Master loop playback volume (0–1) on the post-worklet output bus. */
+  setMasterLoopVolume(linearGain: number): void;
   /** Store per-track grid/handsfree target frames (no buffer allocation). */
   setTrackTargetLength(trackIndex: number, targetLengthFrames: number): void;
   /** Ask the worklet to post a `PLAYBACK_UI_STATE` snapshot (poll from rAF). */
@@ -595,6 +598,16 @@ export async function buildSoloLooperEngine(
       assertValidTrackIndex(trackIndex);
       const g = Number.isFinite(linearGain) ? Math.max(0, Math.min(4, linearGain)) : 1;
       workletNode.port.postMessage({ type: "SET_TRACK_GAIN", trackIndex, gain: g });
+    },
+    setMasterLoopVolume(linearGain: number): void {
+      if (tornDown || ctx.state === "closed") return;
+      const clamped = Number.isFinite(linearGain) ? Math.max(0, Math.min(1, linearGain)) : 1;
+      try {
+        outputGain.gain.cancelScheduledValues(ctx.currentTime);
+        outputGain.gain.setTargetAtTime(clamped, ctx.currentTime, 0.01);
+      } catch {
+        /* ignore */
+      }
     },
     setTrackTargetLength(trackIndex: number, targetLengthFrames: number): void {
       if (tornDown) return;

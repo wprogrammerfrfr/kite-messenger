@@ -80,6 +80,8 @@ export type KiteEngineState = {
   soloActiveRecordTrackIndex: number | null;
   isRecordingArmed: boolean;
   soloTrackVolumes: [number, number, number, number];
+  /** Master loop playback volume (0–1); does not affect live mic monitoring. */
+  masterLoopVolume: number;
   soloMasterLoopFrames: number | null;
   soloLooperLatencyMs: number;
   soloInputGain: number;
@@ -200,6 +202,7 @@ export type KiteEngineActions = {
   onLooperPedalDown: () => void;
   handleTrackTransportTap: (trackIndex: 1 | 2 | 3 | 4) => void;
   handleSoloTrackVolumeChange: (trackIndex: 1 | 2 | 3 | 4, linear: number) => void;
+  setMasterLoopVolume: (linear: number) => void;
   handleToggleSoloSessionRecording: () => void;
   downloadSoloSessionBlob: (blob: Blob, ext: string) => void;
   handleStartKiteSetup: (origin: KiteSetupOrigin, mode?: KiteMode) => void;

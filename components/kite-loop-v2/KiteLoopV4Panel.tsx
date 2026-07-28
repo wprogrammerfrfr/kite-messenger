@@ -162,6 +162,9 @@ export type KiteLoopV4PanelProps = {
   soloTrackSlotUiLatestRef: MutableRefObject<
     SoloLooperPlaybackUiStateEvent["slots"] | null
   >;
+  /** Master loop playback volume (0–1); live mic monitoring unaffected. */
+  masterLoopVolume: number;
+  onMasterLoopVolumeChange: (linear: number) => void;
   airSynth?: KiteLoopV4AirSynthProps;
 };
 
@@ -629,6 +632,127 @@ function VertSlider({ value, onChange, compact = false }: VertSliderProps): Reac
           outline: "none",
           background: `linear-gradient(to top,${ORANGE} ${value}%,rgba(255,255,255,0.09) ${value}%)`,
           accentColor: ORANGE,
+        }}
+      />
+    </div>
+  );
+}
+
+/** Shared glass pill chrome for LIVE meter and LOOPS master volume. */
+function SideRailMeterPill({
+  icon,
+  label,
+  children,
+}: {
+  icon: ReactNode;
+  label: string;
+  children: ReactNode;
+}): React.JSX.Element {
+  return (
+    <div
+      style={{
+        ...glass,
+        borderRadius: 9999,
+        padding: "18px 11px",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 6,
+      }}
+    >
+      {icon}
+      <div
+        style={{
+          height: 231,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {children}
+      </div>
+      <span
+        style={{
+          color: "rgba(255,255,255,0.15)",
+          fontSize: 7,
+          letterSpacing: "0.14em",
+          writingMode: "vertical-rl",
+          transform: "rotate(180deg)",
+          marginTop: 4,
+          fontFamily: "monospace",
+        }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+/** Master loop fader — matches LiveSoundBar height (231px) with emerald→orange fill. */
+function MasterLoopVolumeSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}): React.JSX.Element {
+  const fillPct = Math.max(0, Math.min(100, value));
+  return (
+    <div
+      style={{
+        position: "relative",
+        width: 10,
+        height: 231,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: 9999,
+          background: SLIDER_TRACK_EMPTY,
+          overflow: "hidden",
+          pointerEvents: "none",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            height: `${fillPct}%`,
+            background: `linear-gradient(to top, ${EMERALD} 0%, #eab308 61%, ${ORANGE} 100%)`,
+            borderRadius: 9999,
+          }}
+        />
+      </div>
+      <input
+        type="range"
+        className="kite-master-loop-slider"
+        min={0}
+        max={100}
+        value={value}
+        aria-label="Master loop volume"
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{
+          position: "relative",
+          zIndex: 1,
+          WebkitAppearance: "none",
+          appearance: "none",
+          cursor: "pointer",
+          writingMode: "vertical-lr",
+          direction: "rtl",
+          width: 10,
+          height: 231,
+          borderRadius: 9999,
+          outline: "none",
+          background: "transparent",
+          accentColor: EMERALD,
+          margin: 0,
         }}
       />
     </div>
@@ -2156,6 +2280,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   studioAudioContextRef,
   activeStreamsMapRef,
   soloTrackSlotUiLatestRef,
+  masterLoopVolume,
+  onMasterLoopVolumeChange,
   airSynth,
 }: KiteLoopV4PanelProps): React.JSX.Element {
   const timing = looperConfig.kiteIntervalTimingRef.current;
@@ -2574,7 +2700,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
           <button
             type="button"
             disabled={solo === "idle" && !looperState.isRecordingArmed}
@@ -2597,38 +2723,83 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             {masterPaused ? "Play" : "Pause"}
           </button>
 
-          <button
-            type="button"
-            disabled={sessionTapeState === "saving"}
-            onClick={() => looperHandlers.onToggleSessionRecording()}
+          <div
             style={{
-              ...glassSharp,
-              padding: "7px 14px",
-              cursor: sessionTapeState === "saving" ? "wait" : "pointer",
-              border: `1px solid ${sessionTapeState !== "idle" ? "rgba(255,69,0,0.45)" : "rgba(239, 68, 68, 0.5)"}`,
-              background: sessionTapeState !== "idle" ? "rgba(255,69,0,0.08)" : "rgba(239, 68, 68, 0.06)",
-              color: SESSION_COLORS[sessionTapeState],
-              fontSize: 11,
               display: "flex",
-              alignItems: "center",
+              flexDirection: "column",
+              alignItems: "stretch",
               gap: 6,
             }}
           >
-            <Circle
-              size={10}
+            <button
+              type="button"
+              disabled={sessionTapeState === "saving"}
+              onClick={() => looperHandlers.onToggleSessionRecording()}
               style={{
-                fill: sessionTapeState === "recording" ? ORANGE : "transparent",
+                ...glassSharp,
+                padding: "7px 14px",
+                cursor: sessionTapeState === "saving" ? "wait" : "pointer",
+                border: `1px solid ${sessionTapeState !== "idle" ? "rgba(255,69,0,0.45)" : "rgba(239, 68, 68, 0.5)"}`,
+                background: sessionTapeState !== "idle" ? "rgba(255,69,0,0.08)" : "rgba(239, 68, 68, 0.06)",
                 color: SESSION_COLORS[sessionTapeState],
+                fontSize: 11,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
               }}
-            />
-            {sessionTapeState === "idle"
-              ? "Record Session"
-              : sessionTapeState === "recording"
-                ? "Recording…"
-                : sessionTapeState === "paused"
-                  ? "Tape Paused"
-                  : "Saving…"}
-          </button>
+            >
+              <Circle
+                size={10}
+                style={{
+                  fill: sessionTapeState === "recording" ? ORANGE : "transparent",
+                  color: SESSION_COLORS[sessionTapeState],
+                }}
+              />
+              {sessionTapeState === "idle"
+                ? "Record Session"
+                : sessionTapeState === "recording"
+                  ? "Recording…"
+                  : sessionTapeState === "paused"
+                    ? "Tape Paused"
+                    : "Saving…"}
+            </button>
+
+            <AnimatePresence>
+              {!inputsOpen ? (
+                <motion.button
+                  type="button"
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  onClick={() => {
+                    setInputsOpen(true);
+                    setSettingsOpen(false);
+                    setIsTunerOpen(false);
+                  }}
+                  style={{
+                    ...glassSharp,
+                    padding: "6px 10px",
+                    cursor: "pointer",
+                    display: "flex",
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    background: "rgba(10,10,10,0.75)",
+                    color: "rgba(255,255,255,0.5)",
+                    fontSize: 10,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  <Mic size={12} color={EMERALD} />
+                  Input Device
+                  <ChevronRight size={10} color="rgba(255,255,255,0.2)" />
+                </motion.button>
+              ) : null}
+            </AnimatePresence>
+          </div>
 
           {(solo === "recording" || solo === "captured") && (
             <button
@@ -2858,86 +3029,37 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           </span>
         </button>
 
-        <div
-          style={{
-            ...glass,
-            borderRadius: 9999,
-            padding: "18px 11px",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 6,
-          }}
+        <SideRailMeterPill
+          icon={<Volume2 size={11} color="rgba(255,255,255,0.2)" />}
+          label="LIVE"
         >
-          <Volume2 size={11} color="rgba(255,255,255,0.2)" />
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
-            <LiveSoundBar
-              active={masterTransportLive}
-              registerMasterLiveMeterElement={inputDevices.registerMasterLiveMeterElement}
-            />
-          </div>
-          <span
-            style={{
-              color: "rgba(255,255,255,0.15)",
-              fontSize: 7,
-              letterSpacing: "0.14em",
-              writingMode: "vertical-rl",
-              transform: "rotate(180deg)",
-              marginTop: 4,
-              fontFamily: "monospace",
-            }}
-          >
-            LIVE
-          </span>
-        </div>
+          <LiveSoundBar
+            active={masterTransportLive}
+            registerMasterLiveMeterElement={inputDevices.registerMasterLiveMeterElement}
+          />
+        </SideRailMeterPill>
       </div>
 
-      <AnimatePresence>
-        {!inputsOpen && (
-          <motion.button
-            type="button"
-            initial={{ opacity: 0, x: 16 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 16 }}
-            onClick={() => {
-              setInputsOpen(true);
-              setSettingsOpen(false);
-              setIsTunerOpen(false);
-            }}
-            style={{
-              position: "absolute",
-              right: 10,
-              top: "50%",
-              transform: "translateY(-50%)",
-              zIndex: 10,
-              ...glassSharp,
-              borderRadius: 14,
-              padding: "14px 8px",
-              cursor: "pointer",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 6,
-              border: "1px solid rgba(255,255,255,0.08)",
-              background: "rgba(10,10,10,0.75)",
-            }}
-          >
-            <Mic size={13} color={EMERALD} />
-            <span
-              style={{
-                color: "rgba(255,255,255,0.5)",
-                fontSize: 7,
-                letterSpacing: "0.15em",
-                writingMode: "vertical-rl",
-                textTransform: "uppercase",
-              }}
-            >
-              Input Device
-            </span>
-            <ChevronRight size={10} color="rgba(255,255,255,0.2)" />
-          </motion.button>
-        )}
-      </AnimatePresence>
+      {/* Master loop volume — right rail */}
+      <div
+        style={{
+          position: "absolute",
+          right: 10,
+          top: "50%",
+          transform: "translateY(-50%)",
+          zIndex: 10,
+        }}
+      >
+        <SideRailMeterPill
+          icon={<Volume2 size={11} color="rgba(34,197,94,0.35)" />}
+          label="LOOPS"
+        >
+          <MasterLoopVolumeSlider
+            value={Math.round(masterLoopVolume * 100)}
+            onChange={(v) => onMasterLoopVolumeChange(v / 100)}
+          />
+        </SideRailMeterPill>
+      </div>
 
       <KiteTunerPanel
         isOpen={isTunerOpen}
@@ -3012,6 +3134,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
       <style>{`
         @keyframes kiteLooperV4Pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
         input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:13px; height:13px; border-radius:50%; background:#fff; cursor:pointer; box-shadow:0 0 4px rgba(0,0,0,0.6); }
+        input[type=range].kite-master-loop-slider::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:#22c55e; border:1px solid rgba(255,255,255,0.35); cursor:pointer; box-shadow:0 0 6px rgba(34,197,94,0.55); }
+        input[type=range].kite-master-loop-slider::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:#22c55e; border:1px solid rgba(255,255,255,0.35); cursor:pointer; box-shadow:0 0 6px rgba(34,197,94,0.55); }
         input[type=range] { -webkit-appearance:none; appearance:none; }
         * { box-sizing: border-box; }
       `}</style>
