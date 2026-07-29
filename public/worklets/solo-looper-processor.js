@@ -5,14 +5,19 @@ const MAX_RECORDING_SECONDS = 60;
 
 const LOOP_CROSSFADE_SAMPLES = Math.max(2, Math.floor(sampleRate * 0.005));
 const DEFAULT_BPM = 120;
-const CALIBRATION_THRESHOLD = 0.05;
-const CALIBRATION_TIMEOUT_FRAMES = 24000;
-const CALIBRATION_CLICK_AMPLITUDE = 0.95;
-const CALIBRATION_BURST_FRAMES = 10;
-const CALIBRATION_ENERGY_WINDOW = 8;
-const CALIBRATION_ENERGY_THRESHOLD = 0.04;
-/** Ignore near-field electrical returns before arming acoustic threshold detection. */
-const CALIBRATION_BLANKING_FRAMES = Math.max(1, Math.floor(sampleRate * 0.030));
+/** Guided wizard: max preview RTL (frames) — matches 400 ms applied cap. */
+const GUIDED_CAL_MAX_OFFSET_FRAMES = Math.max(1, Math.floor(sampleRate * 0.4));
+/** Guided wizard: constant-power crossfade when preview offset changes (click-free). */
+const GUIDED_CAL_OFFSET_FADE_FRAMES = Math.max(2, Math.floor(sampleRate * 0.004));
+/** Guided wizard: max capture length (4 bars @ 30 BPM safety ceiling, still ≤ 60 s). */
+const GUIDED_CAL_MAX_CAPTURE_FRAMES = Math.min(
+  Math.floor(sampleRate * MAX_RECORDING_SECONDS),
+  Math.max(1, Math.floor(sampleRate * 8))
+);
+/** Guided wizard: throttle progress posts (~23 ms @ 48 kHz) to avoid message spam. */
+const GUIDED_CAL_PROGRESS_POST_INTERVAL_FRAMES = 2048;
+/** Guided wizard: fixed 4-beat count-in and 4-beat clap capture. */
+const GUIDED_CAL_BEAT_COUNT = 4;
 
 /**
  * Must stay identical to `lib/looper-math.ts` `snapToMasterMultiple`.
@@ -102,14 +107,29 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeStartLatencyOffsetFrames = 0;
     /** Handsfree per-track frame targets [T1..T4]; survives slot reset on handoff. */
     this.handsfreeSequenceTargetFrames = null;
-    this.calibration = {
+
+    /**
+     * Wizard-only clap buffer — independent of trackSlots / transport.
+     * Captures four metronome beats, then loops with a live preview read offset.
+     */
+    this.guidedCal = {
       active: false,
-      elapsedFrames: 0,
-      clickInjected: false,
-      clickFrame: null,
-      burstFramesEmitted: 0,
-      energyAccumulator: new Float32Array(CALIBRATION_ENERGY_WINDOW),
-      energyAccumulatorIdx: 0,
+      phase: "idle",
+      captureTargetFrames: 0,
+      captureCursor: 0,
+      buffer: null,
+      intervalFrames: 0,
+      playbackCursor: 0,
+      previewOffsetFrames: 0,
+      fadeActive: false,
+      fadeFramesRemaining: 0,
+      fadeFromOffset: 0,
+      fadeToOffset: 0,
+      countInFrames: 0,
+      countInCursor: 0,
+      beatFrames: 0,
+      lastProgressPostFrame: 0,
+      lastCountdownBeatRemaining: null,
     };
 
     this.port.onmessage = (event) => {
@@ -181,8 +201,28 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
         return;
       }
 
-      if (data.type === "START_CALIBRATION") {
-        this.startCalibration();
+      if (data.type === "BEGIN_GUIDED_CALIBRATION") {
+        this.beginGuidedCalibration(data);
+        return;
+      }
+
+      if (data.type === "START_GUIDED_CAL_CAPTURE") {
+        this.startGuidedCalCapture();
+        return;
+      }
+
+      if (data.type === "FINISH_GUIDED_CAL_CAPTURE") {
+        this.finishGuidedCalCapture();
+        return;
+      }
+
+      if (data.type === "SET_GUIDED_CAL_PREVIEW_OFFSET") {
+        this.setGuidedCalPreviewOffset(data);
+        return;
+      }
+
+      if (data.type === "CANCEL_GUIDED_CALIBRATION") {
+        this.cancelGuidedCalibration();
         return;
       }
     };
@@ -334,6 +374,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < MAX_TRACK_INDEX; i += 1) {
       this.trackSlots[i] = createEmptySlot();
     }
+    this.guidedCal = this.createEmptyGuidedCal();
     this.reportState("RESET");
   }
 
@@ -342,32 +383,333 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.reportState(this.isPaused ? "PAUSED" : "RESUMED");
   }
 
-  startCalibration() {
-    this.calibration.active = true;
-    this.calibration.elapsedFrames = 0;
-    this.calibration.clickInjected = false;
-    this.calibration.clickFrame = null;
-    this.calibration.burstFramesEmitted = 0;
-    this.calibration.energyAccumulator.fill(0);
-    this.calibration.energyAccumulatorIdx = 0;
+  createEmptyGuidedCal() {
+    return {
+      active: false,
+      phase: "idle",
+      captureTargetFrames: 0,
+      captureCursor: 0,
+      buffer: null,
+      intervalFrames: 0,
+      playbackCursor: 0,
+      previewOffsetFrames: 0,
+      fadeActive: false,
+      fadeFramesRemaining: 0,
+      fadeFromOffset: 0,
+      fadeToOffset: 0,
+      countInFrames: 0,
+      countInCursor: 0,
+      beatFrames: 0,
+      lastProgressPostFrame: 0,
+      lastCountdownBeatRemaining: null,
+    };
   }
 
-  finishCalibration(latencyFrames) {
+  postGuidedCalState(extra) {
+    const g = this.guidedCal;
     try {
       this.port.postMessage({
-        type: "CALIBRATION_RESULT",
-        latencyFrames: Number.isFinite(latencyFrames) ? Math.max(0, Math.floor(latencyFrames)) : null,
+        type: "GUIDED_CAL_STATE",
+        phase: g.phase,
+        active: g.active,
+        captureCursor: g.captureCursor,
+        captureTargetFrames: g.captureTargetFrames,
+        intervalFrames: g.intervalFrames,
+        previewOffsetFrames: g.previewOffsetFrames,
+        countInFrames: g.countInFrames,
+        countInCursor: g.countInCursor,
+        beatFrames: g.beatFrames,
+        ...(extra && typeof extra === "object" ? extra : {}),
       });
     } catch {
       /* ignore */
     }
-    this.calibration.active = false;
-    this.calibration.elapsedFrames = 0;
-    this.calibration.clickInjected = false;
-    this.calibration.clickFrame = null;
-    this.calibration.burstFramesEmitted = 0;
-    this.calibration.energyAccumulator.fill(0);
-    this.calibration.energyAccumulatorIdx = 0;
+  }
+
+  resolveCountdownBeatRemaining() {
+    const g = this.guidedCal;
+    if (!g.countInFrames || !g.beatFrames) {
+      return null;
+    }
+    if (g.countInCursor >= g.countInFrames) {
+      return 0;
+    }
+    const beatIndex = Math.floor(g.countInCursor / g.beatFrames);
+    return Math.max(1, GUIDED_CAL_BEAT_COUNT - beatIndex);
+  }
+
+  resolveCaptureBeatIndex() {
+    const g = this.guidedCal;
+    if (!g.captureTargetFrames || !g.beatFrames || g.captureCursor <= 0) {
+      return g.phase === "capturing" ? 1 : null;
+    }
+    const idx = Math.floor((g.captureCursor - 1) / g.beatFrames) + 1;
+    return Math.max(1, Math.min(GUIDED_CAL_BEAT_COUNT, idx));
+  }
+
+  beginGuidedCalibration(data) {
+    const rawTarget = Math.floor(Number(data && data.targetFrames));
+    const targetFrames = Number.isFinite(rawTarget) && rawTarget > 0
+      ? Math.min(rawTarget, GUIDED_CAL_MAX_CAPTURE_FRAMES)
+      : 0;
+    if (targetFrames < 1) {
+      this.postGuidedCalState({ error: "invalid_target_frames" });
+      return;
+    }
+    const rawCountIn = Math.floor(Number(data && data.countInFrames));
+    const countInFrames =
+      Number.isFinite(rawCountIn) && rawCountIn > 0
+        ? Math.min(rawCountIn, GUIDED_CAL_MAX_CAPTURE_FRAMES)
+        : 0;
+    const beatFrames = Math.max(
+      1,
+      Math.floor(
+        countInFrames > 0
+          ? countInFrames / GUIDED_CAL_BEAT_COUNT
+          : targetFrames / GUIDED_CAL_BEAT_COUNT
+      )
+    );
+
+    this.guidedCal = this.createEmptyGuidedCal();
+    this.guidedCal.active = true;
+    this.guidedCal.phase = "armed";
+    this.guidedCal.captureTargetFrames = targetFrames;
+    this.guidedCal.buffer = new Float32Array(targetFrames);
+    this.guidedCal.countInFrames = countInFrames;
+    this.guidedCal.beatFrames = beatFrames;
+    this.postGuidedCalState({
+      countdownBeatRemaining: countInFrames > 0 ? GUIDED_CAL_BEAT_COUNT : null,
+      captureProgress01: 0,
+      captureBeatIndex: null,
+    });
+  }
+
+  startGuidedCalCapture() {
+    const g = this.guidedCal;
+    if (!g.active || !g.buffer || g.captureTargetFrames < 1) {
+      this.postGuidedCalState({ error: "not_armed" });
+      return;
+    }
+    if (g.phase === "counting" || g.phase === "capturing" || g.phase === "previewing") {
+      return;
+    }
+    g.captureCursor = 0;
+    g.playbackCursor = 0;
+    g.previewOffsetFrames = 0;
+    g.fadeActive = false;
+    g.fadeFramesRemaining = 0;
+    g.countInCursor = 0;
+    g.lastProgressPostFrame = 0;
+    g.lastCountdownBeatRemaining = null;
+
+    if (g.countInFrames > 0) {
+      g.phase = "counting";
+      const remaining = this.resolveCountdownBeatRemaining();
+      g.lastCountdownBeatRemaining = remaining;
+      this.postGuidedCalState({
+        countdownBeatRemaining: remaining,
+        captureProgress01: 0,
+        captureBeatIndex: null,
+      });
+      return;
+    }
+
+    g.phase = "capturing";
+    this.postGuidedCalState({
+      countdownBeatRemaining: null,
+      captureProgress01: 0,
+      captureBeatIndex: 1,
+    });
+  }
+
+  finishGuidedCalCapture() {
+    const g = this.guidedCal;
+    if (!g.active || !g.buffer) {
+      return;
+    }
+    if (g.phase !== "capturing" && g.phase !== "armed") {
+      return;
+    }
+    const captured = Math.max(0, Math.min(g.captureCursor, g.captureTargetFrames));
+    if (captured < Math.floor(sampleRate * 0.25)) {
+      g.phase = "error";
+      this.postGuidedCalState({
+        error: "capture_too_short",
+        countdownBeatRemaining: null,
+        captureProgress01: g.captureTargetFrames > 0 ? captured / g.captureTargetFrames : 0,
+        captureBeatIndex: this.resolveCaptureBeatIndex(),
+      });
+      return;
+    }
+    g.intervalFrames = captured;
+    g.playbackCursor = 0;
+    g.previewOffsetFrames = 0;
+    g.fadeActive = false;
+    g.fadeFramesRemaining = 0;
+    g.phase = "previewing";
+    try {
+      this.port.postMessage({
+        type: "GUIDED_CAL_CAPTURE_COMPLETE",
+        intervalFrames: g.intervalFrames,
+        sampleRate,
+      });
+    } catch {
+      /* ignore */
+    }
+    this.postGuidedCalState({
+      countdownBeatRemaining: null,
+      captureProgress01: 1,
+      captureBeatIndex: GUIDED_CAL_BEAT_COUNT,
+    });
+  }
+
+  setGuidedCalPreviewOffset(data) {
+    const g = this.guidedCal;
+    if (!g.active || g.phase !== "previewing" || g.intervalFrames < 1) {
+      return;
+    }
+    const raw = Math.floor(Number(data && data.latencyOffsetFrames));
+    const nextOffset = !Number.isFinite(raw) || raw <= 0
+      ? 0
+      : Math.min(raw, GUIDED_CAL_MAX_OFFSET_FRAMES, Math.max(0, g.intervalFrames - 1));
+    if (nextOffset === g.previewOffsetFrames && !g.fadeActive) {
+      return;
+    }
+    g.fadeFromOffset = g.fadeActive ? g.fadeToOffset : g.previewOffsetFrames;
+    g.fadeToOffset = nextOffset;
+    g.previewOffsetFrames = nextOffset;
+    g.fadeActive = true;
+    g.fadeFramesRemaining = GUIDED_CAL_OFFSET_FADE_FRAMES;
+  }
+
+  cancelGuidedCalibration() {
+    this.guidedCal = this.createEmptyGuidedCal();
+    this.postGuidedCalState({
+      countdownBeatRemaining: null,
+      captureProgress01: 0,
+      captureBeatIndex: null,
+    });
+  }
+
+  /**
+   * Sample guided clap buffer with optional dual-head constant-power crossfade.
+   * Only runs while guidedCal.phase === "previewing"; zero cost otherwise.
+   */
+  sampleGuidedCalPlayback() {
+    const g = this.guidedCal;
+    if (!g.active || g.phase !== "previewing" || !g.buffer || g.intervalFrames < 1) {
+      return 0;
+    }
+    const n = g.intervalFrames;
+    const readAt = (offset) => {
+      const idx = (g.playbackCursor + offset) % n;
+      return g.buffer[idx] || 0;
+    };
+    if (!g.fadeActive || g.fadeFramesRemaining <= 0) {
+      g.fadeActive = false;
+      return readAt(g.previewOffsetFrames);
+    }
+    const total = GUIDED_CAL_OFFSET_FADE_FRAMES;
+    const elapsed = total - g.fadeFramesRemaining;
+    const t = Math.max(0, Math.min(1, elapsed / Math.max(1, total - 1)));
+    const fromGain = Math.cos(t * (Math.PI / 2));
+    const toGain = Math.sin(t * (Math.PI / 2));
+    const sample =
+      readAt(g.fadeFromOffset) * fromGain + readAt(g.fadeToOffset) * toGain;
+    g.fadeFramesRemaining -= 1;
+    if (g.fadeFramesRemaining <= 0) {
+      g.fadeActive = false;
+      g.fadeFramesRemaining = 0;
+    }
+    return sample;
+  }
+
+  advanceGuidedCalPlayback() {
+    const g = this.guidedCal;
+    if (!g.active || g.phase !== "previewing" || g.intervalFrames < 1) {
+      return;
+    }
+    g.playbackCursor += 1;
+    if (g.playbackCursor >= g.intervalFrames) {
+      g.playbackCursor = 0;
+    }
+  }
+
+  enterGuidedCalCapturingFromCountIn() {
+    const g = this.guidedCal;
+    g.phase = "capturing";
+    g.captureCursor = 0;
+    g.lastProgressPostFrame = 0;
+    g.lastCountdownBeatRemaining = null;
+    this.postGuidedCalState({
+      countdownBeatRemaining: null,
+      captureProgress01: 0,
+      captureBeatIndex: 1,
+    });
+  }
+
+  /**
+   * Advance count-in (no buffer write) or capture one mono frame.
+   * Count-in audio is not stored — only the 4 clap beats are recorded.
+   */
+  writeGuidedCalCaptureFrame(monoSample) {
+    const g = this.guidedCal;
+    if (!g.active) {
+      return;
+    }
+
+    if (g.phase === "counting") {
+      g.countInCursor += 1;
+      const remaining = this.resolveCountdownBeatRemaining();
+      if (remaining !== g.lastCountdownBeatRemaining && remaining !== null && remaining > 0) {
+        g.lastCountdownBeatRemaining = remaining;
+        this.postGuidedCalState({
+          countdownBeatRemaining: remaining,
+          captureProgress01: 0,
+          captureBeatIndex: null,
+        });
+      }
+      if (g.countInCursor < g.countInFrames) {
+        return;
+      }
+      this.enterGuidedCalCapturingFromCountIn();
+      // Fall through: record this frame as the first clap sample.
+    }
+
+    if (g.phase !== "capturing" || !g.buffer) {
+      return;
+    }
+    if (g.captureCursor >= g.captureTargetFrames) {
+      this.finishGuidedCalCapture();
+      return;
+    }
+    g.buffer[g.captureCursor] = monoSample;
+    g.captureCursor += 1;
+
+    const progress01 =
+      g.captureTargetFrames > 0
+        ? Math.min(1, g.captureCursor / g.captureTargetFrames)
+        : 0;
+    const beatIndex = this.resolveCaptureBeatIndex();
+    const framesSincePost = g.captureCursor - g.lastProgressPostFrame;
+    const onBeatBoundary =
+      g.beatFrames > 0 && g.captureCursor % g.beatFrames === 0;
+    if (
+      framesSincePost >= GUIDED_CAL_PROGRESS_POST_INTERVAL_FRAMES ||
+      onBeatBoundary ||
+      g.captureCursor >= g.captureTargetFrames
+    ) {
+      g.lastProgressPostFrame = g.captureCursor;
+      this.postGuidedCalState({
+        countdownBeatRemaining: null,
+        captureProgress01: progress01,
+        captureBeatIndex: beatIndex,
+      });
+    }
+
+    if (g.captureCursor >= g.captureTargetFrames) {
+      this.finishGuidedCalCapture();
+    }
   }
 
   resetTrack(data) {
@@ -1386,19 +1728,16 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       }
       this.ringWriteCursor = (this.ringWriteCursor + 1) % sampleRate;
 
+      // Sample guided clap once per frame, then duplicate across output channels.
+      const guidedSample = !this.isPaused ? this.sampleGuidedCalPlayback() : 0;
+
       for (let oc = 0; oc < outputChannels.length; oc += 1) {
         let acc = 0;
         if (!this.isPaused) {
           for (let t = 0; t < MAX_TRACK_INDEX; t += 1) {
             acc += this.sampleSlotPlayback(this.trackSlots[t], oc);
           }
-        }
-        if (
-          this.calibration.active &&
-          this.calibration.burstFramesEmitted < CALIBRATION_BURST_FRAMES
-        ) {
-          const burstPolarity = this.calibration.burstFramesEmitted % 2 === 0 ? 1 : -1;
-          acc += CALIBRATION_CLICK_AMPLITUDE * burstPolarity;
+          acc += guidedSample;
         }
         const outCh = outputChannels[oc];
         if (outCh) {
@@ -1406,47 +1745,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
         }
       }
 
-      if (this.calibration.active) {
-        if (
-          this.calibration.burstFramesEmitted < CALIBRATION_BURST_FRAMES
-        ) {
-          this.calibration.burstFramesEmitted += 1;
-        }
-
-        if (!this.calibration.clickInjected && this.calibration.burstFramesEmitted > 0) {
-          this.calibration.clickInjected = true;
-          this.calibration.clickFrame = this.calibration.elapsedFrames;
-        }
-
-        const canListen =
-          this.calibration.clickFrame !== null &&
-          this.calibration.elapsedFrames - this.calibration.clickFrame >=
-            CALIBRATION_BLANKING_FRAMES;
-
-        if (canListen) {
-          const idx = this.calibration.energyAccumulatorIdx % CALIBRATION_ENERGY_WINDOW;
-          this.calibration.energyAccumulator[idx] = monoSample * monoSample;
-          this.calibration.energyAccumulatorIdx += 1;
-          let rmsSum = 0;
-          for (let i = 0; i < CALIBRATION_ENERGY_WINDOW; i += 1) {
-            rmsSum += this.calibration.energyAccumulator[i];
-          }
-          const rms = Math.sqrt(rmsSum / CALIBRATION_ENERGY_WINDOW);
-          if (rms >= CALIBRATION_ENERGY_THRESHOLD) {
-            const measuredFrames = this.calibration.elapsedFrames - this.calibration.clickFrame;
-            this.finishCalibration(measuredFrames);
-          } else if (this.calibration.active) {
-            this.calibration.elapsedFrames += 1;
-            if (this.calibration.elapsedFrames >= CALIBRATION_TIMEOUT_FRAMES) {
-              this.finishCalibration(null);
-            }
-          }
-        } else if (this.calibration.active) {
-          this.calibration.elapsedFrames += 1;
-          if (this.calibration.elapsedFrames >= CALIBRATION_TIMEOUT_FRAMES) {
-            this.finishCalibration(null);
-          }
-        }
+      // Guided capture writes once per frame (mono), independent of track recording.
+      if (!this.isPaused) {
+        this.writeGuidedCalCaptureFrame(monoSample);
       }
 
       let slotJustFinished = null;
@@ -1567,6 +1868,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
             this.advancePlaybackCursor(s);
           }
         }
+        this.advanceGuidedCalPlayback();
       }
     }
 

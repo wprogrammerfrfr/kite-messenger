@@ -2,27 +2,10 @@ export const SOLO_LATENCY_MS_KEY = "kite_solo_latency_ms";
 export const SOLO_LATENCY_HW_KEY = "kite_solo_latency_hw_v1";
 
 export const SOLO_LATENCY_APPLIED_MIN_MS = 0;
-export const SOLO_LATENCY_APPLIED_MAX_MS = 200;
+/** Canonical applied/preview RTL cap for guided wizard + persistence. */
+export const SOLO_LATENCY_APPLIED_MAX_MS = 400;
 export const SOLO_LATENCY_ENTRY_MIN_MS = 15;
-export const SOLO_LATENCY_ENTRY_MAX_MS = 200;
-/** Windows often under-reports headphone RTL; floor applied measurements. */
-export const WINDOWS_RTL_FLOOR_MS = 100;
-
-export type SoloLatencyClientOs = "windows" | "mac" | "other";
-
-export type SoloLatencyQualityTone = "error" | "good" | "fair";
-
-export type SoloLatencyQualityFeedback = {
-  message: string;
-  tone: SoloLatencyQualityTone;
-};
-
-export type SoloLatencyNormalizedMeasurement = {
-  rawMs: number;
-  appliedMs: number;
-  floored: boolean;
-  os: SoloLatencyClientOs;
-};
+export const SOLO_LATENCY_ENTRY_MAX_MS = 400;
 
 export type SoloLatencyHwFingerprint = {
   v: 1;
@@ -43,60 +26,12 @@ export function clampSoloLatencyMs(value: number): number {
   );
 }
 
-export function detectSoloLatencyClientOs(): SoloLatencyClientOs {
-  if (typeof navigator === "undefined") {
-    return "other";
-  }
-  const uaData = (
-    navigator as Navigator & {
-      userAgentData?: { platform?: string };
-    }
-  ).userAgentData;
-  const platform = (uaData?.platform ?? navigator.userAgent ?? "").toLowerCase();
-  if (platform.includes("win")) {
-    return "windows";
-  }
-  if (platform.includes("mac")) {
-    return "mac";
-  }
-  return "other";
-}
-
 /**
- * Post-measure policy: Windows under-reports with headphones; floor at 100ms.
- * Mac/other trust the measured value (still clamped).
+ * Uncalibrated = null, non-finite, or non-positive.
+ * Calibrated = any finite applied ms > 0 (within 0–400 clamp after write).
  */
-export function normalizeSoloLatencyMeasurement(
-  rawMs: number,
-  os: SoloLatencyClientOs = detectSoloLatencyClientOs()
-): SoloLatencyNormalizedMeasurement {
-  const roundedRaw = Number.isFinite(rawMs) ? Math.round(rawMs) : 0;
-  if (roundedRaw <= 0) {
-    return {
-      rawMs: roundedRaw,
-      appliedMs: SOLO_LATENCY_APPLIED_MIN_MS,
-      floored: false,
-      os,
-    };
-  }
-  if (os === "windows" && roundedRaw < WINDOWS_RTL_FLOOR_MS) {
-    return {
-      rawMs: roundedRaw,
-      appliedMs: clampSoloLatencyMs(WINDOWS_RTL_FLOOR_MS),
-      floored: true,
-      os,
-    };
-  }
-  return {
-    rawMs: roundedRaw,
-    appliedMs: clampSoloLatencyMs(roundedRaw),
-    floored: false,
-    os,
-  };
-}
-
-export function isSoloLatencyCalibrated(ms: number): boolean {
-  return ms > 0;
+export function isSoloLatencyCalibrated(ms: number | null | undefined): boolean {
+  return ms != null && Number.isFinite(ms) && ms > 0;
 }
 
 export function isSoloLatencyEntryAllowed(ms: number): boolean {
@@ -107,57 +42,10 @@ export function isSoloLatencyEntryAllowed(ms: number): boolean {
   return rounded >= SOLO_LATENCY_ENTRY_MIN_MS && rounded <= SOLO_LATENCY_ENTRY_MAX_MS;
 }
 
-export function getSoloLatencyQualityFeedback(
-  ms: number,
-  options?: { floored?: boolean; rawMs?: number }
-): SoloLatencyQualityFeedback {
-  if (!Number.isFinite(ms)) {
-    return {
-      tone: "error",
-      message: "Warning: Result too low. Please turn up volume and try again.",
-    };
-  }
-  const rounded = Math.round(ms);
-  if (options?.floored) {
-    const raw = options.rawMs != null && Number.isFinite(options.rawMs) ? Math.round(options.rawMs) : null;
-    return {
-      tone: "fair",
-      message:
-        raw != null
-          ? `Adjusted to ${WINDOWS_RTL_FLOOR_MS}ms floor (measured ${raw}ms — Windows headphone under-report)`
-          : `Adjusted to ${WINDOWS_RTL_FLOOR_MS}ms floor (Windows headphone under-report)`,
-    };
-  }
-  if (rounded < SOLO_LATENCY_ENTRY_MIN_MS) {
-    return {
-      tone: "error",
-      message: "Warning: Result too low. Please turn up volume and try again.",
-    };
-  }
-  if (rounded <= 65) {
-    return {
-      tone: "good",
-      message: "Excellent (Typical for Mac setups)",
-    };
-  }
-  if (rounded <= 150) {
-    return {
-      tone: "good",
-      message: "Good (Typical for Windows setups)",
-    };
-  }
-  if (rounded <= SOLO_LATENCY_ENTRY_MAX_MS) {
-    return {
-      tone: "fair",
-      message: "Fair (Noticeable delay, wired headphones recommended)",
-    };
-  }
-  return {
-    tone: "error",
-    message: "Poor: High latency detected. Please switch to wired headphones.",
-  };
-}
-
+/**
+ * Returns clamped ms, or null when missing/invalid (uncalibrated).
+ * Callers must treat null as uncalibrated — do not coerce to 0 for "has calibrated" checks.
+ */
 export function readSoloLatencyMs(): number | null {
   if (typeof window === "undefined") {
     return null;
@@ -177,6 +65,10 @@ export function readSoloLatencyMs(): number | null {
   }
 }
 
+/**
+ * Persist a confirmed RTL value (0–400). Guided wizard writes only on Confirm;
+ * cancel must not call this with a draft.
+ */
 export function writeSoloLatencyMs(ms: number): void {
   if (typeof window === "undefined") {
     return;

@@ -91,9 +91,30 @@ export type SoloLooperAutoStopCompletedEvent = {
   loopId: string | null;
 };
 
-export type SoloLooperCalibrationResultEvent = {
-  type: "CALIBRATION_RESULT";
-  latencyFrames: number | null;
+export type SoloLooperGuidedCalStateEvent = {
+  type: "GUIDED_CAL_STATE";
+  phase: "idle" | "armed" | "counting" | "capturing" | "previewing" | "error";
+  active: boolean;
+  captureCursor: number;
+  captureTargetFrames: number;
+  intervalFrames: number;
+  previewOffsetFrames: number;
+  countInFrames?: number;
+  countInCursor?: number;
+  beatFrames?: number;
+  /** 4…1 during count-in; null otherwise. */
+  countdownBeatRemaining?: number | null;
+  /** 0…1 while capturing. */
+  captureProgress01?: number;
+  /** 1…4 while capturing. */
+  captureBeatIndex?: number | null;
+  error?: string;
+};
+
+export type SoloLooperGuidedCalCaptureCompleteEvent = {
+  type: "GUIDED_CAL_CAPTURE_COMPLETE";
+  intervalFrames: number;
+  sampleRate: number;
 };
 
 export type SoloLooperHandsfreeTrackAdvancedEvent = {
@@ -115,7 +136,8 @@ export type SoloLooperEngineEvent =
   | SoloLooperConfigureClampedEvent
   | SoloLooperConfigureRejectedEvent
   | SoloLooperAutoStopCompletedEvent
-  | SoloLooperCalibrationResultEvent
+  | SoloLooperGuidedCalStateEvent
+  | SoloLooperGuidedCalCaptureCompleteEvent
   | SoloLooperHandsfreeTrackAdvancedEvent
   | SoloLooperHandsfreeSequenceCompleteEvent
   | SoloLooperPlaybackUiStateEvent
@@ -232,11 +254,34 @@ export type SoloLooperEngine = {
   armOverdub(params: SoloLooperArmOverdubParams): void;
   /** Disarm overdub; optional trackIndex must match armed track (worklet A4). */
   disarmOverdub(trackIndex?: 2 | 3 | 4): void;
-  /** Trigger worklet latency auto-calibration (IR click + threshold detect). */
-  startCalibration(): void;
+  /**
+   * Guided wizard: allocate a transport-neutral clap buffer for `targetFrames`.
+   * Optional `countInFrames` arms a 4-beat countdown before capture writes begin.
+   * Does not touch track slots, transport, or P2P graphs.
+   */
+  beginGuidedCalibration(targetFrames: number, countInFrames?: number): void;
+  /** Guided wizard: start capturing mic into the clap buffer. */
+  startGuidedCalCapture(): void;
+  /** Guided wizard: finish capture early and enter preview loop (or auto-finishes at target). */
+  finishGuidedCalCapture(): void;
+  /**
+   * Guided wizard: live preview RTL offset in ms (0–400).
+   * Posts frame offset to worklet dual-head crossfade — no node teardown.
+   */
+  setGuidedCalPreviewOffsetMs(latencyMs: number): void;
+  /** Guided wizard: discard clap buffer and reset guided state. */
+  cancelGuidedCalibration(): void;
   startRecording(params?: SoloLooperStartRecordingParams): void;
   stop(): void;
   reset(): void;
+  /** Current MediaStream feeding the capture source node. */
+  getCaptureStream(): MediaStream;
+  /**
+   * Hot-swap the capture MediaStream without tearing down worklet/loop state.
+   * Rejects while a recording or armed overdub is in progress.
+   * Returns true if the source was replaced.
+   */
+  replaceCaptureStream(nextStream: MediaStream): boolean;
   /** Delay loop playback on the session recording bus only (aligns with finalize-shifted buffers). */
   setRecordingLatencyCompensation(latencyMs: number): void;
   teardown(): void;
@@ -292,11 +337,18 @@ function clampGain(value: number | undefined): number {
 
 const RECORDING_PLAYBACK_DELAY_MAX_SEC = 2.0;
 const RECORDING_LATENCY_COMPENSATION_MAX_SEC = 1.5;
+/** Matches solo-latency-persistence applied max; guided preview never exceeds this. */
+const GUIDED_CAL_PREVIEW_MAX_MS = 400;
 
 function clampRecordingLatencyDelaySec(latencyMs: number): number {
   if (!Number.isFinite(latencyMs)) return 0;
   const sec = Math.max(0, latencyMs) / 1000;
   return Math.min(RECORDING_LATENCY_COMPENSATION_MAX_SEC, sec);
+}
+
+function clampGuidedCalPreviewMs(latencyMs: number): number {
+  if (!Number.isFinite(latencyMs)) return 0;
+  return Math.max(0, Math.min(GUIDED_CAL_PREVIEW_MAX_MS, Math.round(latencyMs)));
 }
 
 /** Prefer "discrete" so multi-channel interface inputs are not mixed down by speaker layouts before the worklet. */
@@ -336,8 +388,10 @@ export async function buildSoloLooperEngine(
     assertValidTrackIndex(options.trackIndex);
   }
 
-  const sourceNode = ctx.createMediaStreamSource(options.inputStream);
+  let sourceNode = ctx.createMediaStreamSource(options.inputStream);
   preserveDiscreteInputChannels(sourceNode);
+  let currentCaptureStream = options.inputStream;
+  let captureReplaceBlocked = false;
 
   const inputGain = ctx.createGain();
   preserveDiscreteInputChannels(inputGain);
@@ -393,7 +447,8 @@ export async function buildSoloLooperEngine(
       "OVERDUB_STARTED",
       "OVERDUB_DISARMED",
       "AUTO_STOP_COMPLETED",
-      "CALIBRATION_RESULT",
+      "GUIDED_CAL_STATE",
+      "GUIDED_CAL_CAPTURE_COMPLETE",
       "HANDSFREE_TRACK_ADVANCED",
       "HANDSFREE_SEQUENCE_COMPLETE",
     ] as const;
@@ -578,6 +633,7 @@ export async function buildSoloLooperEngine(
       if (params.trackIndex !== undefined) {
         assertValidTrackIndex(params.trackIndex);
       }
+      captureReplaceBlocked = false;
       workletNode.port.postMessage({
         type: "STOP_RECORDING",
         ...(params.trackIndex !== undefined ? { trackIndex: params.trackIndex } : {}),
@@ -646,6 +702,7 @@ export async function buildSoloLooperEngine(
     armOverdub(params: SoloLooperArmOverdubParams): void {
       if (tornDown) return;
       assertOverdubTrackIndex(params.trackIndex);
+      captureReplaceBlocked = true;
       workletNode.port.postMessage({
         type: "ARM_OVERDUB",
         trackIndex: params.trackIndex,
@@ -664,17 +721,51 @@ export async function buildSoloLooperEngine(
       if (trackIndex !== undefined) {
         assertOverdubTrackIndex(trackIndex);
       }
+      captureReplaceBlocked = false;
       workletNode.port.postMessage({
         type: "DISARM_OVERDUB",
         ...(trackIndex !== undefined ? { trackIndex } : {}),
       });
     },
-    startCalibration(): void {
+    beginGuidedCalibration(targetFrames: number, countInFrames?: number): void {
       if (tornDown) return;
-      workletNode.port.postMessage({ type: "START_CALIBRATION" });
+      const frames = Math.floor(Number(targetFrames));
+      if (!Number.isFinite(frames) || frames < 1) return;
+      const countIn = Math.floor(Number(countInFrames));
+      workletNode.port.postMessage({
+        type: "BEGIN_GUIDED_CALIBRATION",
+        targetFrames: frames,
+        ...(Number.isFinite(countIn) && countIn > 0 ? { countInFrames: countIn } : {}),
+      });
+    },
+    startGuidedCalCapture(): void {
+      if (tornDown) return;
+      workletNode.port.postMessage({ type: "START_GUIDED_CAL_CAPTURE" });
+    },
+    finishGuidedCalCapture(): void {
+      if (tornDown) return;
+      workletNode.port.postMessage({ type: "FINISH_GUIDED_CAL_CAPTURE" });
+    },
+    setGuidedCalPreviewOffsetMs(latencyMs: number): void {
+      if (tornDown || ctx.state === "closed") return;
+      const clampedMs = clampGuidedCalPreviewMs(latencyMs);
+      const sampleRate = Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 48000;
+      const latencyOffsetFrames = Math.max(
+        0,
+        Math.round((clampedMs / 1000) * sampleRate)
+      );
+      workletNode.port.postMessage({
+        type: "SET_GUIDED_CAL_PREVIEW_OFFSET",
+        latencyOffsetFrames,
+      });
+    },
+    cancelGuidedCalibration(): void {
+      if (tornDown) return;
+      workletNode.port.postMessage({ type: "CANCEL_GUIDED_CALIBRATION" });
     },
     startRecording(params?: SoloLooperStartRecordingParams): void {
       if (tornDown) return;
+      captureReplaceBlocked = true;
       workletNode.port.postMessage({
         type: "START_RECORDING",
         ...(params?.loopMode !== undefined ? { loopMode: params.loopMode } : {}),
@@ -694,19 +785,57 @@ export async function buildSoloLooperEngine(
     },
     stop(): void {
       if (tornDown) return;
+      captureReplaceBlocked = false;
       workletNode.port.postMessage({ type: "STOP_LOOP" });
     },
     reset(): void {
       if (tornDown) return;
+      captureReplaceBlocked = false;
       workletNode.port.postMessage({ type: "RESET_LOOP" });
+    },
+    getCaptureStream(): MediaStream {
+      return currentCaptureStream;
+    },
+    replaceCaptureStream(nextStream: MediaStream): boolean {
+      if (tornDown || ctx.state === "closed") return false;
+      if (captureReplaceBlocked) {
+        console.warn("[SoloLooper] replaceCaptureStream rejected while recording/armed.");
+        return false;
+      }
+      assertRawMicInput(nextStream, options.destinationNode);
+      if (nextStream === currentCaptureStream) return false;
+
+      const nextSource = ctx.createMediaStreamSource(nextStream);
+      preserveDiscreteInputChannels(nextSource);
+
+      try {
+        sourceNode.disconnect();
+      } catch {
+        /* ignore */
+      }
+
+      sourceNode = nextSource;
+      currentCaptureStream = nextStream;
+      engine.sourceNode = nextSource;
+
+      nextSource.connect(inputGain);
+      nextSource.connect(recordingMicGainNode);
+      return true;
     },
     setRecordingLatencyCompensation(latencyMs: number): void {
       if (tornDown || ctx.state === "closed") return;
-      recordingPlaybackDelayNode.delayTime.value = clampRecordingLatencyDelaySec(latencyMs);
+      const nextSec = clampRecordingLatencyDelaySec(latencyMs);
+      try {
+        recordingPlaybackDelayNode.delayTime.cancelScheduledValues(ctx.currentTime);
+        recordingPlaybackDelayNode.delayTime.setTargetAtTime(nextSec, ctx.currentTime, 0.01);
+      } catch {
+        recordingPlaybackDelayNode.delayTime.value = nextSec;
+      }
     },
     teardown(): void {
       if (tornDown) return;
       tornDown = true;
+      captureReplaceBlocked = false;
       stopAudibleMetronome();
       teardownSoloLooperEngine(engine);
     },

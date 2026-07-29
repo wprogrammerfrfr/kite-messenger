@@ -1,298 +1,562 @@
 "use client";
 
-import React, { useState } from "react";
-import { Zap } from "lucide-react";
-import { getSoloLatencyQualityFeedback } from "@/lib/solo-latency-persistence";
+import React, { useId } from "react";
+import { SOLO_LATENCY_APPLIED_MAX_MS } from "@/lib/solo-latency-persistence";
+import type { GuidedRtlWizardState } from "@/hooks/useKiteStudioEngine.types";
 
 export type SoloLatencyCalibrationPanelProps = {
-  variant: "lobby" | "settings";
+  variant: "lobby" | "settings" | "wizard";
+  /** Committed applied RTL (for badge when wizard closed). */
   latencyMs: number;
-  entryLatencyMs: number;
   stale: boolean;
   staleMessage: string | null;
-  status: "idle" | "warning" | "listening" | "success" | "error";
-  message: string | null;
   disabled?: boolean;
-  /** True when Windows floor was applied to the last measurement. */
-  floorApplied?: boolean;
-  /** Raw measured ms before floor (for adjusted messaging). */
-  rawMeasuredMs?: number | null;
-  onCalibrate: (mode: "acoustic" | "interface") => void;
+  /** Guided wizard controller state from the engine. */
+  wizard: GuidedRtlWizardState;
+  onBeginWizard: () => void;
+  onStartCapture: () => void;
+  onPreviewLatencyMs: (ms: number) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onRetryCapture: () => void;
 };
 
-const ACOUSTIC_WARNING =
-  "RTL CALIBRATION (recommended)\n\n1. Unplug headphones so sound plays from the laptop speakers.\n2. Keep the built-in mic uncovered (near webcam or keyboard).\n3. Raise speaker volume so the mic can hear the ping in the room.\n4. Click OK to fire the ping.\n\nWindows tip: headphone paths often under-report; speaker→mic is more accurate.";
-
-const INTERFACE_WARNING =
-  "Unplug your instrument. Plug a standard audio cable directly from your interface's Output into its Input. Turn the input gain up.";
-
-function calibrationStatusColor(
-  status: SoloLatencyCalibrationPanelProps["status"]
-): string {
-  if (status === "success") return "text-emerald-400";
-  if (status === "warning" || status === "error") return "text-orange-400";
-  return "text-stone-400";
+function stepIndex(phase: GuidedRtlWizardState["phase"]): number {
+  switch (phase) {
+    case "metronome":
+    case "countdown":
+      return 1;
+    case "capturing":
+      return 2;
+    case "transition":
+      return 3;
+    case "adjusting":
+    case "confirming":
+      return 4;
+    case "error":
+      return 0;
+    default:
+      return 0;
+  }
 }
 
-function qualityToneClass(tone: "error" | "good" | "fair"): string {
-  if (tone === "error") return "text-red-400 border-red-500/35 bg-red-500/10";
-  if (tone === "fair") return "text-amber-300 border-amber-500/35 bg-amber-500/10";
-  return "text-emerald-400 border-emerald-500/35 bg-emerald-500/10";
+function phaseTitle(phase: GuidedRtlWizardState["phase"]): string {
+  switch (phase) {
+    case "metronome":
+    case "countdown":
+      return "Step 1 — Count in";
+    case "capturing":
+      return "Step 2 — Clap four beats";
+    case "transition":
+      return "Step 3 — Ready to align";
+    case "adjusting":
+    case "confirming":
+      return "Step 4 — Align with slider";
+    case "error":
+      return "Calibration needs a retry";
+    default:
+      return "RTL Calibration";
+  }
 }
 
 export function SoloLatencyCalibrationPanel({
   variant,
   latencyMs,
-  entryLatencyMs,
   stale,
   staleMessage,
-  status,
-  message,
   disabled = false,
-  floorApplied = false,
-  rawMeasuredMs = null,
-  onCalibrate,
+  wizard,
+  onBeginWizard,
+  onStartCapture: _onStartCapture,
+  onPreviewLatencyMs,
+  onConfirm,
+  onCancel,
+  onRetryCapture,
 }: SoloLatencyCalibrationPanelProps): React.JSX.Element {
-  const [calibrationMode, setCalibrationMode] = useState<"acoustic" | "interface">("acoustic");
-  const calibrationBusy = status === "listening";
+  const sliderId = useId();
   const isLobby = variant === "lobby";
+  const isWizardOverlay = variant === "wizard";
+  const busy =
+    wizard.phase === "capturing" ||
+    wizard.phase === "countdown" ||
+    wizard.phase === "metronome" ||
+    wizard.phase === "transition" ||
+    wizard.phase === "confirming";
+  const canInteract = !disabled && wizard.open;
+  const showAdjust =
+    wizard.open && (wizard.phase === "adjusting" || wizard.phase === "transition");
+  const showConfirm =
+    wizard.open && wizard.phase === "adjusting";
+  const showCountdown =
+    wizard.open &&
+    (wizard.phase === "countdown" || wizard.phase === "metronome") &&
+    wizard.countdownBeatRemaining != null;
+  const showCaptureProgress = wizard.open && wizard.phase === "capturing";
+  const progressPct = Math.round(Math.max(0, Math.min(1, wizard.captureProgress01)) * 100);
 
-  const triggerCalibration = (mode: "acoustic" | "interface"): void => {
-    const warningText = mode === "acoustic" ? ACOUSTIC_WARNING : INTERFACE_WARNING;
-    if (!window.confirm(`${warningText}\n\nStart calibration now?`)) {
-      return;
-    }
-    setCalibrationMode(mode);
-    onCalibrate(mode);
-  };
-
-  const showLobbyQuality =
-    isLobby && status === "success" && entryLatencyMs > 0;
-  const qualityFeedback = showLobbyQuality
-    ? getSoloLatencyQualityFeedback(floorApplied ? latencyMs : entryLatencyMs, {
-        floored: floorApplied,
-        rawMs: rawMeasuredMs ?? undefined,
-      })
-    : null;
-
-  if (isLobby) {
-    return (
-      <div className="mt-4 space-y-3 rounded-xl border border-white/[0.08] bg-stone-950/40 px-3 py-3.5">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-stone-500">
-            Latency calibration
-          </p>
-          {latencyMs > 0 ? (
-            <span className="font-mono text-[10px] text-stone-400">{latencyMs} ms RTL</span>
-          ) : null}
-        </div>
-
-        {stale && staleMessage ? (
-          <div
-            className="rounded-lg border border-orange-500/35 bg-orange-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-orange-300"
-            role="status"
-          >
-            {staleMessage}
-          </div>
-        ) : null}
-
-        <div className="flex flex-col gap-2">
-          <button
-            type="button"
-            disabled={disabled || calibrationBusy}
-            onClick={() => triggerCalibration("acoustic")}
-            className={`flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-all ${
-              calibrationMode === "acoustic"
-                ? "border-emerald-500/40 bg-emerald-500/12 text-emerald-400"
-                : "border-emerald-500/25 bg-emerald-500/7 text-emerald-400/90 hover:border-emerald-500/40"
-            } ${calibrationBusy ? "cursor-wait opacity-60" : ""}`}
-          >
-            <Zap size={12} />
-            {calibrationBusy && calibrationMode === "acoustic"
-              ? "Listening..."
-              : "Calibrate Speakers/Mic (Acoustic)"}
-          </button>
-          <button
-            type="button"
-            disabled={disabled || calibrationBusy}
-            onClick={() => triggerCalibration("interface")}
-            className={`flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-all ${
-              calibrationMode === "interface"
-                ? "border-emerald-500/40 bg-emerald-500/12 text-emerald-400"
-                : "border-emerald-500/25 bg-emerald-500/7 text-emerald-400/90 hover:border-emerald-500/40"
-            } ${calibrationBusy ? "cursor-wait opacity-60" : ""}`}
-          >
-            <Zap size={12} />
-            {calibrationBusy && calibrationMode === "interface"
-              ? "Listening..."
-              : "Calibrate Interface (Cable Loopback)"}
-          </button>
-        </div>
-
-        <p className="text-[10px] leading-relaxed text-orange-400/90">
-          Prefer speakers → built-in mic (headphones unplugged). Or loop interface out → in. Optional.
-        </p>
-
-        {message ? (
-          <div
-            className={`rounded-lg border border-white/[0.12] bg-white/[0.03] px-2.5 py-2 text-[11px] leading-relaxed ${calibrationStatusColor(status)}`}
-            role="status"
-          >
-            {message}
-          </div>
-        ) : null}
-
-        {qualityFeedback ? (
-          <div
-            className={`rounded-lg border px-2.5 py-2 text-[11px] leading-relaxed ${qualityToneClass(qualityFeedback.tone)}`}
-            role="status"
-          >
-            {qualityFeedback.message}
-          </div>
-        ) : null}
-      </div>
-    );
-  }
-
-  return (
-    <div
-      style={{
-        borderTop: "1px solid rgba(255,255,255,0.05)",
-        paddingTop: 12,
-        marginTop: 4,
+  const shellStyle: React.CSSProperties = isLobby
+    ? {}
+    : {
+        borderTop: isWizardOverlay ? undefined : "1px solid rgba(255,255,255,0.05)",
+        paddingTop: isWizardOverlay ? 0 : 12,
+        marginTop: isWizardOverlay ? 0 : 4,
         display: "flex",
         flexDirection: "column",
-        gap: 8,
-      }}
-    >
-      <span
-        style={{
-          color: "rgba(255,255,255,0.22)",
-          fontSize: 8,
-          letterSpacing: "0.22em",
-          textTransform: "uppercase",
-        }}
+        gap: 10,
+      };
+
+  const cardClass = isLobby
+    ? "mt-4 space-y-3 rounded-xl border border-white/[0.08] bg-stone-950/40 px-3 py-3.5"
+    : undefined;
+
+  const overlayClass = isWizardOverlay
+    ? "fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
+    : undefined;
+
+  const inner = (
+    <div className={cardClass} style={shellStyle}>
+      <div
+        className={isLobby ? "flex items-center justify-between gap-2" : undefined}
+        style={
+          isLobby
+            ? undefined
+            : { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }
+        }
       >
-        Latency Calibration
-      </span>
+        <p
+          className={
+            isLobby
+              ? "text-[10px] font-semibold uppercase tracking-widest text-stone-500"
+              : undefined
+          }
+          style={
+            isLobby
+              ? undefined
+              : {
+                  color: "rgba(255,255,255,0.22)",
+                  fontSize: 8,
+                  letterSpacing: "0.22em",
+                  textTransform: "uppercase",
+                }
+          }
+        >
+          {wizard.open ? phaseTitle(wizard.phase) : "Latency calibration"}
+        </p>
+        {!wizard.open && latencyMs > 0 ? (
+          <span
+            className={isLobby ? "font-mono text-[10px] text-stone-400" : undefined}
+            style={isLobby ? undefined : { color: "rgba(255,255,255,0.35)", fontSize: 9 }}
+          >
+            {latencyMs} ms RTL
+          </span>
+        ) : wizard.open && stepIndex(wizard.phase) > 0 ? (
+          <span
+            className={isLobby ? "font-mono text-[10px] text-emerald-400" : undefined}
+            style={isLobby ? undefined : { color: "#22c55e", fontSize: 9, fontFamily: "monospace" }}
+          >
+            {stepIndex(wizard.phase)} / 5
+          </span>
+        ) : null}
+      </div>
 
       {stale && staleMessage ? (
         <div
-          style={{
-            borderRadius: 8,
-            border: "1px solid rgba(255,69,0,0.35)",
-            background: "rgba(255,69,0,0.08)",
-            color: "#ff4500",
-            fontSize: 9,
-            lineHeight: 1.5,
-            padding: "7px 8px",
-          }}
+          className={
+            isLobby
+              ? "rounded-lg border border-orange-500/35 bg-orange-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-orange-300"
+              : undefined
+          }
+          style={
+            isLobby
+              ? undefined
+              : {
+                  borderRadius: 8,
+                  border: "1px solid rgba(255,69,0,0.35)",
+                  background: "rgba(255,69,0,0.08)",
+                  color: "#ff4500",
+                  fontSize: 9,
+                  lineHeight: 1.5,
+                  padding: "7px 8px",
+                }
+          }
           role="status"
         >
           {staleMessage}
         </div>
       ) : null}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <button
-          type="button"
-          disabled={disabled || calibrationBusy}
-          onClick={() => triggerCalibration("acoustic")}
-          title={
-            calibrationBusy
-              ? "Calibration in progress"
-              : "Calibrate speakers → mic (headphones unplugged)"
-          }
-          style={{
-            padding: "8px 14px",
-            border: "1px solid rgba(34,197,94,0.35)",
-            background:
-              calibrationMode === "acoustic" ? "rgba(34,197,94,0.12)" : "rgba(34,197,94,0.07)",
-            color: "#22c55e",
-            fontSize: 11,
-            cursor: calibrationBusy ? "wait" : "pointer",
-            opacity: calibrationBusy ? 0.6 : 1,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            borderRadius: 10,
-            justifyContent: "center",
-          }}
-        >
-          <Zap size={12} color="#22c55e" />{" "}
-          {calibrationBusy && calibrationMode === "acoustic"
-            ? "Listening..."
-            : "Calibrate Speakers/Mic (Acoustic)"}
-        </button>
-        <button
-          type="button"
-          disabled={disabled || calibrationBusy}
-          onClick={() => triggerCalibration("interface")}
-          title={calibrationBusy ? "Calibration in progress" : "Calibrate with interface cable loopback"}
-          style={{
-            padding: "8px 14px",
-            border: "1px solid rgba(34,197,94,0.35)",
-            background:
-              calibrationMode === "interface" ? "rgba(34,197,94,0.12)" : "rgba(34,197,94,0.07)",
-            color: "#22c55e",
-            fontSize: 11,
-            cursor: calibrationBusy ? "wait" : "pointer",
-            opacity: calibrationBusy ? 0.6 : 1,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            borderRadius: 10,
-            justifyContent: "center",
-          }}
-        >
-          <Zap size={12} color="#22c55e" />{" "}
-          {calibrationBusy && calibrationMode === "interface"
-            ? "Listening..."
-            : "Calibrate Interface (Cable Loopback)"}
-        </button>
-      </div>
-
-      {message ? (
-        <div
-          style={{
-            borderRadius: 8,
-            border: `1px solid ${
-              status === "success"
-                ? "rgba(34,197,94,0.4)"
-                : status === "warning" || status === "error"
-                  ? "rgba(255,69,0,0.35)"
-                  : "rgba(255,255,255,0.12)"
-            }`,
-            background:
-              status === "success"
-                ? "rgba(34,197,94,0.08)"
-                : status === "warning" || status === "error"
-                  ? "rgba(255,69,0,0.08)"
-                  : "rgba(255,255,255,0.04)",
-            color:
-              status === "success"
-                ? "#22c55e"
-                : status === "warning" || status === "error"
-                  ? "#ff4500"
-                  : "rgba(255,255,255,0.5)",
-            fontSize: 9,
-            lineHeight: 1.5,
-            padding: "7px 8px",
-          }}
-          role="status"
-        >
-          {message}
+      {!wizard.open ? (
+        <div className={isLobby ? "flex flex-col gap-2" : undefined} style={isLobby ? undefined : { display: "flex", flexDirection: "column", gap: 8 }}>
+          <p
+            className={isLobby ? "text-[10px] leading-relaxed text-stone-400" : undefined}
+            style={
+              isLobby
+                ? undefined
+                : { color: "rgba(255,255,255,0.4)", fontSize: 9, lineHeight: 1.5 }
+            }
+          >
+            Guided calibration: clap four beats with the metronome, then drag the RTL slider until
+            your claps lock to the grid. Confirmed values persist for Solo Studio.
+          </p>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onBeginWizard}
+            className={
+              isLobby
+                ? `flex items-center justify-center rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-400 transition-all hover:border-emerald-500/50 ${disabled ? "cursor-not-allowed opacity-50" : ""}`
+                : undefined
+            }
+            style={
+              isLobby
+                ? undefined
+                : {
+                    padding: "8px 14px",
+                    border: "1px solid rgba(34,197,94,0.35)",
+                    background: "rgba(34,197,94,0.1)",
+                    color: "#22c55e",
+                    fontSize: 11,
+                    cursor: disabled ? "not-allowed" : "pointer",
+                    opacity: disabled ? 0.5 : 1,
+                    borderRadius: 10,
+                  }
+            }
+          >
+            {stale ? "Re-calibrate RTL" : latencyMs > 0 ? "Recalibrate RTL" : "Start RTL calibration"}
+          </button>
         </div>
-      ) : null}
+      ) : (
+        <div className={isLobby ? "space-y-3" : undefined} style={isLobby ? undefined : { display: "flex", flexDirection: "column", gap: 10 }}>
+          {wizard.message ? (
+            <p
+              className={isLobby ? "text-[11px] leading-relaxed text-stone-300" : undefined}
+              style={
+                isLobby
+                  ? undefined
+                  : { color: "rgba(255,255,255,0.65)", fontSize: 10, lineHeight: 1.5 }
+              }
+              role="status"
+            >
+              {wizard.message}
+            </p>
+          ) : null}
 
-      {latencyMs > 0 ? (
-        <span style={{ color: "rgba(255,255,255,0.35)", fontSize: 9 }}>
-          Applied RTL: {latencyMs} ms
-          {floorApplied && rawMeasuredMs != null
-            ? ` (floor applied; measured ${Math.round(rawMeasuredMs)} ms)`
-            : ""}
-        </span>
-      ) : null}
+          {wizard.error ? (
+            <div
+              className={
+                isLobby
+                  ? "rounded-lg border border-orange-500/35 bg-orange-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-orange-300"
+                  : undefined
+              }
+              style={
+                isLobby
+                  ? undefined
+                  : {
+                      borderRadius: 8,
+                      border: "1px solid rgba(255,69,0,0.35)",
+                      background: "rgba(255,69,0,0.08)",
+                      color: "#ff4500",
+                      fontSize: 9,
+                      lineHeight: 1.5,
+                      padding: "7px 8px",
+                    }
+              }
+              role="alert"
+            >
+              {wizard.error}
+            </div>
+          ) : null}
+
+          {showCountdown ? (
+            <div
+              className={isLobby ? "flex flex-col items-center gap-2 py-2" : undefined}
+              style={
+                isLobby
+                  ? undefined
+                  : {
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "8px 0",
+                    }
+              }
+            >
+              <span
+                className={isLobby ? "font-mono text-5xl font-bold text-emerald-400 tabular-nums" : undefined}
+                style={
+                  isLobby
+                    ? undefined
+                    : {
+                        color: "#22c55e",
+                        fontSize: 48,
+                        fontWeight: 700,
+                        fontFamily: "monospace",
+                        lineHeight: 1,
+                        fontVariantNumeric: "tabular-nums",
+                      }
+                }
+                aria-live="polite"
+              >
+                {wizard.countdownBeatRemaining}
+              </span>
+              <p
+                className={isLobby ? "text-[10px] text-stone-500" : undefined}
+                style={isLobby ? undefined : { color: "rgba(255,255,255,0.35)", fontSize: 9 }}
+              >
+                Get ready — don’t clap yet
+              </p>
+            </div>
+          ) : null}
+
+          {showCaptureProgress ? (
+            <div
+              className={isLobby ? "space-y-2" : undefined}
+              style={isLobby ? undefined : { display: "flex", flexDirection: "column", gap: 8 }}
+            >
+              <p
+                className={isLobby ? "text-[10px] font-medium text-emerald-400" : undefined}
+                style={isLobby ? undefined : { color: "#22c55e", fontSize: 10, fontWeight: 600 }}
+              >
+                Clap now
+                {wizard.captureBeatIndex != null
+                  ? ` — beat ${wizard.captureBeatIndex} of 4`
+                  : " — four beats"}
+              </p>
+              <div
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressPct}
+                aria-label="Clap capture progress"
+                className={isLobby ? "h-2 w-full overflow-hidden rounded-full bg-white/[0.08]" : undefined}
+                style={
+                  isLobby
+                    ? undefined
+                    : {
+                        height: 8,
+                        width: "100%",
+                        overflow: "hidden",
+                        borderRadius: 9999,
+                        background: "rgba(255,255,255,0.08)",
+                      }
+                }
+              >
+                <div
+                  className={isLobby ? "h-full rounded-full bg-emerald-500 transition-[width] duration-75" : undefined}
+                  style={{
+                    height: "100%",
+                    width: `${progressPct}%`,
+                    borderRadius: 9999,
+                    background: "#22c55e",
+                    transition: "width 75ms linear",
+                  }}
+                />
+              </div>
+              <p
+                className={isLobby ? "text-[10px] text-stone-500 tabular-nums" : undefined}
+                style={
+                  isLobby
+                    ? undefined
+                    : {
+                        color: "rgba(255,255,255,0.35)",
+                        fontSize: 9,
+                        fontVariantNumeric: "tabular-nums",
+                      }
+                }
+              >
+                {progressPct}%
+              </p>
+            </div>
+          ) : null}
+
+          {showAdjust ? (
+            <div className={isLobby ? "space-y-2" : undefined} style={isLobby ? undefined : { display: "flex", flexDirection: "column", gap: 8 }}>
+              <label
+                htmlFor={sliderId}
+                className={isLobby ? "text-[10px] text-stone-400" : undefined}
+                style={isLobby ? undefined : { color: "rgba(255,255,255,0.4)", fontSize: 9 }}
+              >
+                RTL compensation (0–{SOLO_LATENCY_APPLIED_MAX_MS} ms)
+              </label>
+              <div
+                className={isLobby ? "flex items-center gap-2" : undefined}
+                style={isLobby ? undefined : { display: "flex", alignItems: "center", gap: 8 }}
+              >
+                <input
+                  id={sliderId}
+                  type="range"
+                  min={0}
+                  max={SOLO_LATENCY_APPLIED_MAX_MS}
+                  step={1}
+                  value={wizard.draftLatencyMs}
+                  disabled={!canInteract || wizard.phase === "transition"}
+                  aria-valuemin={0}
+                  aria-valuemax={SOLO_LATENCY_APPLIED_MAX_MS}
+                  aria-valuenow={wizard.draftLatencyMs}
+                  aria-label="Round-trip latency compensation in milliseconds"
+                  onChange={(e) => onPreviewLatencyMs(Number(e.target.value))}
+                  className={isLobby ? "flex-1 accent-emerald-500" : undefined}
+                  style={
+                    isLobby
+                      ? undefined
+                      : {
+                          flex: 1,
+                          accentColor: "#22c55e",
+                          cursor: "pointer",
+                          height: 4,
+                          appearance: "none",
+                          WebkitAppearance: "none",
+                          borderRadius: 9999,
+                          outline: "none",
+                          background: `linear-gradient(to right,#22c55e ${(wizard.draftLatencyMs / SOLO_LATENCY_APPLIED_MAX_MS) * 100}%,rgba(255,255,255,0.08) ${(wizard.draftLatencyMs / SOLO_LATENCY_APPLIED_MAX_MS) * 100}%)`,
+                        }
+                  }
+                />
+                <span
+                  className={
+                    isLobby
+                      ? "font-mono text-[10px] text-emerald-400 min-w-[38px] text-right"
+                      : undefined
+                  }
+                  style={
+                    isLobby
+                      ? undefined
+                      : {
+                          color: "#22c55e",
+                          fontSize: 10,
+                          fontFamily: "monospace",
+                          minWidth: 38,
+                          textAlign: "right",
+                        }
+                  }
+                >
+                  {wizard.draftLatencyMs}ms
+                </span>
+              </div>
+              <p
+                className={isLobby ? "text-[10px] text-stone-500" : undefined}
+                style={isLobby ? undefined : { color: "rgba(255,255,255,0.35)", fontSize: 9 }}
+              >
+                Step 5 — Confirm when claps lock to the click. Cancel restores your previous value.
+              </p>
+            </div>
+          ) : null}
+
+          <div
+            className={isLobby ? "flex flex-wrap gap-2" : undefined}
+            style={isLobby ? undefined : { display: "flex", flexWrap: "wrap", gap: 8 }}
+          >
+            {wizard.phase === "error" || wizard.phase === "adjusting" ? (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={onRetryCapture}
+                className={
+                  isLobby
+                    ? "rounded-lg border border-white/[0.12] bg-white/[0.04] px-3 py-2 text-[10px] font-medium text-stone-300"
+                    : undefined
+                }
+                style={
+                  isLobby
+                    ? undefined
+                    : {
+                        padding: "7px 12px",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: "rgba(255,255,255,0.04)",
+                        color: "rgba(255,255,255,0.55)",
+                        fontSize: 10,
+                        borderRadius: 10,
+                        cursor: "pointer",
+                      }
+                }
+              >
+                Retry claps
+              </button>
+            ) : null}
+
+            {showConfirm ? (
+              <button
+                type="button"
+                disabled={disabled || busy}
+                onClick={onConfirm}
+                className={
+                  isLobby
+                    ? "rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-2 text-[10px] font-semibold text-emerald-400"
+                    : undefined
+                }
+                style={
+                  isLobby
+                    ? undefined
+                    : {
+                        padding: "7px 12px",
+                        border: "1px solid rgba(34,197,94,0.4)",
+                        background: "rgba(34,197,94,0.15)",
+                        color: "#22c55e",
+                        fontSize: 10,
+                        fontWeight: 600,
+                        borderRadius: 10,
+                        cursor: "pointer",
+                      }
+                }
+              >
+                Confirm &amp; save
+              </button>
+            ) : null}
+
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={onCancel}
+              className={
+                isLobby
+                  ? "rounded-lg border border-white/[0.1] bg-transparent px-3 py-2 text-[10px] font-medium text-stone-500"
+                  : undefined
+              }
+              style={
+                isLobby
+                  ? undefined
+                  : {
+                      padding: "7px 12px",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: "transparent",
+                      color: "rgba(255,255,255,0.4)",
+                      fontSize: 10,
+                      borderRadius: 10,
+                      cursor: "pointer",
+                    }
+              }
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
+
+  if (isWizardOverlay) {
+    if (!wizard.open) {
+      return inner;
+    }
+    return (
+      <div className={overlayClass} role="dialog" aria-modal="true" aria-label="RTL calibration wizard">
+        <div
+          style={{
+            width: "100%",
+            maxWidth: 420,
+            borderRadius: 16,
+            border: "1px solid rgba(255,255,255,0.1)",
+            background: "rgba(12,12,12,0.96)",
+            padding: 16,
+            boxShadow: "0 24px 80px rgba(0,0,0,0.55)",
+          }}
+        >
+          {inner}
+        </div>
+      </div>
+    );
+  }
+
+  return inner;
 }

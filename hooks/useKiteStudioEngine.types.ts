@@ -24,6 +24,34 @@ export type SoloLooperState = "idle" | "recording" | "captured" | "playing";
 export type SoloSessionRecorderState = "idle" | "recording" | "paused" | "saving";
 export type JamSetupLock = { ownerId: string; ownerName: string; expiresAt: number } | null;
 export type KiteSetupOrigin = "lobby" | "connected";
+
+/** Guided RTL Calibration Wizard phases (UI + controller). */
+export type GuidedRtlWizardPhase =
+  | "idle"
+  | "metronome"
+  | "countdown"
+  | "capturing"
+  | "transition"
+  | "adjusting"
+  | "confirming"
+  | "error";
+
+export type GuidedRtlWizardState = {
+  phase: GuidedRtlWizardPhase;
+  /** Draft slider value while adjusting; committed only on confirm. */
+  draftLatencyMs: number;
+  /** Last committed/persisted value restored on cancel. */
+  committedLatencyMs: number;
+  message: string | null;
+  error: string | null;
+  open: boolean;
+  /** 4…1 during count-in; null when not counting. */
+  countdownBeatRemaining: number | null;
+  /** 0…1 capture fill while recording claps. */
+  captureProgress01: number;
+  /** 1…4 while capturing; null otherwise. */
+  captureBeatIndex: number | null;
+};
 export type DeviceFlagMap = Record<string, boolean>;
 
 export type KiteLoopChunkSendProgress = {
@@ -94,6 +122,8 @@ export type KiteEngineState = {
   soloLatencyLastRawMeasuredMs: number | null;
   /** True when Windows RTL floor was applied to the last calibration result. */
   soloLatencyFloorApplied: boolean;
+  /** Guided RTL Calibration Wizard controller state. */
+  guidedRtlWizard: GuidedRtlWizardState;
   soloLooperMode: SoloLooperMode;
   /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
   handsfreeSequenceActive: boolean;
@@ -193,8 +223,19 @@ export type KiteEngineActions = {
   startSoloLooper: () => Promise<void>;
   handleRecordFirstLoop: () => void;
   commitActiveRecording: () => void;
-  handleAutoCalibrateSoloLatency: (mode: "acoustic" | "interface") => void;
   handleSoloLatencyMsChange: (ms: number) => void;
+  /** Open guided RTL wizard (auto-starts metronome when safe). */
+  beginGuidedRtlWizard: () => void;
+  /** Start four-beat clap capture into the dedicated worklet buffer. */
+  startGuidedRtlCapture: () => void;
+  /** Live draft preview while adjusting (does not persist). */
+  previewGuidedRtlLatencyMs: (ms: number) => void;
+  /** Persist draft RTL, fingerprint hardware, and dismiss wizard. */
+  confirmGuidedRtlWizard: () => void;
+  /** Discard draft, restore committed RTL, stop metronome/preview, dismiss. */
+  cancelGuidedRtlWizard: () => void;
+  /** Re-record four claps without leaving the wizard. */
+  retryGuidedRtlCapture: () => void;
   handleStopAndResetSoloLooper: () => void;
   handleToggleMasterPause: () => void;
   handleResetSoloTrack: (trackIndex: 1 | 2 | 3 | 4) => void;

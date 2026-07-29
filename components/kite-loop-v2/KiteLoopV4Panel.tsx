@@ -36,7 +36,11 @@ import type { RunwayDisplayLabel } from "@/lib/looper-runway-scheduler";
 import type { LooperRunwayPhase } from "@/components/kite-loop-v2/LooperCountdownRunway";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { SoloLatencyCalibrationPanel } from "@/components/studio-bridge/SoloLatencyCalibrationPanel";
-import type { SoloLooperMode, SoloLooperState } from "@/hooks/useKiteStudioEngine.types";
+import type {
+  GuidedRtlWizardState,
+  SoloLooperMode,
+  SoloLooperState,
+} from "@/hooks/useKiteStudioEngine.types";
 import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
 import KiteTunerPanel from "@/components/studio-bridge/KiteTunerPanel";
 import KiteAirSynthPanel from "@/components/studio-bridge/KiteAirSynthPanel";
@@ -113,15 +117,15 @@ export type KiteLoopV4LooperHandlers = {
   onStopAndResetSoloLooper: () => void;
   onEndSession: () => void;
   onLoopModeChange: (value: SoloLooperMode) => void;
-  onLatencyMsChange: (value: number) => void;
-  onAutoCalibrateLatency: (mode: "acoustic" | "interface") => void;
-  autoCalibrateLatencyStatus: "idle" | "warning" | "listening" | "success" | "error";
-  autoCalibrateLatencyMessage: string | null;
+  guidedRtlWizard: GuidedRtlWizardState;
+  onBeginGuidedRtlWizard: () => void;
+  onStartGuidedRtlCapture: () => void;
+  onPreviewGuidedRtlLatencyMs: (ms: number) => void;
+  onConfirmGuidedRtlWizard: () => void;
+  onCancelGuidedRtlWizard: () => void;
+  onRetryGuidedRtlCapture: () => void;
   latencyCalibrationStale: boolean;
   latencyStaleMessage: string | null;
-  entryLatencyMs: number;
-  latencyFloorApplied?: boolean;
-  latencyRawMeasuredMs?: number | null;
   onTempoSliderChange: (value: number) => void;
   onTempoPreset: (bpm: number) => void;
   onSelectTimeSignature: (option: { title: string; top: number; bottom: number; swing: boolean }) => void;
@@ -1213,7 +1217,6 @@ function SettingsModal({
   airSynthWaveform,
   onAirSynthWaveformChange,
 }: SettingsModalProps): React.JSX.Element {
-  const [showAdvancedLatency, setShowAdvancedLatency] = useState(false);
   const [airSynthKeyMenuOpen, setAirSynthKeyMenuOpen] = useState(false);
   const [airSynthWaveformMenuOpen, setAirSynthWaveformMenuOpen] = useState(false);
   const tapTimes = useRef<number[]>([]);
@@ -1222,7 +1225,6 @@ function SettingsModal({
   const gridMode = cfg.loopMode === "grid";
   const handsfreeMode = cfg.loopMode === "handsfree";
   const gridLikeMode = gridMode || handsfreeMode;
-  const rtlCompensation = cfg.latencyMs;
   const locked = cfg.isTimingLocked;
   const handleGridToggle = (on: boolean): void => {
     if (isAirSynthActive) {
@@ -1440,103 +1442,17 @@ function SettingsModal({
             <SoloLatencyCalibrationPanel
               variant="settings"
               latencyMs={cfg.latencyMs}
-              entryLatencyMs={handlers.entryLatencyMs}
               stale={handlers.latencyCalibrationStale}
               staleMessage={handlers.latencyStaleMessage}
-              status={handlers.autoCalibrateLatencyStatus}
-              message={handlers.autoCalibrateLatencyMessage}
-              floorApplied={handlers.latencyFloorApplied}
-              rawMeasuredMs={handlers.latencyRawMeasuredMs}
-              onCalibrate={handlers.onAutoCalibrateLatency}
+              disabled={cfg.isTimingLocked}
+              wizard={handlers.guidedRtlWizard}
+              onBeginWizard={handlers.onBeginGuidedRtlWizard}
+              onStartCapture={handlers.onStartGuidedRtlCapture}
+              onPreviewLatencyMs={handlers.onPreviewGuidedRtlLatencyMs}
+              onConfirm={handlers.onConfirmGuidedRtlWizard}
+              onCancel={handlers.onCancelGuidedRtlWizard}
+              onRetryCapture={handlers.onRetryGuidedRtlCapture}
             />
-
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setShowAdvancedLatency((v) => !v)}
-                style={{
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  color: "rgba(255,255,255,0.3)",
-                  fontSize: 9,
-                }}
-              >
-                <ChevronRight
-                  size={11}
-                  style={{
-                    transform: showAdvancedLatency ? "rotate(90deg)" : "rotate(0deg)",
-                    transition: "transform 0.2s",
-                    color: "rgba(255,255,255,0.3)",
-                  }}
-                />
-                Advanced Settings
-              </button>
-
-              {showAdvancedLatency ? (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  style={{ overflow: "hidden" }}
-                >
-                  <div
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 10,
-                      background: "rgba(255,69,0,0.05)",
-                      border: "1px solid rgba(255,69,0,0.18)",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 8,
-                    }}
-                  >
-                    <span style={{ color: "rgba(255,255,255,0.35)", fontSize: 9 }}>RTL Compensation</span>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <input
-                        type="range"
-                        min={0}
-                        max={200}
-                        value={rtlCompensation}
-                        onChange={(e) => handlers.onLatencyMsChange(Number(e.target.value))}
-                        style={{
-                          flex: 1,
-                          accentColor: ORANGE,
-                          cursor: "pointer",
-                          height: 4,
-                          appearance: "none",
-                          WebkitAppearance: "none",
-                          borderRadius: 9999,
-                          outline: "none",
-                          background: `linear-gradient(to right,${ORANGE} ${(rtlCompensation / 200) * 100}%,rgba(255,255,255,0.08) ${(rtlCompensation / 200) * 100}%)`,
-                        }}
-                      />
-                      <span
-                        style={{
-                          color: ORANGE,
-                          fontSize: 10,
-                          fontFamily: "monospace",
-                          minWidth: 38,
-                          textAlign: "right",
-                        }}
-                      >
-                        {rtlCompensation}ms
-                      </span>
-                    </div>
-                  </div>
-                </motion.div>
-              ) : null}
-            </div>
           </div>
 
           <div style={colDivider} />
@@ -2304,10 +2220,27 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [videoReady, setVideoReady] = useState(false);
+  /** Reactive snapshot of the studio AudioContext (ref alone does not re-render). */
+  const [studioAudioContext, setStudioAudioContext] = useState<AudioContext | null>(
+    () => studioAudioContextRef.current
+  );
+
+  useEffect(() => {
+    const sync = (): void => {
+      setStudioAudioContext(studioAudioContextRef.current);
+    };
+    sync();
+    const ctx = studioAudioContextRef.current;
+    if (!ctx) return;
+    ctx.addEventListener("statechange", sync);
+    return () => {
+      ctx.removeEventListener("statechange", sync);
+    };
+  }, [studioAudioContextRef, isAirSynthActive, isCameraActive, videoReady]);
 
   const noopRegister = useCallback(async () => {}, []);
   const airSynthEngine = useKiteAirSynthEngine({
-    audioContext: studioAudioContextRef.current,
+    audioContext: studioAudioContext,
     videoElement: videoReady ? videoRef.current : null,
     enabled: isAirSynthActive && isCameraActive && videoReady,
     mode: airSynth?.mode ?? "two-hand",
@@ -2435,6 +2368,16 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     };
   }, [cameraStream]);
 
+  // Ensure cancel cleans up metronome/preview if the panel unmounts mid-wizard.
+  useEffect(() => {
+    return () => {
+      if (looperHandlers.guidedRtlWizard.open) {
+        looperHandlers.onCancelGuidedRtlWizard();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only cleanup
+  }, []);
+
   useEffect(() => {
     try {
       const persisted = window.localStorage.getItem(CALIBRATION_DISMISSED_STORAGE_KEY);
@@ -2443,6 +2386,33 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
       setCalibrationDismissed(false);
     }
   }, []);
+
+  // First-boot / stale: auto-open guided wizard once Solo Studio is ready and idle.
+  const autoWizardLaunchedRef = useRef(false);
+  useEffect(() => {
+    if (autoWizardLaunchedRef.current) return;
+    if (looperHandlers.guidedRtlWizard.open) {
+      autoWizardLaunchedRef.current = true;
+      return;
+    }
+    if (looperConfig.isTimingLocked) return;
+    const shouldAutoOpen =
+      (looperState.showCalibrationOnboardingHint || looperState.latencyCalibrationStale) &&
+      !calibrationDismissed &&
+      looperState.soloLooperState === "idle" &&
+      !looperState.isRecordingArmed;
+    if (!shouldAutoOpen) return;
+    autoWizardLaunchedRef.current = true;
+    looperHandlers.onBeginGuidedRtlWizard();
+  }, [
+    calibrationDismissed,
+    looperConfig.isTimingLocked,
+    looperHandlers,
+    looperState.isRecordingArmed,
+    looperState.latencyCalibrationStale,
+    looperState.showCalibrationOnboardingHint,
+    looperState.soloLooperState,
+  ]);
 
   const masterPaused = looperState.isMasterPaused;
   const solo = looperState.soloLooperState;
@@ -2459,6 +2429,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const showCalibrationOnboarding =
     (looperState.showCalibrationOnboardingHint || looperState.latencyCalibrationStale) &&
     !calibrationDismissed &&
+    !looperHandlers.guidedRtlWizard.open &&
     !settingsOpen &&
     !inputsOpen &&
     !isTunerOpen &&
@@ -2481,6 +2452,14 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     } catch {
       /* ignore storage write errors */
     }
+  };
+
+  const launchGuidedCalibration = (): void => {
+    if (looperConfig.isTimingLocked) return;
+    setInputsOpen(false);
+    setSettingsOpen(false);
+    dismissCalibrationOnboarding();
+    looperHandlers.onBeginGuidedRtlWizard();
   };
 
   const centerWebcamLedColor = (): string => {
@@ -2917,17 +2896,15 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 </div>
                 <div style={{ color: "rgba(255,255,255,0.52)", fontSize: 10, lineHeight: 1.4 }}>
                   {looperState.latencyCalibrationStale
-                    ? "Audio hardware changed. Re-calibrate in Settings for tighter loop timing."
-                    : "Calibrate once for tighter loop timing on this device."}
+                    ? "Audio hardware changed. Run the guided clap wizard for tighter loop timing."
+                    : "Run the guided clap wizard once for tighter loop timing on this device."}
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                 <button
                   type="button"
-                  onClick={() => {
-                    setInputsOpen(false);
-                    setSettingsOpen(true);
-                  }}
+                  disabled={looperConfig.isTimingLocked}
+                  onClick={launchGuidedCalibration}
                   style={{
                     padding: "6px 9px",
                     borderRadius: 8,
@@ -2935,11 +2912,12 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                     background: "rgba(255,69,0,0.12)",
                     color: ORANGE,
                     fontSize: 10,
-                    cursor: "pointer",
+                    cursor: looperConfig.isTimingLocked ? "not-allowed" : "pointer",
+                    opacity: looperConfig.isTimingLocked ? 0.5 : 1,
                     whiteSpace: "nowrap",
                   }}
                 >
-                  Go to Settings
+                  Start calibration
                 </button>
                 <button
                   type="button"
@@ -3069,6 +3047,23 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         instrumentId={tunerInstrumentId}
         onInstrumentChange={setTunerInstrumentId}
       />
+
+      {looperHandlers.guidedRtlWizard.open && !settingsOpen ? (
+        <SoloLatencyCalibrationPanel
+          variant="wizard"
+          latencyMs={looperConfig.latencyMs}
+          stale={looperHandlers.latencyCalibrationStale}
+          staleMessage={looperHandlers.latencyStaleMessage}
+          disabled={looperConfig.isTimingLocked}
+          wizard={looperHandlers.guidedRtlWizard}
+          onBeginWizard={looperHandlers.onBeginGuidedRtlWizard}
+          onStartCapture={looperHandlers.onStartGuidedRtlCapture}
+          onPreviewLatencyMs={looperHandlers.onPreviewGuidedRtlLatencyMs}
+          onConfirm={looperHandlers.onConfirmGuidedRtlWizard}
+          onCancel={looperHandlers.onCancelGuidedRtlWizard}
+          onRetryCapture={looperHandlers.onRetryGuidedRtlCapture}
+        />
+      ) : null}
 
       <AnimatePresence>
         {settingsOpen && (

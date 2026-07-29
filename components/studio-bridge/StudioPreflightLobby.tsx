@@ -4,6 +4,7 @@ import React, { memo, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronLeft, Mic, Volume2 } from "lucide-react";
 import { SoloLatencyCalibrationPanel } from "@/components/studio-bridge/SoloLatencyCalibrationPanel";
+import type { GuidedRtlWizardState } from "@/hooks/useKiteStudioEngine.types";
 
 type CheckRowState = "pending" | "done" | "error";
 
@@ -31,14 +32,15 @@ export type StudioPreflightLobbyProps = {
   handleEnterSoloStudio: () => void;
   soloPracticeButtonLabel: string;
   soloLooperLatencyMs: number;
-  soloLatencyEntryMs: number;
   soloLatencyCalibrationStale: boolean;
   soloLatencyStaleMessage: string | null;
-  soloLatencyCalibrationStatus: "idle" | "warning" | "listening" | "success" | "error";
-  soloLatencyCalibrationMessage: string | null;
-  soloLatencyFloorApplied?: boolean;
-  soloLatencyRawMeasuredMs?: number | null;
-  onCalibrateSoloLatency: (mode: "acoustic" | "interface") => void;
+  guidedRtlWizard: GuidedRtlWizardState;
+  onBeginGuidedRtlWizard: () => void;
+  onStartGuidedRtlCapture: () => void;
+  onPreviewGuidedRtlLatencyMs: (ms: number) => void;
+  onConfirmGuidedRtlWizard: () => void;
+  onCancelGuidedRtlWizard: () => void;
+  onRetryGuidedRtlCapture: () => void;
   calibrationDisabled?: boolean;
 };
 
@@ -151,14 +153,15 @@ function StudioPreflightLobbyInner({
   handleEnterSoloStudio,
   soloPracticeButtonLabel,
   soloLooperLatencyMs,
-  soloLatencyEntryMs,
   soloLatencyCalibrationStale,
   soloLatencyStaleMessage,
-  soloLatencyCalibrationStatus,
-  soloLatencyCalibrationMessage,
-  soloLatencyFloorApplied = false,
-  soloLatencyRawMeasuredMs = null,
-  onCalibrateSoloLatency,
+  guidedRtlWizard,
+  onBeginGuidedRtlWizard,
+  onStartGuidedRtlCapture,
+  onPreviewGuidedRtlLatencyMs,
+  onConfirmGuidedRtlWizard,
+  onCancelGuidedRtlWizard,
+  onRetryGuidedRtlCapture,
   calibrationDisabled = false,
 }: StudioPreflightLobbyProps) {
   return (
@@ -422,11 +425,11 @@ function StudioPreflightLobbyInner({
                 <ul className="space-y-2 text-sm leading-relaxed text-stone-400">
                   <li className="flex items-center gap-2">
                     <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
-                    <span>use wired headphones</span>
+                    <span>wired headphones for daily play</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
-                    <span>calibrate recommended for tighter loops</span>
+                    <span>align RTL with the guided clap + slider wizard</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
@@ -441,15 +444,16 @@ function StudioPreflightLobbyInner({
               <SoloLatencyCalibrationPanel
                 variant="lobby"
                 latencyMs={soloLooperLatencyMs}
-                entryLatencyMs={soloLatencyEntryMs}
                 stale={soloLatencyCalibrationStale}
                 staleMessage={soloLatencyStaleMessage}
-                status={soloLatencyCalibrationStatus}
-                message={soloLatencyCalibrationMessage}
                 disabled={calibrationDisabled}
-                floorApplied={soloLatencyFloorApplied}
-                rawMeasuredMs={soloLatencyRawMeasuredMs}
-                onCalibrate={onCalibrateSoloLatency}
+                wizard={guidedRtlWizard}
+                onBeginWizard={onBeginGuidedRtlWizard}
+                onStartCapture={onStartGuidedRtlCapture}
+                onPreviewLatencyMs={onPreviewGuidedRtlLatencyMs}
+                onConfirm={onConfirmGuidedRtlWizard}
+                onCancel={onCancelGuidedRtlWizard}
+                onRetryCapture={onRetryGuidedRtlCapture}
               />
             </div>
 

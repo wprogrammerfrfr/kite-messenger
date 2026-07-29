@@ -281,8 +281,23 @@ export function useKiteStudioHost(config: UseKiteStudioHostConfig): KiteStudioHo
     const dest = ensureSoloInputSumDestination();
     if (!dest) return;
 
+    // Prefer the live stream map so virtual inputs are not skipped when
+    // activeDeviceIdsRef briefly lags React state. Still reconcile with
+    // active IDs when present so removed devices are pruned.
+    const activeIdList = cfg.activeDeviceIdsRef.current ?? [];
+    const activeIdSet = new Set(activeIdList);
+    const candidateIds = new Set<string>(activeIdList);
+    for (const deviceId of Array.from(activeStreamsMapRef.current.keys())) {
+      candidateIds.add(deviceId);
+    }
+
     const desiredIds = new Set<string>();
-    for (const deviceId of cfg.activeDeviceIdsRef.current ?? []) {
+    for (const deviceId of Array.from(candidateIds)) {
+      // If the active-ID list is non-empty and explicitly excludes this id,
+      // skip it (unregister path). If the list is empty but the map still
+      // has entries (boot race), allow map-only candidates.
+      if (activeIdSet.size > 0 && !activeIdSet.has(deviceId)) continue;
+
       const stream = activeStreamsMapRef.current.get(deviceId) ?? null;
       const hasLiveAudioTrack = stream
         ? stream.getAudioTracks().some((track) => track.readyState === "live")

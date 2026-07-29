@@ -24,7 +24,6 @@ import {
 import { buildKiteIntervalGraph, type KiteIntervalGraph } from "@/lib/kite-interval-graph";
 import {
   clampSoloLatencyMs,
-  normalizeSoloLatencyMeasurement,
   readSoloLatencyMs,
   readSoloLatencyHwFingerprint,
   writeSoloLatencyMs,
@@ -112,6 +111,7 @@ import type {
   DeviceFlagMap,
   KiteLoopChunkSendProgress,
   SoloLooperMode,
+  GuidedRtlWizardState,
 } from "@/hooks/useKiteStudioEngine.types";
 
 
@@ -125,6 +125,18 @@ import type {
 
 
 type JamSetupLockAction = "acquire" | "release";
+
+const GUIDED_RTL_WIZARD_IDLE: GuidedRtlWizardState = {
+  phase: "idle",
+  draftLatencyMs: 0,
+  committedLatencyMs: 0,
+  message: null,
+  error: null,
+  open: false,
+  countdownBeatRemaining: null,
+  captureProgress01: 0,
+  captureBeatIndex: null,
+};
 
 
 type RetainedKiteLoopBuffer = {
@@ -522,6 +534,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   );
   const [soloLatencyFloorApplied, setSoloLatencyFloorApplied] = useState(false);
   const soloLatencyCalibrationStaleRef = useRef(false);
+  const [guidedRtlWizard, setGuidedRtlWizard] = useState<GuidedRtlWizardState>(GUIDED_RTL_WIZARD_IDLE);
+  const guidedRtlWizardOpenRef = useRef(false);
+  const guidedRtlTransitionTimerRef = useRef<number | null>(null);
   const [soloLooperMode, setSoloLooperMode] = useState<SoloLooperMode>("free");
   const soloLooperModeRef = useRef(soloLooperMode);
   const [handsfreeSequenceActive, setHandsfreeSequenceActive] = useState(false);
@@ -709,6 +724,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloPedalTargetTrackIndexRef = useRef(1);
   /** Overdub track (2–4) armed in worklet, waiting for Track 1 downbeat. */
   const soloOverdubArmedTrackIndexRef = useRef<number | null>(null);
+  /** Deferred capture rebind requested while recording/armed; flush when idle. */
+  const pendingSoloCaptureRebindRef = useRef(false);
   /** Latest worklet slot snapshot (mirrors `PLAYBACK_UI_STATE`). */
   const soloTrackSlotUiLatestRef = useRef<SoloLooperPlaybackUiStateEvent["slots"] | null>(null);
   /** Free-mode pedal stop anchor — sampled at input event before main-thread work. */
@@ -964,6 +981,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   useEffect(() => {
     soloLatencyCalibrationStaleRef.current = soloLatencyCalibrationStale;
   }, [soloLatencyCalibrationStale]);
+
+  useEffect(() => {
+    guidedRtlWizardOpenRef.current = guidedRtlWizard.open;
+  }, [guidedRtlWizard.open]);
 
   useEffect(() => {
     const stored = readSoloLatencyMs();
@@ -1531,7 +1552,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
     teardownInterfaceLiveMonitorGraph(deviceId);
     clearInterfaceMonitorStateForDevice(deviceId);
-    stream?.getTracks().forEach((track) => track.stop());
+    // Virtual inputs (e.g. Air Synth MediaStreamDestination) own their tracks —
+    // stopping them permanently kills the destination stream for re-enable.
+    if (!deviceId.startsWith("kite:")) {
+      stream?.getTracks().forEach((track) => track.stop());
+    }
     activeStreamsMapRef.current.delete(deviceId);
     mixerMergerNodesRef.current.delete(deviceId);
     mixerSplitterNodesRef.current.delete(deviceId);
@@ -1968,11 +1993,77 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     ]
   );
 
+  /**
+   * Hot-swap the solo looper capture MediaStream when virtual inputs change
+   * after bootstrap. Defers while recording/armed/count-in.
+   */
+  const syncSoloLooperCaptureInput = useCallback((): void => {
+    const engine = soloLooperEngineRef.current;
+    if (!engine) return;
+
+    const busy =
+      isRecordingArmedRef.current ||
+      soloLooperStateRef.current === "recording" ||
+      soloOverdubArmedTrackIndexRef.current != null;
+    if (busy) {
+      pendingSoloCaptureRebindRef.current = true;
+      return;
+    }
+
+    const destinationNode = ensureMasterDestinationNode();
+    if (!destinationNode) return;
+
+    const { inputStream, masterStream } = resolveSoloLooperInputStream(destinationNode);
+    if (!inputStream || inputStream.getAudioTracks().length === 0) return;
+    if (inputStream === destinationNode.stream || inputStream === masterStream) return;
+
+    if (engine.getCaptureStream() === inputStream) {
+      pendingSoloCaptureRebindRef.current = false;
+      return;
+    }
+
+    const replaced = engine.replaceCaptureStream(inputStream);
+    if (replaced) {
+      pendingSoloCaptureRebindRef.current = false;
+    }
+  }, [ensureMasterDestinationNode, resolveSoloLooperInputStream]);
+
+  const flushPendingSoloCaptureRebind = useCallback((): void => {
+    if (!pendingSoloCaptureRebindRef.current) return;
+    syncSoloLooperCaptureInput();
+  }, [syncSoloLooperCaptureInput]);
+
+  useEffect(() => {
+    if (soloLooperState === "recording" || isRecordingArmed) return;
+    if (soloOverdubArmedTrackIndex != null) return;
+    flushPendingSoloCaptureRebind();
+  }, [
+    soloLooperState,
+    isRecordingArmed,
+    soloOverdubArmedTrackIndex,
+    flushPendingSoloCaptureRebind,
+  ]);
+
   const registerVirtualInputStream = useCallback(
     async (deviceId: string, stream: MediaStream) => {
-      if (mixerRebuildInFlightRef.current) return;
       const requestedDeviceId = deviceId.trim();
       if (!requestedDeviceId) return;
+
+      // Bound wait if a mixer rebuild is in flight — silent early-return dropped
+      // Air Synth registration on slow mobile devices.
+      if (mixerRebuildInFlightRef.current) {
+        let waited = 0;
+        while (mixerRebuildInFlightRef.current && waited < 3) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 100);
+          });
+          waited += 1;
+        }
+        if (mixerRebuildInFlightRef.current) {
+          console.warn("[Kite] Virtual input registration deferred: mixer rebuild still in flight.");
+          return;
+        }
+      }
 
       const audioTrack = stream.getAudioTracks()[0] ?? null;
       if (!audioTrack || audioTrack.readyState !== "live") {
@@ -1985,6 +2076,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           console.warn("Maximum 3 active input devices supported.");
           return;
         }
+        // Synchronously update the ref before rebuildSoloLooperSumGraph so the
+        // Air Synth (or other virtual input) is included immediately — do not
+        // wait for the useEffect that mirrors React state into the ref.
+        activeDeviceIdsRef.current = [...activeDeviceIdsRef.current, requestedDeviceId];
         setActiveDeviceIds((prev) => {
           if (prev.includes(requestedDeviceId)) return prev;
           return [...prev, requestedDeviceId];
@@ -1996,6 +2091,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       audioTrack.onended = () => {
         if (!activeDeviceIdsRef.current.includes(requestedDeviceId)) return;
         markSoloLatencyStale();
+        activeDeviceIdsRef.current = activeDeviceIdsRef.current.filter(
+          (id) => id !== requestedDeviceId
+        );
         setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
         removeAndCleanupDevice(requestedDeviceId);
         clearMixerDeviceVolumeState(requestedDeviceId);
@@ -2008,6 +2106,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         return { ...prev, [lane0]: 100, [lane1]: 100 };
       });
       rebuildSoloLooperSumGraph();
+      syncSoloLooperCaptureInput();
       await rebuildMixerAndReplaceTrack();
     },
     [
@@ -2016,6 +2115,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       removeAndCleanupDevice,
       clearMixerDeviceVolumeState,
       markSoloLatencyStale,
+      syncSoloLooperCaptureInput,
     ]
   );
 
@@ -2027,10 +2127,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       if (!activeDeviceIdsRef.current.includes(requestedDeviceId)) return;
 
       markSoloLatencyStale();
+      // Synchronously drop membership before sum-graph rebuild (same race as register).
+      activeDeviceIdsRef.current = activeDeviceIdsRef.current.filter(
+        (id) => id !== requestedDeviceId
+      );
       setActiveDeviceIds((prev) => prev.filter((id) => id !== requestedDeviceId));
       clearMixerDeviceVolumeState(requestedDeviceId);
       removeAndCleanupDevice(requestedDeviceId);
       rebuildSoloLooperSumGraph();
+      syncSoloLooperCaptureInput();
       await rebuildMixerAndReplaceTrack();
     },
     [
@@ -2039,6 +2144,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       removeAndCleanupDevice,
       clearMixerDeviceVolumeState,
       markSoloLatencyStale,
+      syncSoloLooperCaptureInput,
     ]
   );
 
@@ -3899,41 +4005,94 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         });
         return;
       }
-      if (event.type === "CALIBRATION_RESULT") {
-        if (!mountedRef.current) return;
-        if (event.latencyFrames === null) {
-          setSoloLatencyCalibrationStatus("error");
-          setSoloLatencyCalibrationMessage("No input response detected. Increase speaker level and try again.");
+      if (event.type === "GUIDED_CAL_CAPTURE_COMPLETE") {
+        if (!mountedRef.current || !guidedRtlWizardOpenRef.current) return;
+        if (guidedRtlTransitionTimerRef.current !== null) {
+          window.clearTimeout(guidedRtlTransitionTimerRef.current);
+          guidedRtlTransitionTimerRef.current = null;
+        }
+        setGuidedRtlWizard((prev) => ({
+          ...prev,
+          phase: "transition",
+          countdownBeatRemaining: null,
+          captureProgress01: 1,
+          captureBeatIndex: 4,
+          message: "Claps captured — keep the metronome running and align with the slider.",
+          error: null,
+        }));
+        guidedRtlTransitionTimerRef.current = window.setTimeout(() => {
+          guidedRtlTransitionTimerRef.current = null;
+          if (!mountedRef.current || !guidedRtlWizardOpenRef.current) return;
+          setGuidedRtlWizard((prev) => ({
+            ...prev,
+            phase: "adjusting",
+            message: "Drag the slider until your claps lock to the metronome grid.",
+          }));
+        }, 600);
+        return;
+      }
+      if (event.type === "GUIDED_CAL_STATE") {
+        if (!mountedRef.current || !guidedRtlWizardOpenRef.current) return;
+        if (event.error === "capture_too_short") {
+          setGuidedRtlWizard((prev) => ({
+            ...prev,
+            phase: "error",
+            error: "Clap capture was too short. Tap Retry and clap four steady beats.",
+            message: null,
+            countdownBeatRemaining: null,
+            captureProgress01: event.captureProgress01 ?? prev.captureProgress01,
+            captureBeatIndex: event.captureBeatIndex ?? null,
+          }));
           return;
         }
-        const resultSampleRate =
-          Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
-        const measuredMs = Math.round((event.latencyFrames / resultSampleRate) * 1000);
-        const { appliedMs, floored, rawMs } = normalizeSoloLatencyMeasurement(measuredMs);
-        console.log(
-          `Latency Calibrated | RTL: ${rawMs}ms | Applied Overdub Latency: ${appliedMs}ms${
-            floored ? " (Windows floor)" : ""
-          }`
-        );
-        soloLooperLatencyMsRef.current = appliedMs;
-        setSoloLooperLatencyMs(appliedMs);
-        setSoloLatencyLastRawMeasuredMs(rawMs);
-        setSoloLatencyFloorApplied(floored);
-        setSoloLatencyCalibrationStatus("success");
-        setSoloLatencyCalibrationMessage(
-          floored
-            ? `Measured ${rawMs} ms; applied ${appliedMs} ms (Windows headphone under-report floor).`
-            : `RTL ${rawMs} ms, applied overdub latency ${appliedMs} ms.`
-        );
-        clearSoloLatencyStale();
-        void (async () => {
-          try {
-            const fingerprint = await buildCurrentSoloLatencyHwFingerprint();
-            writeSoloLatencyHwFingerprint(fingerprint);
-          } catch {
-            /* fingerprint snapshot best-effort */
-          }
-        })();
+        if (event.error) {
+          setGuidedRtlWizard((prev) => ({
+            ...prev,
+            phase: "error",
+            error: `Calibration error: ${event.error}`,
+            message: null,
+            countdownBeatRemaining: null,
+          }));
+          return;
+        }
+        if (event.phase === "counting") {
+          const remaining =
+            event.countdownBeatRemaining != null && event.countdownBeatRemaining > 0
+              ? event.countdownBeatRemaining
+              : null;
+          setGuidedRtlWizard((prev) => ({
+            ...prev,
+            phase: "countdown",
+            countdownBeatRemaining: remaining,
+            captureProgress01: 0,
+            captureBeatIndex: null,
+            message:
+              remaining != null
+                ? `Get ready — don’t clap yet (${remaining})`
+                : "Get ready — don’t clap yet",
+            error: null,
+          }));
+          return;
+        }
+        if (event.phase === "capturing") {
+          const progress =
+            typeof event.captureProgress01 === "number" && Number.isFinite(event.captureProgress01)
+              ? Math.max(0, Math.min(1, event.captureProgress01))
+              : 0;
+          const beat =
+            event.captureBeatIndex != null && event.captureBeatIndex > 0
+              ? event.captureBeatIndex
+              : 1;
+          setGuidedRtlWizard((prev) => ({
+            ...prev,
+            phase: "capturing",
+            countdownBeatRemaining: null,
+            captureProgress01: progress,
+            captureBeatIndex: beat,
+            message: `Clap now — beat ${beat} of 4`,
+            error: null,
+          }));
+        }
         return;
       }
       if (event.type !== "LOOP_READY") return;
@@ -4323,6 +4482,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       if (startParams.targetLengthFrames !== undefined) {
         engine.setTrackTargetLength(1, startParams.targetLengthFrames);
       }
+      syncSoloLooperCaptureInput();
       engine.startRecording({
         ...startParams,
         ...(hasRecordAnchor ? { recordStartContextSec: recordStartAt } : {}),
@@ -4376,6 +4536,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       resolveSoloLooperInputStream,
       sessionId,
       syncHandsfreeSequenceActive,
+      syncSoloLooperCaptureInput,
     ]
   );
 
@@ -5394,99 +5555,271 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     applyPedalFocus,
   ]);
 
-  const handleAutoCalibrateSoloLatency = useCallback(async (_mode: "acoustic" | "interface") => {
-    if (echoSafetyMode) {
-      setSoloLatencyCalibrationStatus("warning");
-      setSoloLatencyCalibrationMessage("Disable Echo Safety before auto-calibration.");
-      return;
-    }
-    if (isRecordingArmedRef.current || soloLooperStateRef.current === "recording") {
-      setSoloLatencyCalibrationStatus("error");
-      setSoloLatencyCalibrationMessage("Stop recording/count-in before auto-calibration.");
-      return;
-    }
-
-    try {
-      if (!soloLooperEngineRef.current) {
-        const ctx = ensureStudioAudioContext();
-        await ctx.resume();
-        if (ctx.state !== "running") {
-          setAudioContextReady(false);
-          setSoloLatencyCalibrationStatus("error");
-          setSoloLatencyCalibrationMessage("Audio engine could not start.");
-          return;
-        }
-        setAudioContextReady(true);
-        const destinationNode = ensureMasterDestinationNode();
-        if (!destinationNode) {
-          setSoloLatencyCalibrationStatus("error");
-          setSoloLatencyCalibrationMessage("Kite Sync output destination is unavailable.");
-          return;
-        }
-        const { inputStream, masterStream } = resolveSoloLooperInputStream(destinationNode);
-        if (!inputStream || inputStream.getAudioTracks().length === 0) {
-          setSoloLatencyCalibrationStatus("error");
-          setSoloLatencyCalibrationMessage("Microphone not connected.");
-          return;
-        }
-        if (inputStream === destinationNode.stream || inputStream === masterStream) {
-          setSoloLatencyCalibrationStatus("error");
-          setSoloLatencyCalibrationMessage("Kite Sync input must be raw mic audio, not the master mix.");
-          return;
-        }
-        const localSr = Math.round(ctx.sampleRate);
-        const maxProvisionFrames = Math.max(1, Math.floor(localSr * 60));
-        const bootstrapIntervalId = `${sessionId ?? "solo"}-bootstrap-${Date.now()}`;
-        const bootstrapSequenceNumber = (lastRetainedKiteSequenceRef.current ?? 0) + 1;
-        const engine = await buildSoloLooperEngine({
-          audioContext: ctx,
-          inputStream,
-          destinationNode,
-          timing: {
-            localSampleRate: localSr,
-            localIntervalFrames: maxProvisionFrames,
-          },
-          loopId: bootstrapIntervalId,
-          trackIndex: 1,
-          channelCount: 2,
-          monitorDestination: ctx.destination,
-          monitorGain: 1,
-          inputGain: (soloInputGain / 10) * 2,
-          onEvent: (event) => handleSoloLooperEvent(event, ctx),
-        });
-        soloLooperEngineRef.current = engine;
-        engine.setMetronomeGainNode(metronomeGainRef.current);
-        applySoloRecordingLatencyCompensation();
-        soloLooperEventIntervalIdRef.current = bootstrapIntervalId;
-        soloLooperEventSequenceNumberRef.current = bootstrapSequenceNumber;
-      }
-      setSoloLatencyCalibrationStatus("listening");
-      setSoloLatencyCalibrationMessage("Listening for ping...");
-      soloLooperEngineRef.current?.startCalibration();
-    } catch (error) {
-      setSoloLatencyCalibrationStatus("error");
+  const handleSoloLatencyMsChange = useCallback(
+    (value: number) => {
+      const clamped = clampSoloLatencyMs(value);
+      soloLooperLatencyMsRef.current = clamped;
+      setSoloLooperLatencyMs(clamped);
+      setSoloLatencyLastRawMeasuredMs(clamped);
+      setSoloLatencyFloorApplied(false);
+      setSoloLatencyCalibrationStatus("success");
       setSoloLatencyCalibrationMessage(
-        error instanceof Error ? error.message : "Auto-calibration could not start."
+        clamped > 0
+          ? `Manual RTL alignment set to ${clamped} ms.`
+          : "RTL compensation cleared."
       );
-    }
-  }, [
-    applySoloRecordingLatencyCompensation,
-    echoSafetyMode,
-    ensureMasterDestinationNode,
-    ensureStudioAudioContext,
-    handleSoloLooperEvent,
-    resolveSoloLooperInputStream,
-    sessionId,
-  ]);
+      clearSoloLatencyStale();
+      void (async () => {
+        try {
+          const fingerprint = await buildCurrentSoloLatencyHwFingerprint();
+          writeSoloLatencyHwFingerprint(fingerprint);
+        } catch {
+          /* fingerprint snapshot best-effort */
+        }
+      })();
+    },
+    [buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale]
+  );
 
-  const handleSoloLatencyMsChange = useCallback((value: number) => {
-    const clamped = clampSoloLatencyMs(value);
+  const clearGuidedRtlTransitionTimer = useCallback(() => {
+    if (guidedRtlTransitionTimerRef.current !== null) {
+      window.clearTimeout(guidedRtlTransitionTimerRef.current);
+      guidedRtlTransitionTimerRef.current = null;
+    }
+  }, []);
+
+  const stopGuidedRtlAudio = useCallback(() => {
+    const engine = soloLooperEngineRef.current;
+    if (!engine) return;
+    try {
+      engine.cancelGuidedCalibration();
+    } catch {
+      /* ignore */
+    }
+    try {
+      engine.stopAudibleMetronome();
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const beginGuidedRtlWizard = useCallback(() => {
+    if (
+      isRecordingArmedRef.current ||
+      soloLooperStateRef.current === "recording" ||
+      handsfreeSequenceActiveRef.current
+    ) {
+      setGuidedRtlWizard((prev) => ({
+        ...prev,
+        open: true,
+        phase: "error",
+        error: "Stop recording or count-in before starting calibration.",
+        message: null,
+      }));
+      return;
+    }
+
+    void (async () => {
+      try {
+        const engine = await ensureSoloLooperEngineBootstrapped();
+        const ctx = studioAudioContextRef.current;
+        if (!ctx || ctx.state !== "running") {
+          setGuidedRtlWizard({
+            ...GUIDED_RTL_WIZARD_IDLE,
+            open: true,
+            phase: "error",
+            error: "Audio engine could not start.",
+          });
+          return;
+        }
+        const bpm = Math.max(
+          30,
+          Math.min(300, kiteIntervalTimingRef.current?.bpm || kiteSetupTempoRef.current || 120)
+        );
+        const beatFrames = Math.max(1, Math.round((60 / bpm) * ctx.sampleRate));
+        const targetFrames = beatFrames * 4;
+        const countInFrames = beatFrames * 4;
+        const committed = clampSoloLatencyMs(soloLooperLatencyMsRef.current);
+
+        clearGuidedRtlTransitionTimer();
+        engine.beginGuidedCalibration(targetFrames, countInFrames);
+        if (!isVisualMetronomeOnlyRef.current) {
+          engine.startAudibleMetronome(bpm);
+        }
+        engine.startGuidedCalCapture();
+
+        guidedRtlWizardOpenRef.current = true;
+        setGuidedRtlWizard({
+          phase: "countdown",
+          draftLatencyMs: committed,
+          committedLatencyMs: committed,
+          message: "Get ready — don’t clap yet (4)",
+          error: null,
+          open: true,
+          countdownBeatRemaining: 4,
+          captureProgress01: 0,
+          captureBeatIndex: null,
+        });
+      } catch (error) {
+        setGuidedRtlWizard({
+          ...GUIDED_RTL_WIZARD_IDLE,
+          open: true,
+          phase: "error",
+          error: error instanceof Error ? error.message : "Could not start calibration wizard.",
+        });
+      }
+    })();
+  }, [clearGuidedRtlTransitionTimer, ensureSoloLooperEngineBootstrapped]);
+
+  const startGuidedRtlCapture = useCallback(() => {
+    const engine = soloLooperEngineRef.current;
+    if (!engine || !guidedRtlWizardOpenRef.current) {
+      return;
+    }
+    if (
+      isRecordingArmedRef.current ||
+      soloLooperStateRef.current === "recording" ||
+      handsfreeSequenceActiveRef.current
+    ) {
+      setGuidedRtlWizard((prev) => ({
+        ...prev,
+        phase: "error",
+        error: "Stop recording before capturing calibration claps.",
+        message: null,
+      }));
+      return;
+    }
+    clearGuidedRtlTransitionTimer();
+    engine.startGuidedCalCapture();
+    setGuidedRtlWizard((prev) => ({
+      ...prev,
+      phase: "countdown",
+      countdownBeatRemaining: 4,
+      captureProgress01: 0,
+      captureBeatIndex: null,
+      message: "Get ready — don’t clap yet (4)",
+      error: null,
+    }));
+  }, [clearGuidedRtlTransitionTimer]);
+
+  const previewGuidedRtlLatencyMs = useCallback((ms: number) => {
+    if (!guidedRtlWizardOpenRef.current) return;
+    const clamped = clampSoloLatencyMs(ms);
+    setGuidedRtlWizard((prev) => ({
+      ...prev,
+      draftLatencyMs: clamped,
+      phase: prev.phase === "adjusting" || prev.phase === "transition" ? prev.phase : "adjusting",
+      message: prev.message ?? "Drag until claps lock to the grid.",
+    }));
+    soloLooperEngineRef.current?.setGuidedCalPreviewOffsetMs(clamped);
+  }, []);
+
+  const confirmGuidedRtlWizard = useCallback(() => {
+    if (!guidedRtlWizardOpenRef.current) return;
+    clearGuidedRtlTransitionTimer();
+    const clamped = clampSoloLatencyMs(guidedRtlWizard.draftLatencyMs);
+    soloLooperLatencyMsRef.current = clamped;
     setSoloLooperLatencyMs(clamped);
     setSoloLatencyLastRawMeasuredMs(clamped);
     setSoloLatencyFloorApplied(false);
-  }, []);
+    setSoloLatencyCalibrationStatus("success");
+    setSoloLatencyCalibrationMessage(
+      clamped > 0
+        ? `Guided RTL alignment confirmed at ${clamped} ms.`
+        : "RTL compensation cleared."
+    );
+    clearSoloLatencyStale();
+    applySoloRecordingLatencyCompensation();
+    stopGuidedRtlAudio();
+    guidedRtlWizardOpenRef.current = false;
+    setGuidedRtlWizard({
+      ...GUIDED_RTL_WIZARD_IDLE,
+      committedLatencyMs: clamped,
+      draftLatencyMs: clamped,
+    });
+    void (async () => {
+      try {
+        const fingerprint = await buildCurrentSoloLatencyHwFingerprint();
+        writeSoloLatencyHwFingerprint(fingerprint);
+      } catch {
+        /* fingerprint snapshot best-effort */
+      }
+    })();
+  }, [
+    applySoloRecordingLatencyCompensation,
+    buildCurrentSoloLatencyHwFingerprint,
+    clearGuidedRtlTransitionTimer,
+    clearSoloLatencyStale,
+    guidedRtlWizard.draftLatencyMs,
+    stopGuidedRtlAudio,
+  ]);
+
+  const cancelGuidedRtlWizard = useCallback(() => {
+    clearGuidedRtlTransitionTimer();
+    const restored = clampSoloLatencyMs(guidedRtlWizard.committedLatencyMs);
+    soloLooperLatencyMsRef.current = restored;
+    // Leave persisted storage untouched on cancel; restore recording-bus delay only.
+    applySoloRecordingLatencyCompensation();
+    stopGuidedRtlAudio();
+    guidedRtlWizardOpenRef.current = false;
+    setGuidedRtlWizard({
+      ...GUIDED_RTL_WIZARD_IDLE,
+      committedLatencyMs: restored,
+      draftLatencyMs: restored,
+    });
+  }, [
+    applySoloRecordingLatencyCompensation,
+    clearGuidedRtlTransitionTimer,
+    guidedRtlWizard.committedLatencyMs,
+    stopGuidedRtlAudio,
+  ]);
+
+  const retryGuidedRtlCapture = useCallback(() => {
+    if (!guidedRtlWizardOpenRef.current) return;
+    const engine = soloLooperEngineRef.current;
+    const ctx = studioAudioContextRef.current;
+    if (!engine || !ctx || ctx.state !== "running") {
+      setGuidedRtlWizard((prev) => ({
+        ...prev,
+        phase: "error",
+        error: "Audio engine unavailable. Close and reopen calibration.",
+        message: null,
+      }));
+      return;
+    }
+    clearGuidedRtlTransitionTimer();
+    const bpm = Math.max(
+      30,
+      Math.min(300, kiteIntervalTimingRef.current?.bpm || kiteSetupTempoRef.current || 120)
+    );
+    const beatFrames = Math.max(1, Math.round((60 / bpm) * ctx.sampleRate));
+    const targetFrames = beatFrames * 4;
+    const countInFrames = beatFrames * 4;
+    engine.cancelGuidedCalibration();
+    engine.beginGuidedCalibration(targetFrames, countInFrames);
+    if (!isVisualMetronomeOnlyRef.current) {
+      engine.startAudibleMetronome(bpm);
+    }
+    engine.startGuidedCalCapture();
+    setGuidedRtlWizard((prev) => ({
+      ...prev,
+      phase: "countdown",
+      draftLatencyMs: prev.committedLatencyMs,
+      countdownBeatRemaining: 4,
+      captureProgress01: 0,
+      captureBeatIndex: null,
+      message: "Retry — get ready, don’t clap yet (4)",
+      error: null,
+    }));
+  }, [clearGuidedRtlTransitionTimer]);
 
   const handleStopAndResetSoloLooper = useCallback(() => {
+    if (guidedRtlWizardOpenRef.current) {
+      clearGuidedRtlTransitionTimer();
+      stopGuidedRtlAudio();
+      guidedRtlWizardOpenRef.current = false;
+      setGuidedRtlWizard(GUIDED_RTL_WIZARD_IDLE);
+    }
     cancelScheduledMetronomeClicks();
     soloLooperEngineRef.current?.stopAudibleMetronome();
     soloLooperEngineRef.current?.teardown();
@@ -5519,7 +5852,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     handsfreeTrackTargetFramesRef.current = null;
     clearAllSoloTrackBarCountLocks();
     setKiteMode("solo");
-  }, [applyPedalFocus, cancelScheduledMetronomeClicks, cleanupKiteEngine, clearSoloRunwayDisplay, syncHandsfreeSequenceActive, clearAllSoloTrackBarCountLocks]);
+  }, [applyPedalFocus, cancelScheduledMetronomeClicks, cleanupKiteEngine, clearGuidedRtlTransitionTimer, clearSoloRunwayDisplay, stopGuidedRtlAudio, syncHandsfreeSequenceActive, clearAllSoloTrackBarCountLocks]);
 
   const handleSoloTrackVolumeChange = useCallback((trackIndex: 1 | 2 | 3 | 4, linear: number) => {
     const g = Math.max(0, Math.min(1, linear));
@@ -5672,6 +6005,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           barCount
         );
         engine.setTrackTargetLength(trackIndex, targetFrames);
+        syncSoloLooperCaptureInput();
         engine.armOverdub({
           trackIndex,
           intervalFrames: maxProvisionFrames,
@@ -5683,7 +6017,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         });
       })();
     },
-    [applyPedalFocus, ensureStudioAudioContext]
+    [applyPedalFocus, ensureStudioAudioContext, syncSoloLooperCaptureInput]
   );
 
   const looperFootPedalArmed = kiteMode === "solo" && studioUiPhase === "studio";
@@ -7940,6 +8274,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloLatencyStaleMessage,
     soloLatencyLastRawMeasuredMs,
     soloLatencyFloorApplied,
+    guidedRtlWizard,
     soloLooperMode,
     handsfreeSequenceActive,
     soloTrackBarCounts,
@@ -8007,6 +8342,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloLatencyStaleMessage,
       soloLatencyLastRawMeasuredMs,
       soloLatencyFloorApplied,
+      guidedRtlWizard,
       soloLooperMode,
       handsfreeSequenceActive,
       soloTrackBarCounts,
@@ -8040,8 +8376,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     startSoloLooper: startSoloLooperAction,
     handleRecordFirstLoop,
     commitActiveRecording,
-    handleAutoCalibrateSoloLatency,
     handleSoloLatencyMsChange,
+    beginGuidedRtlWizard,
+    startGuidedRtlCapture,
+    previewGuidedRtlLatencyMs,
+    confirmGuidedRtlWizard,
+    cancelGuidedRtlWizard,
+    retryGuidedRtlCapture,
     handleStopAndResetSoloLooper,
     handleToggleMasterPause,
     handleResetSoloTrack,
@@ -8102,8 +8443,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       startSoloLooperAction,
       handleRecordFirstLoop,
       commitActiveRecording,
-      handleAutoCalibrateSoloLatency,
       handleSoloLatencyMsChange,
+      beginGuidedRtlWizard,
+      startGuidedRtlCapture,
+      previewGuidedRtlLatencyMs,
+      confirmGuidedRtlWizard,
+      cancelGuidedRtlWizard,
+      retryGuidedRtlCapture,
       handleStopAndResetSoloLooper,
       handleToggleMasterPause,
       handleResetSoloTrack,

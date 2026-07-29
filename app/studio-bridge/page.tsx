@@ -306,11 +306,9 @@ export default function StudioBridgePage() {
   const soloLooperLatencyMs = engineState.soloLooperLatencyMs;
   const soloInputGain = engineState.soloInputGain;
   const soloLatencyCalibrationStatus = engineState.soloLatencyCalibrationStatus;
-  const soloLatencyCalibrationMessage = engineState.soloLatencyCalibrationMessage;
   const soloLatencyCalibrationStale = engineState.soloLatencyCalibrationStale;
   const soloLatencyStaleMessage = engineState.soloLatencyStaleMessage;
-  const soloLatencyLastRawMeasuredMs = engineState.soloLatencyLastRawMeasuredMs;
-  const soloLatencyFloorApplied = engineState.soloLatencyFloorApplied;
+  const guidedRtlWizard = engineState.guidedRtlWizard;
   const soloLooperMode = engineState.soloLooperMode;
   const soloTrackBarCounts = engineState.soloTrackBarCounts;
   const soloTrackBarCountsLocked = engineState.soloTrackBarCountsLocked;
@@ -383,8 +381,12 @@ export default function StudioBridgePage() {
   const onRemotePlaybackVolumeChange = engineActions.onRemotePlaybackVolumeChange;
   const onMetronomeVolumeChange = engineActions.onMetronomeVolumeChange;
   const handleRecordFirstLoop = engineActions.handleRecordFirstLoop;
-  const handleAutoCalibrateSoloLatency = engineActions.handleAutoCalibrateSoloLatency;
-  const handleSoloLatencyMsChange = engineActions.handleSoloLatencyMsChange;
+  const beginGuidedRtlWizard = engineActions.beginGuidedRtlWizard;
+  const startGuidedRtlCapture = engineActions.startGuidedRtlCapture;
+  const previewGuidedRtlLatencyMs = engineActions.previewGuidedRtlLatencyMs;
+  const confirmGuidedRtlWizard = engineActions.confirmGuidedRtlWizard;
+  const cancelGuidedRtlWizard = engineActions.cancelGuidedRtlWizard;
+  const retryGuidedRtlCapture = engineActions.retryGuidedRtlCapture;
   const handleStopAndResetSoloLooper = engineActions.handleStopAndResetSoloLooper;
   const handleToggleMasterPause = engineActions.handleToggleMasterPause;
   const handleResetSoloTrack = engineActions.handleResetSoloTrack;
@@ -461,15 +463,21 @@ export default function StudioBridgePage() {
     Boolean(localMicStream) &&
     audioTestDone &&
     kiteSignalSecure;
-  const entryLatencyMs = soloLatencyLastRawMeasuredMs ?? soloLooperLatencyMs;
+  const guidedWizardBusy =
+    guidedRtlWizard.open &&
+    (guidedRtlWizard.phase === "metronome" ||
+      guidedRtlWizard.phase === "countdown" ||
+      guidedRtlWizard.phase === "capturing" ||
+      guidedRtlWizard.phase === "transition");
   const canPracticeAlone =
     studioUiPhase === "lobby" &&
     Boolean(localMicStream) &&
     audioTestDone &&
-    soloLatencyCalibrationStatus !== "listening";
+    soloLatencyCalibrationStatus !== "listening" &&
+    !guidedWizardBusy;
 
   const soloPracticeButtonLabel = ((): string => {
-    if (soloLatencyCalibrationStatus === "listening") {
+    if (guidedWizardBusy || soloLatencyCalibrationStatus === "listening") {
       return "Calibrating latency…";
     }
     if (!localMicStream || !audioTestDone) {
@@ -1059,14 +1067,15 @@ export default function StudioBridgePage() {
               handleEnterSoloStudio={handleEnterSoloStudio}
               soloPracticeButtonLabel={soloPracticeButtonLabel}
               soloLooperLatencyMs={soloLooperLatencyMs}
-              soloLatencyEntryMs={entryLatencyMs}
               soloLatencyCalibrationStale={soloLatencyCalibrationStale}
               soloLatencyStaleMessage={soloLatencyStaleMessage}
-              soloLatencyCalibrationStatus={soloLatencyCalibrationStatus}
-              soloLatencyCalibrationMessage={soloLatencyCalibrationMessage}
-              soloLatencyFloorApplied={soloLatencyFloorApplied}
-              soloLatencyRawMeasuredMs={soloLatencyLastRawMeasuredMs}
-              onCalibrateSoloLatency={handleAutoCalibrateSoloLatency}
+              guidedRtlWizard={guidedRtlWizard}
+              onBeginGuidedRtlWizard={beginGuidedRtlWizard}
+              onStartGuidedRtlCapture={startGuidedRtlCapture}
+              onPreviewGuidedRtlLatencyMs={previewGuidedRtlLatencyMs}
+              onConfirmGuidedRtlWizard={confirmGuidedRtlWizard}
+              onCancelGuidedRtlWizard={cancelGuidedRtlWizard}
+              onRetryGuidedRtlCapture={retryGuidedRtlCapture}
               calibrationDisabled={micPermissionDenied || !localMicStream}
             />
           ) : studioUiPhase === "kite-setup" ? (
@@ -2106,15 +2115,15 @@ export default function StudioBridgePage() {
             onStopAndResetSoloLooper: handleStopAndResetSoloLooper,
             onEndSession: returnToLobby,
             onLoopModeChange: setSoloLooperMode,
-            onLatencyMsChange: handleSoloLatencyMsChange,
-            onAutoCalibrateLatency: handleAutoCalibrateSoloLatency,
-            autoCalibrateLatencyStatus: soloLatencyCalibrationStatus,
-            autoCalibrateLatencyMessage: soloLatencyCalibrationMessage,
+            guidedRtlWizard,
+            onBeginGuidedRtlWizard: beginGuidedRtlWizard,
+            onStartGuidedRtlCapture: startGuidedRtlCapture,
+            onPreviewGuidedRtlLatencyMs: previewGuidedRtlLatencyMs,
+            onConfirmGuidedRtlWizard: confirmGuidedRtlWizard,
+            onCancelGuidedRtlWizard: cancelGuidedRtlWizard,
+            onRetryGuidedRtlCapture: retryGuidedRtlCapture,
             latencyCalibrationStale: soloLatencyCalibrationStale,
             latencyStaleMessage: soloLatencyStaleMessage,
-            entryLatencyMs,
-            latencyFloorApplied: soloLatencyFloorApplied,
-            latencyRawMeasuredMs: soloLatencyLastRawMeasuredMs,
             onTempoSliderChange: (v) => {
               setKiteSetupTempo(v);
               broadcastWizardStudioParam({ kiteSetupTempo: v, bpm: v });

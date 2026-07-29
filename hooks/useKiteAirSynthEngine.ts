@@ -150,12 +150,16 @@ export function useKiteAirSynthEngine({
       }
 
       visionRef.current?.stop();
-      synthRef.current?.silence();
 
       if (registeredRef.current) {
         registeredRef.current = false;
         void unregisterVirtualInput(KITE_AIR_SYNTH_DEVICE_ID);
       }
+
+      // Dispose synth so re-enable creates a fresh MediaStreamDestination
+      // (ended destination tracks cannot be revived after prior cleanup).
+      synthRef.current?.dispose();
+      synthRef.current = null;
       return;
     }
 
@@ -209,6 +213,17 @@ export function useKiteAirSynthEngine({
         });
         visionRef.current.start(videoElement);
         setIsVisionReady(true);
+
+        // Re-resume after async vision load — iOS/WebKit often re-suspends during
+        // non-gesture async work; register only while context is running.
+        await synthRef.current.resumeIfSuspended();
+        if (cancelled) return;
+        if (audioContext.state !== "running") {
+          setError("audio_suspended");
+          setStatus("error");
+          setIsAudioReady(false);
+          return;
+        }
 
         const stream = synthRef.current.getOutputStream();
         await registerVirtualInput(KITE_AIR_SYNTH_DEVICE_ID, stream);
