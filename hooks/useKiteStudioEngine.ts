@@ -7866,9 +7866,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
             lastAppliedGuestStartSecRef.current = guestTargetSec;
             lastSyncApplyAtMsRef.current = receivedAtMs;
+            // Capture after typeof guards — async IIFE would otherwise lose narrowing on msg.bpm.
+            const syncBpm = msg.bpm;
+            const syncBpi = msg.bpi;
             if (applyBpmBpi) {
-              setMetronomeBpm(msg.bpm);
-              setBeatsPerInterval(msg.bpi);
+              setMetronomeBpm(syncBpm);
+              setBeatsPerInterval(syncBpi);
             }
 
             // Ensure AudioContext + always arm count-in so Guest readiness banner mounts
@@ -7890,7 +7893,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
               }
               setAudioContextReady(true);
 
-              const sixteenthSec = 60 / msg.bpm / 4;
+              const sixteenthSec = 60 / syncBpm / 4;
               let nextGridSec = guestTargetSec;
               if (
                 Number.isFinite(sixteenthSec) &&
@@ -7910,7 +7913,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
                 1,
                 Math.round(timing?.beatsPerBar ?? timing?.timeSignatureTop ?? 4)
               );
-              const countInOneBarSec = (60 / msg.bpm) * beatsPerBar;
+              const countInOneBarSec = (60 / syncBpm) * beatsPerBar;
               if (!Number.isFinite(countInOneBarSec) || countInOneBarSec <= 0) {
                 return;
               }
