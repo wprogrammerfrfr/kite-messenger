@@ -124,6 +124,13 @@ export type SoloLooperHandsfreeTrackAdvancedEvent = {
   sampleRate: number;
 };
 
+export type SoloLooperHandsfreeAdvanceArmedEvent = {
+  type: "HANDSFREE_ADVANCE_ARMED";
+  fromTrack: number;
+  toTrack: number;
+  sampleRate: number;
+};
+
 export type SoloLooperHandsfreeSequenceCompleteEvent = {
   type: "HANDSFREE_SEQUENCE_COMPLETE";
   trackIndex: 4;
@@ -139,6 +146,7 @@ export type SoloLooperEngineEvent =
   | SoloLooperGuidedCalStateEvent
   | SoloLooperGuidedCalCaptureCompleteEvent
   | SoloLooperHandsfreeTrackAdvancedEvent
+  | SoloLooperHandsfreeAdvanceArmedEvent
   | SoloLooperHandsfreeSequenceCompleteEvent
   | SoloLooperPlaybackUiStateEvent
   | SoloLooperOverdubArmedEvent
@@ -189,6 +197,8 @@ export type SoloLooperStartRecordingParams = {
   recordStartContextSec?: number;
   /** Handsfree: per-track frame targets [T1, T2, T3, T4] set before sequence starts. */
   handsfreeTrackTargets?: readonly [number, number, number, number];
+  /** Handsfree: true = one-loop gap between takes; false = immediate handoff. */
+  handsfreeAssist?: boolean;
 };
 
 export type SoloLooperSetTrackTargetLengthParams = {
@@ -450,6 +460,7 @@ export async function buildSoloLooperEngine(
       "GUIDED_CAL_STATE",
       "GUIDED_CAL_CAPTURE_COMPLETE",
       "HANDSFREE_TRACK_ADVANCED",
+      "HANDSFREE_ADVANCE_ARMED",
       "HANDSFREE_SEQUENCE_COMPLETE",
     ] as const;
     if (allowlist.includes(msgType as (typeof allowlist)[number])) {
@@ -780,6 +791,9 @@ export async function buildSoloLooperEngine(
           : {}),
         ...(params?.handsfreeTrackTargets !== undefined
           ? { handsfreeTrackTargets: params.handsfreeTrackTargets }
+          : {}),
+        ...(params?.handsfreeAssist !== undefined
+          ? { handsfreeAssist: params.handsfreeAssist }
           : {}),
       });
     },

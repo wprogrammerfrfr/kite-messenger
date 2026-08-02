@@ -14,6 +14,9 @@ import { useRouter } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
 import { BroadcastDashboard } from "@/components/studio-bridge/BroadcastDashboard";
 import { StudioPreflightLobby } from "@/components/studio-bridge/StudioPreflightLobby";
+import { P2PJamV2ConnectedView } from "@/components/studio-bridge/P2PJamV2ConnectedView";
+import { P2PJamConnectingView } from "@/components/studio-bridge/P2PJamConnectingView";
+import { useP2PJamV2Flag } from "@/components/studio-bridge/useP2PJamEnginePort";
 import dynamic from "next/dynamic";
 import type { KiteLoopV4InputDevicesProps, KiteLoopV4AirSynthProps, SoloTrackLaneView } from "@/components/kite-loop-v2/KiteLoopV4Panel";
 import type { AirSynthMode, MusicalKey } from "@/lib/theremin/kite-theremin-types";
@@ -232,23 +235,43 @@ function soloSlotProgressPct(slot: SoloLooperSlotRow | undefined): number {
 export default function StudioBridgePage() {
   const router = useRouter();
   const userRef = useRef<User | null>(null);
+  const [ownSessionBlockedMessage, setOwnSessionBlockedMessage] = useState<string | null>(null);
 
   const engineUiConfig = useMemo(
     () => ({
       getUser: () => userRef.current,
       confirmResetTrack: (trackIndex: 1 | 2 | 3 | 4) =>
         window.confirm(`Reset Track ${trackIndex} while it is recording?`),
-      onJoinOwnSessionError: (message: string) => window.alert(message),
+      onJoinOwnSessionError: (message: string) => {
+        setOwnSessionBlockedMessage(message);
+      },
     }),
     []
   );
 
-  const { engineState, engineActions, engineRefs, presenterState, presenterActions, engineLegacy } =
-    useKiteStudioEngine({
-      router,
-      ui: engineUiConfig,
-    });
+  const {
+    engineState,
+    engineActions,
+    engineRefs,
+    presenterState,
+    presenterActions,
+    engineLegacy,
+    sessionChatPort,
+  } = useKiteStudioEngine({
+    router,
+    ui: engineUiConfig,
+  });
 
+  const p2pUiV2 = useP2PJamV2Flag();
+  const engineBundle = {
+    engineState,
+    engineActions,
+    engineRefs,
+    presenterState,
+    presenterActions,
+    engineLegacy,
+    sessionChatPort,
+  };
   const [airSynthEnabled, setAirSynthEnabled] = useState(false);
   const [airSynthMode, setAirSynthMode] = useState<AirSynthMode>("two-hand");
   const [airSynthKey, setAirSynthKey] = useState<MusicalKey>("C");
@@ -256,6 +279,13 @@ export default function StudioBridgePage() {
   useEffect(() => {
     userRef.current = presenterState.user;
   }, [presenterState.user]);
+
+  // Clear same-user join guidance once a healthy connection is established
+  useEffect(() => {
+    if (engineState.status === "connected") {
+      setOwnSessionBlockedMessage(null);
+    }
+  }, [engineState.status]);
 
   // Engine state aliases (JSX compatibility)
   const status = engineState.status;
@@ -310,6 +340,7 @@ export default function StudioBridgePage() {
   const soloLatencyStaleMessage = engineState.soloLatencyStaleMessage;
   const guidedRtlWizard = engineState.guidedRtlWizard;
   const soloLooperMode = engineState.soloLooperMode;
+  const handsfreeAssist = engineState.handsfreeAssist;
   const soloTrackBarCounts = engineState.soloTrackBarCounts;
   const soloTrackBarCountsLocked = engineState.soloTrackBarCountsLocked;
   const handsfreeSequenceActive = engineState.handsfreeSequenceActive;
@@ -348,6 +379,7 @@ export default function StudioBridgePage() {
   const authReady = presenterState.authReady;
   const kiteSetupStep = presenterState.kiteSetupStep;
   const kiteSetupUsesCustomChords = presenterState.kiteSetupUsesCustomChords;
+  const kiteSetupOrigin = presenterState.kiteSetupOrigin;
   const kiteSetupError = presenterState.kiteSetupError;
   const loopProgress = presenterState.loopProgress;
   const recordingArmedCountdown = presenterState.recordingArmedCountdown;
@@ -403,6 +435,7 @@ export default function StudioBridgePage() {
   const goToPreviousKiteSetupStep = engineActions.goToPreviousKiteSetupStep;
   const setSoloInputGain = engineActions.setSoloInputGain;
   const setSoloLooperMode = engineActions.setSoloLooperMode;
+  const setHandsfreeAssist = engineActions.setHandsfreeAssist;
   const setSoloTrackBarCount = engineActions.setSoloTrackBarCount;
   const setKiteSetupTempo = engineActions.setKiteSetupTempo;
   const setKiteSetupTimeSignatureTop = engineActions.setKiteSetupTimeSignatureTop;
@@ -486,6 +519,27 @@ export default function StudioBridgePage() {
     return "Kite loopstation";
   })();
   const showLobbyControls = studioUiPhase === "lobby";
+  /**
+   * Exclusive v2 P2P shell — when true, legacy connected JSX must not render underneath.
+   * After Kite Sync wizard confirm the engine sets kiteMode to "broadcast"; keep v2
+   * while status is connected so the sync-locked presenter stays mounted.
+   * Non-connected broadcast still uses legacy BroadcastDashboard.
+   */
+  const isP2PV2Active =
+    p2pUiV2 &&
+    kiteMode !== "solo" &&
+    (kiteMode !== "broadcast" || status === "connected");
+  /** Connecting OR studio-but-not-yet-connected (host waiting / failed / blocked). */
+  const showP2PV2Connecting =
+    isP2PV2Active &&
+    (studioUiPhase === "connecting" ||
+      (studioUiPhase === "studio" && status !== "connected"));
+  /** Only mount the jam UI after a real P2P connect (or kite-setup from a live session). */
+  const showP2PV2Connected =
+    isP2PV2Active &&
+    ((studioUiPhase === "studio" && status === "connected") ||
+      (studioUiPhase === "kite-setup" && kiteSetupOrigin === "connected"));
+  const showP2PV2Shell = showP2PV2Connecting || showP2PV2Connected;
   const localJamSetupOwnerName = role === "host" ? "Host" : "Bandmate";
   const canControlStop = !syncInitiatorId || syncInitiatorId === localJamSetupOwnerId;
   const canStartSync = broadcastStatus === "idle" && Boolean(remoteStream);
@@ -984,11 +1038,15 @@ export default function StudioBridgePage() {
 
       <div
         className={`relative z-10 mx-auto flex min-h-screen w-full flex-col ${
-          studioUiPhase === "studio"
-            ? "max-w-6xl justify-center px-6 py-16 pb-28 sm:px-8 lg:pb-16"
-            : studioUiPhase === "lobby"
-              ? "max-w-none justify-start p-0"
-              : "max-w-md justify-center px-5 py-16 pb-28 sm:px-6 lg:pb-16"
+          showP2PV2Connected
+            ? "max-w-none justify-start p-0"
+            : showP2PV2Connecting
+              ? "max-w-md justify-center px-5 py-16"
+            : studioUiPhase === "studio"
+              ? "max-w-6xl justify-center px-6 py-16 pb-28 sm:px-8 lg:pb-16"
+              : studioUiPhase === "lobby"
+                ? "max-w-none justify-start p-0"
+                : "max-w-md justify-center px-5 py-16 pb-28 sm:px-6 lg:pb-16"
         }`}
       >
         <motion.div
@@ -1008,7 +1066,7 @@ export default function StudioBridgePage() {
             </div>
           ) : user ? (
             <>
-          {roomCopyNote && !showLobbyControls ? (
+          {roomCopyNote && !showLobbyControls && !showP2PV2Shell ? (
             <motion.div
               initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
@@ -1019,7 +1077,31 @@ export default function StudioBridgePage() {
             </motion.div>
           ) : null}
 
-          {micPermissionDenied && !showLobbyControls ? (
+          {ownSessionBlockedMessage && showLobbyControls ? (
+            <div
+              className="mx-auto mt-4 max-w-lg rounded-xl border border-orange-500/35 bg-orange-950/30 px-4 py-3 text-sm font-medium leading-relaxed text-orange-100/90"
+              role="alert"
+            >
+              <p className="font-semibold text-orange-200">Cannot join as the same person</p>
+              <p className="mt-1 text-[13px] text-orange-100/80">{ownSessionBlockedMessage}</p>
+              <p className="mt-2 text-[12px] text-orange-100/55">
+                Use another account, device, or browser profile to join as guest. Or open{" "}
+                <a href="/sandbox/p2p-jam" className="underline hover:text-orange-50">
+                  /sandbox/p2p-jam
+                </a>{" "}
+                to review the UI without a live session.
+              </p>
+              <button
+                type="button"
+                onClick={() => setOwnSessionBlockedMessage(null)}
+                className="mt-2 cursor-pointer text-[11px] font-semibold uppercase tracking-wider text-orange-200/80 underline"
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
+
+          {micPermissionDenied && !showLobbyControls && !showP2PV2Shell ? (
             <div
               className="mt-6 rounded-xl border border-stone-700/90 bg-stone-950/50 px-4 py-3 text-center text-sm font-medium leading-relaxed text-stone-300"
               role="status"
@@ -1029,7 +1111,7 @@ export default function StudioBridgePage() {
             </div>
           ) : null}
 
-          {micSyncTimedOut && !localMicStream && !showLobbyControls ? (
+          {micSyncTimedOut && !localMicStream && !showLobbyControls && !showP2PV2Shell ? (
             <div className="mt-4">
               <motion.button
                 type="button"
@@ -1077,6 +1159,33 @@ export default function StudioBridgePage() {
               onCancelGuidedRtlWizard={cancelGuidedRtlWizard}
               onRetryGuidedRtlCapture={retryGuidedRtlCapture}
               calibrationDisabled={micPermissionDenied || !localMicStream}
+            />
+          ) : showP2PV2Connecting ? (
+            <P2PJamConnectingView
+              sessionId={sessionId}
+              role={role}
+              status={status}
+              statusNote={statusNote || null}
+              bridgeInitError={bridgeInitError}
+              micState={micRowState}
+              signalState={connRowState}
+              pingMs={pingMs}
+              kitePendingCopy={kitePendingCopy}
+              kiteErrorCopy={kiteErrorCopy}
+              micPermissionHint={micPermissionHint}
+              onRetry={() => setRetryInitTick((n) => n + 1)}
+              onCancel={returnToLobby}
+              ownSessionBlockedMessage={ownSessionBlockedMessage}
+              onDismissOwnSessionBlocked={() => setOwnSessionBlockedMessage(null)}
+              inviteLink={inviteLink}
+              onCopyInviteLink={() => void copyInviteLink()}
+            />
+          ) : showP2PV2Connected ? (
+            <P2PJamV2ConnectedView
+              engine={engineBundle}
+              localJamSetupOwnerId={localJamSetupOwnerId}
+              onCopyRoomCode={() => void copyRoomCode()}
+              onEndSession={returnToLobby}
             />
           ) : studioUiPhase === "kite-setup" ? (
             <motion.div
@@ -2007,7 +2116,7 @@ export default function StudioBridgePage() {
             </motion.div>
           )}
 
-          {connectionLostCountdown !== null && !collaboratorLeft ? (
+          {connectionLostCountdown !== null && !collaboratorLeft && !showP2PV2Shell ? (
             <motion.div
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
@@ -2062,7 +2171,7 @@ export default function StudioBridgePage() {
           )}
         </motion.div>
       </div>
-      {studioUiPhase === "studio" && kiteMode !== "solo" ? (
+      {studioUiPhase === "studio" && kiteMode !== "solo" && !isP2PV2Active ? (
         <motion.nav
           initial={{ opacity: 0, y: -8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2100,6 +2209,12 @@ export default function StudioBridgePage() {
           }}
           looperConfig={{
             loopMode: soloLooperMode,
+            handsfreeAssist,
+            handsfreeAssistDisabled:
+              isRecordingArmed ||
+              soloLooperState !== "idle" ||
+              handsfreeSequenceActive ||
+              soloLooperMode !== "handsfree",
             latencyMs: soloLooperLatencyMs,
             kiteSetupTempo,
             kiteSetupTimeSignatureTop,
@@ -2115,6 +2230,7 @@ export default function StudioBridgePage() {
             onStopAndResetSoloLooper: handleStopAndResetSoloLooper,
             onEndSession: returnToLobby,
             onLoopModeChange: setSoloLooperMode,
+            onHandsfreeAssistChange: setHandsfreeAssist,
             guidedRtlWizard,
             onBeginGuidedRtlWizard: beginGuidedRtlWizard,
             onStartGuidedRtlCapture: startGuidedRtlCapture,

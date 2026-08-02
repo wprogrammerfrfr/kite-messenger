@@ -54,6 +54,65 @@ export type GuidedRtlWizardState = {
 };
 export type DeviceFlagMap = Record<string, boolean>;
 
+/**
+ * Read-only Kite Sync readiness UI (display only — never used for transport).
+ * Cold fields may live in React state (phase flips only).
+ * Hot fields live on a ref and are consumed by RAF/DOM — never setState per tick.
+ */
+export type KiteSyncReadinessPhase = "idle" | "incoming" | "count-in" | "live";
+
+/** React-owned cold readiness — re-render only on idle ↔ count-in ↔ incoming ↔ live (and leader flips). */
+export type KiteSyncReadinessPhaseState = {
+  phase: KiteSyncReadinessPhase;
+  /** True when local peer initiated the current sync. */
+  isLocalLeader: boolean;
+};
+
+/**
+ * High-frequency readiness telemetry written only to a ref.
+ * Display-only; never used for transport timing.
+ */
+export type KiteSyncReadinessHotSnapshot = {
+  /** Beats left in the one-bar count-in; null when not counting in. */
+  countdownBeatRemaining: number | null;
+  /** 0…1 progress through the count-in bar; null when not counting in. */
+  countInProgress01: number | null;
+  /** 0…1 peer-audio arrive progress; null when not in incoming phase. */
+  audioArriveProgress01: number | null;
+  /** Seconds until peer audio unlock (display); null outside incoming. */
+  audioArriveRemainingSec: number | null;
+  /** 1-based bar index within the loop; null when not live. */
+  loopBarIndex: number | null;
+  /** Beat within bar (0 = downbeat); null when not live. */
+  loopBeatInBar: number | null;
+  /** 0…1 progress through the full loop; null when not live. */
+  loopProgress01: number | null;
+};
+
+export const KITE_SYNC_READINESS_PHASE_IDLE: KiteSyncReadinessPhaseState = {
+  phase: "idle",
+  isLocalLeader: false,
+};
+
+export const KITE_SYNC_READINESS_HOT_IDLE: KiteSyncReadinessHotSnapshot = {
+  countdownBeatRemaining: null,
+  countInProgress01: null,
+  audioArriveProgress01: null,
+  audioArriveRemainingSec: null,
+  loopBarIndex: null,
+  loopBeatInBar: null,
+  loopProgress01: null,
+};
+
+/** @deprecated Prefer PhaseState + HotSnapshot split. Kept for transitional imports. */
+export type KiteSyncReadinessState = KiteSyncReadinessPhaseState & KiteSyncReadinessHotSnapshot;
+
+/** @deprecated Prefer KITE_SYNC_READINESS_PHASE_IDLE + HOT_IDLE. */
+export const KITE_SYNC_READINESS_IDLE: KiteSyncReadinessState = {
+  ...KITE_SYNC_READINESS_PHASE_IDLE,
+  ...KITE_SYNC_READINESS_HOT_IDLE,
+};
+
 export type KiteLoopChunkSendProgress = {
   status: "idle" | "sending" | "sent" | "error";
   sentChunks: number;
@@ -125,6 +184,8 @@ export type KiteEngineState = {
   /** Guided RTL Calibration Wizard controller state. */
   guidedRtlWizard: GuidedRtlWizardState;
   soloLooperMode: SoloLooperMode;
+  /** Handsfree Assist: one full loop between takes when true; immediate handoff when false. */
+  handsfreeAssist: boolean;
   /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
   handsfreeSequenceActive: boolean;
   /** Per-track bar counts (1–4 lanes); global BPM/time signature apply. */
@@ -134,6 +195,16 @@ export type KiteEngineState = {
   isMasterPaused: boolean;
   soloSessionRecorderState: SoloSessionRecorderState;
   kiteSyncCountInActive: boolean;
+  /**
+   * When true, count-in metronome clicks bypass the muted gain node and play
+   * audibly (routing only). Default true — musicians hear the count-in.
+   */
+  audibleSyncCountIn: boolean;
+  /**
+   * Cold readiness phase for V2 overlay (React). Hot beat/progress lives on
+   * `engineRefs.kiteSyncReadinessHotRef` — display only, never transport.
+   */
+  kiteSyncReadinessPhase: KiteSyncReadinessPhaseState;
   metronomeVolume: number;
   retryInitTick: number;
   /** Live timing ref for looper UI (not React state). */
@@ -169,6 +240,11 @@ export type KiteEngineRefs = {
   soloTrackSlotUiLatestRef: MutableRefObject<
     import("@/lib/solo-looper-engine").SoloLooperPlaybackUiStateEvent["slots"] | null
   >;
+  /**
+   * High-frequency sync readiness telemetry (display only — never transport).
+   * Mutated on metronome ticks; consumed by overlay RAF — not React state.
+   */
+  kiteSyncReadinessHotRef: MutableRefObject<KiteSyncReadinessHotSnapshot>;
 };
 
 /** P2P session chat transport surface (Phase A — UI consumes via useKiteSessionChat). */
@@ -248,13 +324,14 @@ export type KiteEngineActions = {
   downloadSoloSessionBlob: (blob: Blob, ext: string) => void;
   handleStartKiteSetup: (origin: KiteSetupOrigin, mode?: KiteMode) => void;
   handleCancelKiteSetup: () => void;
-  handleConfirmKiteSetup: () => void;
-  handleStartBroadcastCountIn: () => void;
+  handleConfirmKiteSetup: () => Promise<void>;
+  handleStartBroadcastCountIn: () => Promise<void>;
   handleTapBeat: () => void;
   goToNextKiteSetupStep: () => void;
   goToPreviousKiteSetupStep: () => void;
   setSoloInputGain: (gain: number) => void;
   setSoloLooperMode: (mode: SoloLooperMode) => void;
+  setHandsfreeAssist: (on: boolean) => void;
   setSoloTrackBarCount: (trackIndex: 1 | 2 | 3 | 4, bars: number) => void;
   setKiteSetupTempo: (bpm: number) => void;
   setKiteSetupTimeSignatureTop: (top: number) => void;
@@ -266,6 +343,8 @@ export type KiteEngineActions = {
   setIsAutoBuffer: (v: boolean) => void;
   setTargetLeadFrames: (frames: number) => void;
   setEchoSafetyMode: (v: boolean) => void;
+  /** Toggle audible count-in clicks during Kite Sync (routing preference). */
+  setAudibleSyncCountIn: (v: boolean) => void;
   setRetryInitTick: (updater: (tick: number) => number) => void;
   runAudioTest: () => Promise<void>;
   startLocalRecording: () => void;

@@ -12,6 +12,15 @@ import type { KiteP2PEngineApi } from "@/hooks/useKiteP2PEngine";
 type BroadcastStatus = "idle" | "connecting" | "syncing" | "live";
 type Role = "host" | "peer";
 
+/** Display-only payload from each consumed metronome tick (no transport use). */
+export type SyncMetronomeTickPayload = {
+  beatIndex: number;
+  beatsPerBar: number;
+  bpi: number;
+  atSec: number;
+  isAccent: boolean;
+};
+
 export type UseKiteSyncMetronomeConfig = {
   kiteSyncEnabled: boolean;
   broadcastStatus: BroadcastStatus;
@@ -30,9 +39,13 @@ export type UseKiteSyncMetronomeConfig = {
   broadcastStatusRef: RefObject<BroadcastStatus>;
   kiteSyncCountInActiveRef: RefObject<boolean>;
   isVisualMetronomeOnlyRef: RefObject<boolean>;
+  /** When true during count-in forceAudio, clicks bypass muted gain → destination. */
+  audibleSyncCountInRef: RefObject<boolean>;
   kiteIntervalTimingRef: RefObject<KiteIntervalTiming | null>;
   p2pEngineRef: RefObject<KiteP2PEngineApi | null>;
   metronomeBlinkElementRef: RefObject<HTMLDivElement | null>;
+  /** Optional readiness UI callback — same tick loop as blink/clicks; no new timers. */
+  onSyncMetronomeTick?: (payload: SyncMetronomeTickPayload) => void;
 };
 
 export type KiteSyncMetronomeApi = {
@@ -89,17 +102,44 @@ export function useKiteSyncMetronome(config: UseKiteSyncMetronomeConfig): KiteSy
         const frequency =
           tick.beatIndex === 0 ? 1760 : tick.beatIndex % beatsPerBar === 0 ? 880 : 440;
         osc.frequency.setValueAtTime(frequency, startAt);
-        const targetNode = masterGainNode || ctx.destination;
-        osc.connect(targetNode);
-        osc.start(startAt);
-        osc.stop(stopAt);
-        osc.addEventListener("ended", () => {
-          try {
-            osc.disconnect();
-          } catch {
-            /* ignore */
-          }
-        });
+        const isCountInForce =
+          Boolean(forceAudio) && (cfg.kiteSyncCountInActiveRef.current ?? false);
+        const bypassMutedGain =
+          isCountInForce && (cfg.audibleSyncCountInRef.current ?? false);
+        const targetNode = bypassMutedGain
+          ? ctx.destination
+          : masterGainNode || ctx.destination;
+        if (bypassMutedGain) {
+          const gain = ctx.createGain();
+          const metronomeVol = Math.max(0.01, cfg.metronomeVolumeRef.current ?? 0.85);
+          const peakBase = tick.isAccent ? 0.11 : 0.07;
+          gain.gain.setValueAtTime(0.0001, startAt);
+          gain.gain.exponentialRampToValueAtTime(peakBase * metronomeVol, startAt + 0.004);
+          gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.045);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(startAt);
+          osc.stop(startAt + 0.05);
+          osc.addEventListener("ended", () => {
+            try {
+              osc.disconnect();
+              gain.disconnect();
+            } catch {
+              /* ignore */
+            }
+          });
+        } else {
+          osc.connect(targetNode);
+          osc.start(startAt);
+          osc.stop(stopAt);
+          osc.addEventListener("ended", () => {
+            try {
+              osc.disconnect();
+            } catch {
+              /* ignore */
+            }
+          });
+        }
       }
     },
     []
@@ -241,13 +281,27 @@ export function useKiteSyncMetronome(config: UseKiteSyncMetronomeConfig): KiteSy
       if (!activeScheduler || !activeCtx || activeCtx.state !== "running") return;
       const nowSec = activeCtx.currentTime;
       const ticks = activeScheduler.consumeDueTicks(nowSec);
+      const cfgNow = configRef.current;
       const isCountIn =
-        configRef.current.broadcastStatusRef.current === "syncing" ||
-        (configRef.current.kiteSyncCountInActiveRef.current ?? false);
+        cfgNow.broadcastStatusRef.current === "syncing" ||
+        (cfgNow.kiteSyncCountInActiveRef.current ?? false);
+      const beatsPerBar = Math.max(1, Math.min(16, Math.round(cfgNow.kiteSetupTimeSignatureTop)));
+      const timing =
+        cfgNow.p2pEngineRef.current?.sync.getActiveKiteIntervalTiming() ??
+        cfgNow.kiteIntervalTimingRef.current;
+      const bpi = Math.max(1, Math.round(timing?.bpi ?? cfgNow.beatsPerInterval));
+      const onTick = cfgNow.onSyncMetronomeTick;
       for (const tick of ticks) {
         playMetronomeClick(activeCtx, tick.atSec, tick, metronomeGainRef.current, isCountIn);
+        onTick?.({
+          beatIndex: tick.beatIndex,
+          beatsPerBar,
+          bpi,
+          atSec: tick.atSec,
+          isAccent: tick.isAccent,
+        });
       }
-      configRef.current.p2pEngineRef.current?.sync?.onMetronomePumpTick(activeCtx, nowSec);
+      cfgNow.p2pEngineRef.current?.sync?.onMetronomePumpTick(activeCtx, nowSec);
     };
 
     pumpScheduler();

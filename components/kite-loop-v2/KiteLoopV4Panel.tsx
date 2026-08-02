@@ -101,6 +101,9 @@ export type KiteLoopV4LooperState = {
 
 export type KiteLoopV4LooperConfig = {
   loopMode: SoloLooperMode;
+  handsfreeAssist: boolean;
+  /** True when Assist toggle must not change (timing locked, sequence active, or Handsfree off). */
+  handsfreeAssistDisabled: boolean;
   latencyMs: number;
   kiteSetupTempo: number;
   kiteSetupTimeSignatureTop: number;
@@ -117,6 +120,7 @@ export type KiteLoopV4LooperHandlers = {
   onStopAndResetSoloLooper: () => void;
   onEndSession: () => void;
   onLoopModeChange: (value: SoloLooperMode) => void;
+  onHandsfreeAssistChange: (on: boolean) => void;
   guidedRtlWizard: GuidedRtlWizardState;
   onBeginGuidedRtlWizard: () => void;
   onStartGuidedRtlCapture: () => void;
@@ -265,9 +269,10 @@ type ToggleProps = {
   onChange: (next: boolean) => void;
   label: string;
   sublabel?: string;
+  disabled?: boolean;
 };
 
-function Toggle({ checked, onChange, label, sublabel }: ToggleProps): React.JSX.Element {
+function Toggle({ checked, onChange, label, sublabel, disabled = false }: ToggleProps): React.JSX.Element {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
       <div>
@@ -280,7 +285,11 @@ function Toggle({ checked, onChange, label, sublabel }: ToggleProps): React.JSX.
       </div>
       <button
         type="button"
-        onClick={() => onChange(!checked)}
+        disabled={disabled}
+        onClick={() => {
+          if (disabled) return;
+          onChange(!checked);
+        }}
         style={{
           flexShrink: 0,
           width: 36,
@@ -288,7 +297,8 @@ function Toggle({ checked, onChange, label, sublabel }: ToggleProps): React.JSX.
           borderRadius: 999,
           background: checked ? EMERALD : "rgba(255,255,255,0.1)",
           border: "none",
-          cursor: "pointer",
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.45 : 1,
           position: "relative",
           transition: "background 0.2s",
         }}
@@ -1559,6 +1569,13 @@ function SettingsModal({
                 onChange={handleHandsfreeToggle}
                 label="Handsfree Mode"
                 sublabel="Auto-record tracks 1→4 at loop boundaries"
+              />
+              <Toggle
+                checked={cfg.handsfreeAssist}
+                onChange={handlers.onHandsfreeAssistChange}
+                label="Handsfree Assist"
+                sublabel="Wait one full loop between takes"
+                disabled={cfg.handsfreeAssistDisabled}
               />
               <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 9, lineHeight: 1.45 }}>
                 Set bar length on each track lane below.

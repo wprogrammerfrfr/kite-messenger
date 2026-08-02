@@ -107,6 +107,10 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeStartLatencyOffsetFrames = 0;
     /** Handsfree per-track frame targets [T1..T4]; survives slot reset on handoff. */
     this.handsfreeSequenceTargetFrames = null;
+    /** Deferred T(n)→T(n+1) arm: wait one master wrap before recording next track. */
+    this.handsfreeAdvanceArm = null;
+    /** Latched at START_RECORDING: true = one-loop gap; false = immediate handoff. */
+    this.handsfreeAssist = false;
 
     /**
      * Wizard-only clap buffer — independent of trackSlots / transport.
@@ -371,6 +375,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeSequenceActive = false;
     this.handsfreeStartLatencyOffsetFrames = 0;
     this.handsfreeSequenceTargetFrames = null;
+    this.handsfreeAdvanceArm = null;
+    this.handsfreeAssist = false;
     for (let i = 0; i < MAX_TRACK_INDEX; i += 1) {
       this.trackSlots[i] = createEmptySlot();
     }
@@ -722,6 +728,11 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     if (trackIndex === 1) {
       this.overdubArm = null;
       this.activeTrackIndex = 1;
+      this.handsfreeSequenceActive = false;
+      this.handsfreeAdvanceArm = null;
+      this.handsfreeAssist = false;
+      this.handsfreeStartLatencyOffsetFrames = 0;
+      this.handsfreeSequenceTargetFrames = null;
       for (let i = 0; i < MAX_TRACK_INDEX; i += 1) {
         this.resetSlotToIdle(this.trackSlots[i]);
         this.postTrackState("TRACK_RESET", i + 1);
@@ -1054,6 +1065,19 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     }
   }
 
+  postHandsfreeAdvanceArmed(fromTrack, toTrack) {
+    try {
+      this.port.postMessage({
+        type: "HANDSFREE_ADVANCE_ARMED",
+        fromTrack,
+        toTrack,
+        sampleRate,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
   postHandsfreeSequenceComplete() {
     const slot = this.getSlotForTrack(4);
     try {
@@ -1068,10 +1092,12 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * Sample-accurate T(n)→T(n+1) handoff in the same process() frame as finalize.
+   * Sample-accurate T(n)→T(n+1) handoff.
+   * Wrap path: rem sets recordWriteOffsetInBlock (no pre-roll).
+   * Immediate path: pass finite monoSample to claim the boundary sample.
    * @returns {boolean}
    */
-  beginHandsfreeRecordingAtBoundary(nextTrackIndex, monoSample, fromTrack) {
+  beginHandsfreeRecordingAtBoundary(nextTrackIndex, fromTrack, rem, monoSample) {
     if (!this.handsfreeSequenceActive) return false;
     if (nextTrackIndex < 2 || nextTrackIndex > MAX_TRACK_INDEX) return false;
 
@@ -1079,6 +1105,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     if (master.mode !== "playing" || master.intervalFrames <= 0) {
       this.postConfigureRejected("master_not_playing_at_handoff", nextTrackIndex);
       this.handsfreeSequenceActive = false;
+      this.handsfreeAdvanceArm = null;
+      this.handsfreeAssist = false;
       return false;
     }
 
@@ -1091,6 +1119,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
 
     const channelCount = Math.max(1, Math.min(2, Math.floor(Number(master.channelCount) || 2)));
     const provisionFrames = this.maxRecordingFrames;
+    const writeOffset = Math.max(0, Math.floor(Number(rem) || 0));
+    const immediateSample = Number(monoSample);
+    const useImmediateSample = Number.isFinite(immediateSample);
 
     slot.intervalFrames = provisionFrames;
     slot.channelCount = channelCount;
@@ -1107,13 +1138,15 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     slot.playbackBuffer = null;
     slot.recordingEpochFrames = 0;
     slot.recordCursor = 0;
-    slot.recordWriteOffsetInBlock = 0;
+    slot.recordWriteOffsetInBlock = useImmediateSample ? 0 : writeOffset;
     slot.atProvisionCap = false;
 
     this.activeTrackIndex = nextTrackIndex;
 
-    this.writeRecordingMono(slot, 0, monoSample);
-    slot.recordCursor = 1;
+    if (useImmediateSample) {
+      this.writeRecordingMono(slot, 0, immediateSample);
+      slot.recordCursor = 1;
+    }
 
     this.postHandsfreeTrackAdvanced(fromTrack, nextTrackIndex);
     return true;
@@ -1123,6 +1156,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
   stopRecording(data) {
     if (this.handsfreeSequenceActive) {
       this.handsfreeSequenceActive = false;
+      this.handsfreeAdvanceArm = null;
+      this.handsfreeAssist = false;
     }
     const explicitTrack = this.normalizeTrackIndex(data.trackIndex);
     const targetTrackIndex = explicitTrack !== null ? explicitTrack : this.activeTrackIndex;
@@ -1504,6 +1539,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     slot.latencyOffsetFrames = this.normalizeLatencyOffsetFrames(data.latencyOffsetFrames);
     if (slot.loopMode === "handsfree") {
       this.handsfreeSequenceActive = true;
+      this.handsfreeAdvanceArm = null;
+      this.handsfreeAssist = data.handsfreeAssist === true;
       this.handsfreeStartLatencyOffsetFrames = slot.latencyOffsetFrames;
       if (Array.isArray(data.handsfreeTrackTargets)) {
         this.handsfreeSequenceTargetFrames = [];
@@ -1528,6 +1565,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       this.handsfreeSequenceActive = false;
       this.handsfreeStartLatencyOffsetFrames = 0;
       this.handsfreeSequenceTargetFrames = null;
+      this.handsfreeAdvanceArm = null;
+      this.handsfreeAssist = false;
     }
     slot.mode = "recording";
     slot.playbackCursor = 0;
@@ -1563,6 +1602,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeSequenceActive = false;
     this.handsfreeStartLatencyOffsetFrames = 0;
     this.handsfreeSequenceTargetFrames = null;
+    this.handsfreeAdvanceArm = null;
+    this.handsfreeAssist = false;
     const slot = this.getActiveSlot();
     slot.mode = "idle";
     this.reportState("STOPPED");
@@ -1719,6 +1760,27 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       }
     }
 
+    if (
+      !this.isPaused &&
+      this.handsfreeSequenceActive &&
+      this.handsfreeAdvanceArm &&
+      master.mode === "playing" &&
+      master.intervalFrames > 0
+    ) {
+      const rem = master.intervalFrames - master.playbackCursor;
+      if (rem > blockSize) {
+        this.handsfreeAdvanceArm.seenNonWrap = true;
+      } else if (this.handsfreeAdvanceArm.seenNonWrap) {
+        const arm = this.handsfreeAdvanceArm;
+        this.handsfreeAdvanceArm = null;
+        this.beginHandsfreeRecordingAtBoundary(
+          arm.nextTrackIndex,
+          arm.fromTrack,
+          Math.max(0, rem)
+        );
+      }
+    }
+
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
       const monoSample = this.computeInputMonoSumNormalized(inputChannels, frameIndex);
       for (let c = 0; c < 2; c += 1) {
@@ -1788,13 +1850,27 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
             const finishedSlot = this.getSlotForTrack(capTrackIndex);
             if (this.handsfreeSequenceActive) {
               if (capTrackIndex < MAX_TRACK_INDEX) {
-                this.beginHandsfreeRecordingAtBoundary(
-                  capTrackIndex + 1,
-                  monoSample,
-                  capTrackIndex
-                );
+                if (this.handsfreeAssist) {
+                  this.handsfreeAdvanceArm = {
+                    nextTrackIndex: capTrackIndex + 1,
+                    fromTrack: capTrackIndex,
+                    // Require leaving the wrap window once so we don't fire on the
+                    // same boundary that just ended the take (T2–T3 near master wrap).
+                    seenNonWrap: false,
+                  };
+                  this.postHandsfreeAdvanceArmed(capTrackIndex, capTrackIndex + 1);
+                } else {
+                  this.beginHandsfreeRecordingAtBoundary(
+                    capTrackIndex + 1,
+                    capTrackIndex,
+                    0,
+                    monoSample
+                  );
+                }
               } else {
                 this.handsfreeSequenceActive = false;
+                this.handsfreeAdvanceArm = null;
+                this.handsfreeAssist = false;
                 this.postHandsfreeSequenceComplete();
                 this.postAutoStopCompleted(capTrackIndex);
               }

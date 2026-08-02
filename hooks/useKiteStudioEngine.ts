@@ -112,7 +112,14 @@ import type {
   KiteLoopChunkSendProgress,
   SoloLooperMode,
   GuidedRtlWizardState,
+  KiteSyncReadinessPhaseState,
+  KiteSyncReadinessHotSnapshot,
 } from "@/hooks/useKiteStudioEngine.types";
+import {
+  KITE_SYNC_READINESS_PHASE_IDLE,
+  KITE_SYNC_READINESS_HOT_IDLE,
+} from "@/hooks/useKiteStudioEngine.types";
+import type { SyncMetronomeTickPayload } from "@/hooks/useKiteSyncMetronome";
 
 
 
@@ -445,6 +452,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [targetLeadFrames, setTargetLeadFrames] = useState(4800);
   const [isAutoBuffer, setIsAutoBuffer] = useState(true);
   const [isBufferPrimed, setIsBufferPrimed] = useState(false);
+  const isBufferPrimedRef = useRef(false);
+  const bufferDepthFramesRef = useRef(0);
   const [lastCorrectionEvent, setLastCorrectionEvent] = useState<"drop" | "dupe" | "none">(
     "none"
   );
@@ -539,6 +548,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const guidedRtlTransitionTimerRef = useRef<number | null>(null);
   const [soloLooperMode, setSoloLooperMode] = useState<SoloLooperMode>("free");
   const soloLooperModeRef = useRef(soloLooperMode);
+  const [handsfreeAssist, setHandsfreeAssistState] = useState(true);
+  const handsfreeAssistRef = useRef(true);
   const [handsfreeSequenceActive, setHandsfreeSequenceActive] = useState(false);
   const handsfreeSequenceActiveRef = useRef(false);
   const [soloTrackBarCounts, setSoloTrackBarCounts] = useState<[number, number, number, number]>([
@@ -570,6 +581,17 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   });
   /** One-bar count-in after Kite Sync enables; blocks unmute and playback level changes until the grid stabilizes. */
   const [kiteSyncCountInActive, setKiteSyncCountInActive] = useState(false);
+  /**
+   * When true, count-in clicks bypass muted metronome gain (audible). Default true.
+   * Display / routing preference only — does not change count-in duration.
+   */
+  const [audibleSyncCountIn, setAudibleSyncCountIn] = useState(true);
+  /**
+   * Cold readiness phase only — React re-renders on idle ↔ count-in ↔ live (and leader flips).
+   * Hot beat/progress lives on kiteSyncReadinessHotRef (display only).
+   */
+  const [kiteSyncReadinessPhase, setKiteSyncReadinessPhase] =
+    useState<KiteSyncReadinessPhaseState>(KITE_SYNC_READINESS_PHASE_IDLE);
   /** User id (or stable fallback) of the peer that started the current Kite Sync session. */
   const [syncInitiatorId, setSyncInitiatorId] = useState<string | null>(null);
   /** Bumps when resuming metronome after network-loss pause (forces scheduler re-init). */
@@ -659,6 +681,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   /** Mic-init early bootstrap; Enter Studio awaits this before calling `initNetworkSession` again. */
   const sessionBootstrapPromiseRef = useRef<Promise<void> | null>(null);
   const startP2PEngineRef = useRef<((timing: KiteIntervalTiming) => Promise<void>) | null>(null);
+  /** Prevents overlapping host ignite from wizard confirm + Start Count-In. */
+  const isStartingBroadcastCountInRef = useRef(false);
   const kiteIntervalTimingRef = useRef<KiteIntervalTiming | null>(null);
   /** Timing last used to build the P2P interval graph; consumed when igniting the scheduler after count-in. */
   const latestKiteIntervalTimingRef = useRef<KiteIntervalTiming | null>(null);
@@ -837,12 +861,31 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const studioParamPendingPatchRef = useRef<StudioParamMessage["patch"]>({});
   const studioParamDebounceTimerRef = useRef<number | null>(null);
   const lastAppliedGuestStartSecRef = useRef<number | null>(null);
+  /** Display-only: when host expects to hear guest after count-in (not transport). */
+  const hostPeerAudioArriveAtContextSecRef = useRef<number | null>(null);
   const lastSyncApplyAtMsRef = useRef<number | null>(null);
   const kiteSyncCountInEndAtContextSecRef = useRef(0);
   /** Permanent downbeat anchor in `AudioContext` seconds; set once at count-in → live. */
   const kiteGridAnchorContextSecRef = useRef<number | null>(null);
   /** Mirrors `kiteSyncCountInActive` for metronome pump callbacks (avoids stale closures). */
   const kiteSyncCountInActiveRef = useRef(false);
+  /** Mirrors `audibleSyncCountIn` for metronome routing during count-in. */
+  const audibleSyncCountInRef = useRef(true);
+  /** Stable jam owner id for readiness isLocalLeader (updated after owner id is computed). */
+  const localJamSetupOwnerIdRef = useRef("");
+  /** Forwards sync metronome ticks into readiness hot ref (ref so metronome config stays stable). */
+  const onSyncMetronomeTickRef = useRef<(payload: SyncMetronomeTickPayload) => void>(() => {});
+  /**
+   * High-frequency readiness telemetry — mutated on ticks, never setState.
+   * Display only; consumed by V2 overlay RAF.
+   */
+  const kiteSyncReadinessHotRef = useRef<KiteSyncReadinessHotSnapshot>({
+    ...KITE_SYNC_READINESS_HOT_IDLE,
+  });
+  /** Mirrors cold phase for tick handler without stale closures. */
+  const kiteSyncReadinessPhaseRef = useRef<KiteSyncReadinessPhaseState>(
+    KITE_SYNC_READINESS_PHASE_IDLE
+  );
   /** Prevents duplicate count-in completion when `pumpScheduler` runs multiple times past `endAt`. */
   const kiteSyncCountInCompletionHandledRef = useRef(false);
   const kiteSyncLossPauseActiveRef = useRef(false);
@@ -1018,6 +1061,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [soloLooperMode]);
 
   useEffect(() => {
+    handsfreeAssistRef.current = handsfreeAssist;
+  }, [handsfreeAssist]);
+
+  const setHandsfreeAssist = useCallback((on: boolean) => {
+    handsfreeAssistRef.current = on;
+    setHandsfreeAssistState(on);
+  }, []);
+
+  useEffect(() => {
     soloTrackBarCountsRef.current = soloTrackBarCounts;
   }, [soloTrackBarCounts]);
 
@@ -1085,10 +1137,48 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [kiteSyncCountInActive]);
 
   useEffect(() => {
+    audibleSyncCountInRef.current = audibleSyncCountIn;
+  }, [audibleSyncCountIn]);
+
+  useEffect(() => {
     if (kiteSyncCountInActive) {
       kiteSyncCountInCompletionHandledRef.current = false;
     }
   }, [kiteSyncCountInActive]);
+
+  useEffect(() => {
+    if (!kiteSyncEnabled && !kiteSyncCountInActive) {
+      kiteSyncReadinessHotRef.current = { ...KITE_SYNC_READINESS_HOT_IDLE };
+      kiteSyncReadinessPhaseRef.current = KITE_SYNC_READINESS_PHASE_IDLE;
+      setKiteSyncReadinessPhase(KITE_SYNC_READINESS_PHASE_IDLE);
+    }
+  }, [kiteSyncEnabled, kiteSyncCountInActive]);
+
+  useEffect(() => {
+    if (!kiteSyncCountInActive) return;
+    const isLeader =
+      syncInitiatorIdRef.current != null &&
+      syncInitiatorIdRef.current === localJamSetupOwnerIdRef.current;
+    const next: KiteSyncReadinessPhaseState = {
+      phase: "count-in",
+      isLocalLeader: isLeader,
+    };
+    const prev = kiteSyncReadinessPhaseRef.current;
+    if (prev.phase !== next.phase || prev.isLocalLeader !== next.isLocalLeader) {
+      kiteSyncReadinessPhaseRef.current = next;
+      setKiteSyncReadinessPhase(next);
+    }
+    if (kiteSyncReadinessHotRef.current.countInProgress01 == null) {
+      kiteSyncReadinessHotRef.current = {
+        ...kiteSyncReadinessHotRef.current,
+        countInProgress01: 0,
+      };
+    }
+  }, [kiteSyncCountInActive]);
+
+  useEffect(() => {
+    kiteSyncReadinessPhaseRef.current = kiteSyncReadinessPhase;
+  }, [kiteSyncReadinessPhase]);
 
   useEffect(() => {
     isRecordingArmedRef.current = isRecordingArmed;
@@ -1157,6 +1247,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   useEffect(() => {
     targetLeadFramesRef.current = targetLeadFrames;
   }, [targetLeadFrames]);
+
+  useEffect(() => {
+    isBufferPrimedRef.current = isBufferPrimed;
+  }, [isBufferPrimed]);
+
+  useEffect(() => {
+    bufferDepthFramesRef.current = bufferDepthFrames;
+  }, [bufferDepthFrames]);
 
   useEffect(() => {
     isAutoBufferRef.current = isAutoBuffer;
@@ -1304,6 +1402,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     remotePlaybackGainRef.current = null;
     setBufferDepthFrames(0);
     setIsBufferPrimed(false);
+    bufferDepthFramesRef.current = 0;
+    isBufferPrimedRef.current = false;
     setLastCorrectionEvent("none");
     setRemoteMeterRafKey((k) => k + 1);
   }, []);
@@ -2331,6 +2431,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   };
   resetWorkletRef.current = resetMeteredDelayWorkletState;
 
+  const handleSyncMetronomeTick = useCallback((payload: SyncMetronomeTickPayload) => {
+    onSyncMetronomeTickRef.current(payload);
+  }, []);
+
   const kiteSyncMetronome = useKiteSyncMetronome({
       kiteSyncEnabled,
       broadcastStatus,
@@ -2349,9 +2453,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       broadcastStatusRef,
       kiteSyncCountInActiveRef,
       isVisualMetronomeOnlyRef,
+      audibleSyncCountInRef,
       kiteIntervalTimingRef,
       p2pEngineRef,
       metronomeBlinkElementRef,
+      onSyncMetronomeTick: handleSyncMetronomeTick,
     });
   const stopKiteMetronome = kiteSyncMetronome.stop;
   const ensureMetronomeGainNodeFromSync = kiteSyncMetronome.ensureGainNode;
@@ -2403,12 +2509,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           if (nowMs - lastWorkletTelemetryAtMsRef.current < 250) return;
           lastWorkletTelemetryAtMsRef.current = nowMs;
           if (typeof data.bufferDepthFrames === "number") {
-            setBufferDepthFrames(Math.max(0, Math.round(data.bufferDepthFrames)));
+            const depth = Math.max(0, Math.round(data.bufferDepthFrames));
+            bufferDepthFramesRef.current = depth;
+            setBufferDepthFrames(depth);
           }
           if (typeof data.targetLeadFrames === "number") {
             setTargetLeadFrames(Math.max(0, Math.round(data.targetLeadFrames)));
           }
-          setIsBufferPrimed(Boolean(data.isPrimed));
+          const primed = Boolean(data.isPrimed);
+          isBufferPrimedRef.current = primed;
+          setIsBufferPrimed(primed);
           if (
             data.driftCorrectionEvent === "drop" ||
             data.driftCorrectionEvent === "dupe" ||
@@ -2506,9 +2616,119 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [buildRemotePlaybackGraph]);
 
   const localJamSetupOwnerId = ui.getUser()?.id ?? user?.id ?? `${role ?? "unknown"}:${sessionId ?? "local"}`;
+  localJamSetupOwnerIdRef.current = localJamSetupOwnerId;
   const localJamSetupOwnerName = role === "host" ? "Host" : "Bandmate";
   const canControlStop = !syncInitiatorId || syncInitiatorId === localJamSetupOwnerId;
   const canStartSync = broadcastStatus === "idle" && Boolean(remoteStream);
+
+  onSyncMetronomeTickRef.current = (payload: SyncMetronomeTickPayload) => {
+    if (!mountedRef.current) return;
+    const { beatIndex, beatsPerBar, bpi, atSec } = payload;
+    const safeBeatsPerBar = Math.max(1, beatsPerBar);
+    const safeBpi = Math.max(1, bpi);
+    const beatInBar = ((beatIndex % safeBeatsPerBar) + safeBeatsPerBar) % safeBeatsPerBar;
+    const isLeader =
+      syncInitiatorIdRef.current != null &&
+      syncInitiatorIdRef.current === localJamSetupOwnerIdRef.current;
+
+    const setColdPhaseIfChanged = (phase: KiteSyncReadinessPhaseState["phase"]): void => {
+      const prev = kiteSyncReadinessPhaseRef.current;
+      if (prev.phase === phase && prev.isLocalLeader === isLeader) return;
+      const next: KiteSyncReadinessPhaseState = { phase, isLocalLeader: isLeader };
+      kiteSyncReadinessPhaseRef.current = next;
+      setKiteSyncReadinessPhase(next);
+    };
+
+    if (kiteSyncCountInActiveRef.current) {
+      const endAt = kiteSyncCountInEndAtContextSecRef.current;
+      const bpm = Math.max(1, metronomeBpmRef.current || 120);
+      const durationSec = (60 / bpm) * safeBeatsPerBar;
+      let countInProgress01: number | null = null;
+      if (Number.isFinite(endAt) && endAt > 0 && durationSec > 0) {
+        const startAt = endAt - durationSec;
+        countInProgress01 = Math.min(
+          1,
+          Math.max(0, (atSec - startAt) / durationSec)
+        );
+      }
+      const countdownBeatRemaining = safeBeatsPerBar - beatInBar;
+      // Hot fields — mutate ref only (no React setState).
+      kiteSyncReadinessHotRef.current = {
+        countdownBeatRemaining,
+        countInProgress01,
+        audioArriveProgress01: null,
+        audioArriveRemainingSec: null,
+        loopBarIndex: null,
+        loopBeatInBar: null,
+        loopProgress01: null,
+      };
+      setColdPhaseIfChanged("count-in");
+      return;
+    }
+
+    if (broadcastStatusRef.current === "live" && kiteSyncEnabledRef.current) {
+      // Display-only (both roles): arrive = count-in GO + metered delay. Not transport/buffer lead.
+      const countInEnd = kiteSyncCountInEndAtContextSecRef.current;
+      const delaySec = Math.max(0, (calculatedDelayMsRef.current ?? 0) / 1000);
+      const hasCountInEnd = Number.isFinite(countInEnd) && countInEnd > 0;
+      const arriveAt = hasCountInEnd ? countInEnd + delaySec : null;
+      const primed =
+        !isBufferingEnabledRef.current || isBufferPrimedRef.current;
+      const hasArriveAt = arriveAt != null && Number.isFinite(arriveAt);
+      const pastTarget = hasArriveAt && atSec >= (arriveAt as number);
+      const unlocked = primed && pastTarget;
+      if (!unlocked) {
+        const lead = Math.max(1, targetLeadFramesRef.current);
+        const bufferFill = Math.min(
+          1,
+          Math.max(0, bufferDepthFramesRef.current / lead)
+        );
+        let timeFill = 0;
+        let audioArriveRemainingSec: number | null = null;
+        if (arriveAt != null && Number.isFinite(arriveAt)) {
+          audioArriveRemainingSec = Math.max(0, arriveAt - atSec);
+          if (hasCountInEnd && arriveAt > countInEnd) {
+            timeFill = Math.min(
+              1,
+              Math.max(0, (atSec - countInEnd) / (arriveAt - countInEnd))
+            );
+          } else if (atSec < arriveAt) {
+            const span = Math.max(0.05, arriveAt - (atSec - 0.05));
+            timeFill = Math.min(1, Math.max(0, 0.05 / span));
+          } else {
+            timeFill = 1;
+          }
+        }
+        const audioArriveProgress01 = Math.min(1, Math.max(bufferFill, timeFill));
+        kiteSyncReadinessHotRef.current = {
+          countdownBeatRemaining: null,
+          countInProgress01: null,
+          audioArriveProgress01,
+          audioArriveRemainingSec,
+          loopBarIndex: null,
+          loopBeatInBar: null,
+          loopProgress01: null,
+        };
+        setColdPhaseIfChanged("incoming");
+        return;
+      }
+
+      const posInLoop = ((beatIndex % safeBpi) + safeBpi) % safeBpi;
+      const loopBarIndex = Math.floor(posInLoop / safeBeatsPerBar) + 1;
+      const loopBeatInBar = posInLoop % safeBeatsPerBar;
+      const loopProgress01 = posInLoop / safeBpi;
+      kiteSyncReadinessHotRef.current = {
+        countdownBeatRemaining: null,
+        countInProgress01: null,
+        audioArriveProgress01: null,
+        audioArriveRemainingSec: null,
+        loopBarIndex,
+        loopBeatInBar,
+        loopProgress01,
+      };
+      setColdPhaseIfChanged("live");
+    }
+  };
 
   const sessionChatPort = useMemo((): KiteSessionChatPort => {
     return {
@@ -3174,6 +3394,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     studioRevisionRef.current = 0;
     lastAcceptedStudioRevisionRef.current = 0;
     lastAppliedGuestStartSecRef.current = null;
+    hostPeerAudioArriveAtContextSecRef.current = null;
     lastSyncApplyAtMsRef.current = null;
     audioBaseLatencySecRef.current = 0;
     audioOutputLatencySecRef.current = 0;
@@ -3821,6 +4042,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             setLoopProgress(0);
             soloLooperStateRef.current = "idle";
             setSoloLooperState("idle");
+            syncHandsfreeSequenceActive(false);
+            handsfreeTrackTargetFramesRef.current = null;
             clearAllSoloTrackBarCountLocks();
           } else if (event.trackIndex !== undefined) {
             setSoloTrackBarCountsLocked((prev) => {
@@ -3896,6 +4119,19 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           soloOverdubArmedTrackIndexRef.current = null;
           setSoloOverdubArmedTrackIndex(null);
         }
+        return;
+      }
+      if (event.type === "HANDSFREE_ADVANCE_ARMED") {
+        if (!mountedRef.current) return;
+        // Listen-through gap: sequence stays active; leave recording UI until next take starts.
+        syncActiveRecordTrackIndex(null);
+        if (loopProgressRafRef.current !== null) {
+          cancelAnimationFrame(loopProgressRafRef.current);
+          loopProgressRafRef.current = null;
+        }
+        setLoopProgress(100);
+        soloLooperStateRef.current = "captured";
+        setSoloLooperState("captured");
         return;
       }
       if (event.type === "HANDSFREE_TRACK_ADVANCED") {
@@ -4454,6 +4690,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           latencyOffsetFrames,
           ...(targetLengthFrames !== undefined ? { targetLengthFrames } : {}),
           ...(handsfreeTrackTargets !== undefined ? { handsfreeTrackTargets } : {}),
+          ...(soloLooperModeRef.current === "handsfree"
+            ? { handsfreeAssist: handsfreeAssistRef.current }
+            : {}),
         };
       };
 
@@ -4695,12 +4934,37 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     startP2PIntervalSchedulerRef.current = startP2PIntervalScheduler;
   }, [startP2PIntervalScheduler]);
 
-  const handleStartBroadcastCountIn = useCallback(() => {
-    void (async () => {
+  const handleStartBroadcastCountIn = useCallback(async (): Promise<void> => {
+    if (isStartingBroadcastCountInRef.current) {
+      return;
+    }
+    isStartingBroadcastCountInRef.current = true;
+    try {
+      const timing =
+        latestKiteIntervalTimingRef.current ??
+        kiteIntervalTimingRef.current ??
+        deriveKiteTimingMetadata();
+
+      const runEngine = startP2PEngineRef.current;
+      if (!runEngine) {
+        console.error("[Kite] Host ignite dropped: startP2PEngine ref is null");
+        setKiteSetupError("Could not start Kite Sync — engine not ready.");
+        return;
+      }
+      await runEngine(timing);
+
+      const hasRetainedLoop = retainedKiteLoopBufferRef.current !== null;
+      try {
+        sendSetInterval(timing, hasRetainedLoop, { igniteP2PEngine: true });
+      } catch {
+        /* SET_INTERVAL notify peer is best-effort */
+      }
+
       const ctx = studioAudioContextRef.current ?? ensureStudioAudioContext();
       await ctx.resume();
       if (ctx.state !== "running") {
         setAudioContextReady(false);
+        setKiteSetupError("AudioContext is not running. Use Resume Audio first.");
         return;
       }
       setAudioContextReady(true);
@@ -4708,12 +4972,18 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       flushAndSetRemoteGridTarget(ctx.currentTime + 0.01);
 
       const countInOneBarSec =
-        (60 / metronomeBpm) * Math.max(1, Math.round(kiteSetupTimeSignatureTop));
+        (60 / Math.max(1, metronomeBpmRef.current || timing.bpm)) *
+        Math.max(1, Math.round(kiteSetupTimeSignatureTopRef.current || timing.beatsPerBar || 4));
       if (!Number.isFinite(countInOneBarSec) || countInOneBarSec <= 0) {
+        setKiteSetupError("Could not start count-in — invalid timing.");
         return;
       }
 
       kiteSyncCountInEndAtContextSecRef.current = ctx.currentTime + countInOneBarSec;
+      const delaySec = Math.max(0, (calculatedDelayMsRef.current ?? 0) / 1000);
+      // Display-only: post-GO metered delay only (no buffer lead).
+      hostPeerAudioArriveAtContextSecRef.current =
+        kiteSyncCountInEndAtContextSecRef.current + delaySec;
       if (metronomeGainRef.current) {
         metronomeGainRef.current.gain.value = 0;
       }
@@ -4729,25 +4999,25 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
       broadcastKiteSync({ kiteSyncEnabled: true });
 
-      const timing =
-        latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
-      if (timing) {
-        startP2PIntervalSchedulerRef.current?.(timing);
-      } else {
-        console.warn("[Kite] Host scheduler ignite skipped — no timing ref");
-      }
-    })();
+      // Scheduler last — after startP2PEngine gen bump/teardown so the pump survives.
+      startP2PIntervalScheduler(timing);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Could not start Kite Sync count-in.";
+      console.error("[Kite] handleStartBroadcastCountIn failed", err);
+      setKiteSetupError(message);
+    } finally {
+      isStartingBroadcastCountInRef.current = false;
+    }
   }, [
     broadcastKiteSync,
+    deriveKiteTimingMetadata,
     ensureStudioAudioContext,
     flushAndSetRemoteGridTarget,
-    kiteSetupTimeSignatureTop,
     localJamSetupOwnerId,
-    metronomeBpm,
+    sendSetInterval,
     setAudioContextReady,
-    setBroadcastStatus,
-    setKiteSyncCountInActive,
-    setKiteSyncEnabled,
+    startP2PIntervalScheduler,
   ]);
 
   const startP2PEngine = useCallback(
@@ -4896,6 +5166,23 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
       teardownRemotePlaybackGraph();
 
+      // Display-only: retap remote meter onto kite playback (VoIP analyser was just torn down).
+      // Silent gain keeps this path inaudible; does not alter worklet/FIFO/transport timing.
+      {
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 128;
+        analyser.smoothingTimeConstant = 0.62;
+        const silentGain = ctx.createGain();
+        silentGain.gain.value = 0;
+        graph.outputGain.connect(analyser);
+        analyser.connect(silentGain);
+        silentGain.connect(ctx.destination);
+        remotePlaybackAnalyserRef.current = analyser;
+        remotePlaybackMeterSinkRef.current = silentGain;
+        setRemoteMeterTapActive(true);
+        setRemoteMeterRafKey((k) => k + 1);
+      }
+
       setKiteMode("broadcast");
       console.log("[P2P Engine] prepared (scheduler not started)", { bpm: timing.bpm, bpi: timing.bpi, intervalId });
     },
@@ -4932,6 +5219,71 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
       if (kiteSyncEnabledRef.current) {
         setBroadcastStatus("live");
+        // Display-only: bridge count-in → incoming until metered-delay unlock (host + guest).
+        const isLeader =
+          syncInitiatorIdRef.current != null &&
+          syncInitiatorIdRef.current === localJamSetupOwnerIdRef.current;
+        const countInEnd = kiteSyncCountInEndAtContextSecRef.current;
+        const delaySec = Math.max(0, (calculatedDelayMsRef.current ?? 0) / 1000);
+        const hasCountInEnd = Number.isFinite(countInEnd) && countInEnd > 0;
+        const arriveAt = hasCountInEnd ? countInEnd + delaySec : null;
+        const primed =
+          !isBufferingEnabledRef.current || isBufferPrimedRef.current;
+        const hasArriveAt = arriveAt != null && Number.isFinite(arriveAt);
+        const pastTarget = hasArriveAt && nowSec >= (arriveAt as number);
+        if (!(primed && pastTarget)) {
+          const lead = Math.max(1, targetLeadFramesRef.current);
+          const bufferFill = Math.min(
+            1,
+            Math.max(0, bufferDepthFramesRef.current / lead)
+          );
+          const remainingSec =
+            arriveAt != null && Number.isFinite(arriveAt)
+              ? Math.max(0, arriveAt - nowSec)
+              : null;
+          const timeFill =
+            hasCountInEnd &&
+            arriveAt != null &&
+            Number.isFinite(arriveAt) &&
+            arriveAt > countInEnd
+              ? Math.min(
+                  1,
+                  Math.max(0, (nowSec - countInEnd) / (arriveAt - countInEnd))
+                )
+              : 0;
+          kiteSyncReadinessHotRef.current = {
+            countdownBeatRemaining: null,
+            countInProgress01: null,
+            audioArriveProgress01: Math.min(1, Math.max(bufferFill, timeFill)),
+            audioArriveRemainingSec: remainingSec,
+            loopBarIndex: null,
+            loopBeatInBar: null,
+            loopProgress01: null,
+          };
+          const next = {
+            phase: "incoming" as const,
+            isLocalLeader: isLeader,
+          };
+          kiteSyncReadinessPhaseRef.current = next;
+          setKiteSyncReadinessPhase(next);
+        } else {
+          // Already past arrive at GO — go straight to live (banner unmounts).
+          kiteSyncReadinessHotRef.current = {
+            countdownBeatRemaining: null,
+            countInProgress01: null,
+            audioArriveProgress01: null,
+            audioArriveRemainingSec: null,
+            loopBarIndex: null,
+            loopBeatInBar: null,
+            loopProgress01: null,
+          };
+          const next = {
+            phase: "live" as const,
+            isLocalLeader: isLeader,
+          };
+          kiteSyncReadinessPhaseRef.current = next;
+          setKiteSyncReadinessPhase(next);
+        }
       }
 
       const gain = metronomeGainRef.current;
@@ -4972,6 +5324,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       },
       callbacks: {
         onBufferTelemetry: (telemetry) => {
+          bufferDepthFramesRef.current = telemetry.bufferDepthFrames;
+          isBufferPrimedRef.current = telemetry.isPrimed;
           setBufferDepthFrames(telemetry.bufferDepthFrames);
           setTargetLeadFrames(telemetry.targetLeadFrames);
           setIsBufferPrimed(telemetry.isPrimed);
@@ -5310,63 +5664,56 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   );
   p2pEngineRef.current = bridgedP2PEngine;
 
-  const handleConfirmKiteSetup = useCallback(() => {
-    void (async () => {
-      try {
-        setKiteSetupError(null);
-        hasCapturedFirstKiteLoopRef.current = false;
-        if (kiteModeRef.current !== "broadcast" && broadcastStatusRef.current !== "live") {
-          retainedKiteLoopBufferRef.current = null;
-          lastRetainedKiteIntervalIdRef.current = null;
-        }
-        soloLooperStateRef.current = "idle";
-        isRecordingArmedRef.current = false;
-        setIsRecordingArmed(false);
-        setRecordingArmedCountdown(null);
-        setSoloLooperState("idle");
-        setKiteMode(kiteSetupMode === "sync" ? "broadcast" : "solo");
-        setStudioUiPhase("studio");
-        if (kiteSetupOrigin === "connected") {
-          sendJamSetupLock("release");
-        }
-        if (kiteSetupMode === "sync") {
-          const timing = deriveKiteTimingMetadata();
-          void startP2PEngine(timing);
-          try {
-            sendSetInterval(timing, retainedKiteLoopBufferRef.current !== null, {
-              igniteP2PEngine: true,
-            });
-          } catch {
-            /* SET_INTERVAL notify peer is best-effort */
-          }
-          syncInitiatorIdRef.current = localJamSetupOwnerId;
-          if (mountedRef.current) {
-            setSyncInitiatorId(localJamSetupOwnerId);
-          }
-        } else if (kiteSetupMode === "solo") {
-          deriveKiteTimingMetadata();
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Could not start Kite Sync.";
-        setKiteSetupError(message);
-        soloLooperStateRef.current = "idle";
-        isRecordingArmedRef.current = false;
-        setIsRecordingArmed(false);
-        setRecordingArmedCountdown(null);
-        setSoloLooperState("idle");
+  const handleConfirmKiteSetup = useCallback(async (): Promise<void> => {
+    try {
+      setKiteSetupError(null);
+      hasCapturedFirstKiteLoopRef.current = false;
+      if (kiteModeRef.current !== "broadcast" && broadcastStatusRef.current !== "live") {
+        retainedKiteLoopBufferRef.current = null;
+        lastRetainedKiteIntervalIdRef.current = null;
       }
-    })();
+      soloLooperStateRef.current = "idle";
+      isRecordingArmedRef.current = false;
+      setIsRecordingArmed(false);
+      setRecordingArmedCountdown(null);
+      setSoloLooperState("idle");
+      setKiteMode(kiteSetupMode === "sync" ? "broadcast" : "solo");
+      setStudioUiPhase("studio");
+      if (kiteSetupOrigin === "connected") {
+        sendJamSetupLock("release");
+      }
+      // Sync: UI/timing only — engine + SET_INTERVAL + count-in owned by handleStartBroadcastCountIn.
+      if (kiteSetupMode === "sync") {
+        deriveKiteTimingMetadata();
+        syncInitiatorIdRef.current = localJamSetupOwnerId;
+        if (mountedRef.current) {
+          setSyncInitiatorId(localJamSetupOwnerId);
+        }
+      } else if (kiteSetupMode === "solo") {
+        deriveKiteTimingMetadata();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not start Kite Sync.";
+      setKiteSetupError(message);
+      soloLooperStateRef.current = "idle";
+      isRecordingArmedRef.current = false;
+      setIsRecordingArmed(false);
+      setRecordingArmedCountdown(null);
+      setSoloLooperState("idle");
+    }
   }, [
     deriveKiteTimingMetadata,
     kiteSetupMode,
     kiteSetupOrigin,
     localJamSetupOwnerId,
     sendJamSetupLock,
-    sendSetInterval,
-    startP2PEngine,
   ]);
 
   const handleRecordFirstLoop = useCallback(() => {
+    if (statusRef.current === "connected" && kiteModeRef.current !== "solo") {
+      console.warn("[Kite] Solo looper blocked — active P2P session.");
+      return;
+    }
     if (isRecordingArmedRef.current || soloLooperStateRef.current === "recording") {
       return;
     }
@@ -5912,6 +6259,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       engine.setPaused(false);
       soloOverdubArmedTrackIndexRef.current = null;
       setSoloOverdubArmedTrackIndex(null);
+      // Master wipe ends any in-flight handsfree sequence so pedal/space can re-arm T1.
+      syncHandsfreeSequenceActive(false);
+      handsfreeTrackTargetFramesRef.current = null;
+      isRecordingArmedRef.current = false;
+      setIsRecordingArmed(false);
+      setRecordingArmedCountdown(null);
+      clearSoloRunwayDisplay();
+      soloLooperLoopFinalizePendingRef.current = false;
+      soloLooperPendingCommitRef.current = false;
+      syncActiveRecordTrackIndex(null);
       clearAllSoloTrackBarCountLocks();
       setSoloTrackSlotUi((prev) =>
         prev?.map((s) => ({
@@ -5942,10 +6299,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         ) ?? prev
       );
     }
-  }, [ui]);
+  }, [ui, syncHandsfreeSequenceActive, clearSoloRunwayDisplay, syncActiveRecordTrackIndex, clearAllSoloTrackBarCountLocks]);
 
   const handleArmSoloOverdubTrack = useCallback(
     (trackIndex: 2 | 3 | 4) => {
+      if (statusRef.current === "connected" && kiteModeRef.current !== "solo") {
+        console.warn("[Kite] Solo overdub blocked — active P2P session.");
+        return;
+      }
       if (handsfreeSequenceActiveRef.current) {
         return;
       }
@@ -6023,6 +6384,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const looperFootPedalArmed = kiteMode === "solo" && studioUiPhase === "studio";
 
   const commitActiveRecording = useCallback(() => {
+    if (statusRef.current === "connected" && kiteModeRef.current !== "solo") {
+      console.warn("[Kite] Solo commit blocked — active P2P session.");
+      return;
+    }
     if (handsfreeSequenceActiveRef.current) {
       return;
     }
@@ -6128,7 +6493,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
   const onLooperPedalDown = useCallback(
     (targetTrackIndex: number) => {
-      if (handsfreeSequenceActiveRef.current && soloLooperStateRef.current === "recording") {
+      if (statusRef.current === "connected" && kiteModeRef.current !== "solo") {
+        console.warn("[Kite] Solo pedal blocked — active P2P session.");
+        return;
+      }
+      if (handsfreeSequenceActiveRef.current) {
+        // Ignore pedal for the whole sequence (recording + listen-through gap).
+        // Stop/reset uses handleStopAndResetSoloLooper, not the pedal.
         return;
       }
       if (
@@ -6310,6 +6681,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [buildRemotePlaybackGraph, ensureMetronomeGainNode, ensureStudioAudioContext]);
 
   const handleEnterSoloStudio = useCallback(() => {
+    if (statusRef.current === "connected" && kiteModeRef.current !== "solo") {
+      console.warn("[Kite] Enter Solo Studio blocked — active P2P session.");
+      return;
+    }
     void (async () => {
       try {
         if (!studioAudioContextRef.current) {
@@ -7495,8 +7870,26 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
               setMetronomeBpm(msg.bpm);
               setBeatsPerInterval(msg.bpi);
             }
-            const ctx = studioAudioContextRef.current;
-            if (ctx) {
+
+            // Ensure AudioContext + always arm count-in so Guest readiness banner mounts
+            // (do not gate kiteSyncCountInActive on a pre-existing ctx).
+            void (async () => {
+              const ctx =
+                studioAudioContextRef.current ?? ensureStudioAudioContext();
+              try {
+                await ctx.resume();
+              } catch {
+                /* ignore */
+              }
+              if (ctx.state !== "running") {
+                setAudioContextReady(false);
+                console.warn(
+                  "[Kite] Guest KITE_SYNC: AudioContext not running — count-in arm skipped"
+                );
+                return;
+              }
+              setAudioContextReady(true);
+
               const sixteenthSec = 60 / msg.bpm / 4;
               let nextGridSec = guestTargetSec;
               if (
@@ -7506,9 +7899,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
               ) {
                 nextGridSec =
                   guestTargetSec +
-                  Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) * sixteenthSec;
+                  Math.ceil((ctx.currentTime - guestTargetSec) / sixteenthSec) *
+                    sixteenthSec;
               }
               flushAndSetRemoteGridTarget(nextGridSec);
+
               const timing =
                 latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
               const beatsPerBar = Math.max(
@@ -7516,25 +7911,30 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
                 Math.round(timing?.beatsPerBar ?? timing?.timeSignatureTop ?? 4)
               );
               const countInOneBarSec = (60 / msg.bpm) * beatsPerBar;
-              if (Number.isFinite(countInOneBarSec) && countInOneBarSec > 0) {
-                kiteSyncCountInEndAtContextSecRef.current =
-                  ctx.currentTime + countInOneBarSec;
-                if (metronomeGainRef.current) metronomeGainRef.current.gain.value = 0;
-                setKiteSyncCountInActive(true);
-                kiteSyncCountInActiveRef.current = true;
-                kiteSyncCountInCompletionHandledRef.current = false;
-
-                void queueMicrotask(() => {
-                  const timing =
-                    latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
-                  if (timing) {
-                    startP2PIntervalSchedulerRef.current?.(timing);
-                  } else {
-                    console.warn("[Kite] Guest scheduler ignite skipped — no timing ref");
-                  }
-                });
+              if (!Number.isFinite(countInOneBarSec) || countInOneBarSec <= 0) {
+                return;
               }
-            }
+
+              kiteSyncCountInEndAtContextSecRef.current =
+                ctx.currentTime + countInOneBarSec;
+              if (metronomeGainRef.current) {
+                metronomeGainRef.current.gain.value = 0;
+              }
+              setKiteSyncCountInActive(true);
+              kiteSyncCountInActiveRef.current = true;
+              kiteSyncCountInCompletionHandledRef.current = false;
+
+              void queueMicrotask(() => {
+                const igniteTiming =
+                  latestKiteIntervalTimingRef.current ?? kiteIntervalTimingRef.current;
+                if (igniteTiming) {
+                  startP2PIntervalSchedulerRef.current?.(igniteTiming);
+                } else {
+                  console.warn("[Kite] Guest scheduler ignite skipped — no timing ref");
+                }
+              });
+            })();
+
             console.log("KITE_SYNC received! Guest Target Start:", guestTargetSec);
           }
         } catch {
@@ -8112,6 +8512,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const broadcastKiteSyncStop = useCallback(() => {
     broadcastKiteSync({ kiteSyncEnabled: false });
     setKiteSyncEnabled(false);
+    hostPeerAudioArriveAtContextSecRef.current = null;
     cleanupKiteEngine({ stopLocalTracks: false, isFull: false });
     restoreLiveVoipTrackAfterKite();
     if (remoteStreamRef.current) {
@@ -8145,6 +8546,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           Math.max(1, Math.round(kiteSetupTimeSignatureTopRef.current));
         if (Number.isFinite(countInOneBarSec) && countInOneBarSec > 0) {
           kiteSyncCountInEndAtContextSecRef.current = ctx.currentTime + countInOneBarSec;
+          const delaySec = Math.max(0, (calculatedDelayMsRef.current ?? 0) / 1000);
+          // Display-only: post-GO metered delay only (align with handleStartBroadcastCountIn).
+          hostPeerAudioArriveAtContextSecRef.current =
+            kiteSyncCountInEndAtContextSecRef.current + delaySec;
           if (metronomeGainRef.current) {
             metronomeGainRef.current.gain.value = 0;
           }
@@ -8213,6 +8618,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   );
 
   const startSoloLooperAction = useCallback(async () => {
+    if (statusRef.current === "connected" && kiteModeRef.current !== "solo") {
+      console.warn("[Kite] Solo looper start blocked — active P2P session.");
+      return;
+    }
     const timing = deriveKiteTimingMetadata();
     await startSoloLooperRunner(timing);
   }, [deriveKiteTimingMetadata, startSoloLooperRunner]);
@@ -8276,12 +8685,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloLatencyFloorApplied,
     guidedRtlWizard,
     soloLooperMode,
+    handsfreeAssist,
     handsfreeSequenceActive,
     soloTrackBarCounts,
     soloTrackBarCountsLocked,
     isMasterPaused,
     soloSessionRecorderState,
     kiteSyncCountInActive,
+    audibleSyncCountIn,
+    kiteSyncReadinessPhase,
     metronomeVolume,
     retryInitTick,
       kiteIntervalTimingRef,
@@ -8344,12 +8756,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloLatencyFloorApplied,
       guidedRtlWizard,
       soloLooperMode,
+      handsfreeAssist,
       handsfreeSequenceActive,
       soloTrackBarCounts,
       soloTrackBarCountsLocked,
       isMasterPaused,
       soloSessionRecorderState,
       kiteSyncCountInActive,
+      audibleSyncCountIn,
+      kiteSyncReadinessPhase,
       metronomeVolume,
       retryInitTick,
       kiteIntervalTimingRef,
@@ -8402,6 +8817,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     goToPreviousKiteSetupStep,
     setSoloInputGain,
     setSoloLooperMode,
+    setHandsfreeAssist,
     setSoloTrackBarCount,
     setKiteSetupTempo,
     setKiteSetupTimeSignatureTop,
@@ -8413,6 +8829,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setIsAutoBuffer,
     setTargetLeadFrames,
     setEchoSafetyMode,
+    setAudibleSyncCountIn,
     setRetryInitTick,
     runAudioTest,
     startLocalRecording,
@@ -8469,6 +8886,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       goToPreviousKiteSetupStep,
       setSoloInputGain,
       setSoloLooperMode,
+      setHandsfreeAssist,
       setSoloTrackBarCount,
       setKiteSetupTempo,
       setKiteSetupTimeSignatureTop,
@@ -8480,6 +8898,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       setIsAutoBuffer,
       setTargetLeadFrames,
       setEchoSafetyMode,
+      setAudibleSyncCountIn,
       setRetryInitTick,
       runAudioTest,
       startLocalRecording,
@@ -8502,6 +8921,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     perChannelMeterRefs,
     masterLiveMeterElementRef,
     soloTrackSlotUiLatestRef,
+    kiteSyncReadinessHotRef,
     }),
     [
       remoteAudioRef,
@@ -8511,6 +8931,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       perChannelMeterRefs,
       masterLiveMeterElementRef,
       soloTrackSlotUiLatestRef,
+      kiteSyncReadinessHotRef,
     ]
   );
 
