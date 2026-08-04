@@ -1604,8 +1604,10 @@ export function P2PJamPresenter({ port }: { port: P2PJamPresenterPort }): React.
   const [isInputPanelOpen, setIsInputPanelOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [syncStartErrorDismissed, setSyncStartErrorDismissed] = useState(false);
   const [showLoopBehindTip, setShowLoopBehindTip] = useState(false);
+  const seenChatMessageIdsRef = useRef<Set<string>>(new Set());
 
   // Escape closes topmost overlay — chat > wizard > input > settings
   useEffect(() => {
@@ -1629,6 +1631,31 @@ export function P2PJamPresenter({ port }: { port: P2PJamPresenterPort }): React.
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [isChatOpen, port.wizardOpen, isInputPanelOpen, isSettingsOpen, port.onWizardCancel]);
+
+  // Unread chat badge: count remote messages arrived while chat is closed
+  useEffect(() => {
+    const messages = port.chatMessages;
+    if (messages.length === 0) {
+      seenChatMessageIdsRef.current.clear();
+      setUnreadChatCount(0);
+      return;
+    }
+    if (isChatOpen) {
+      for (const m of messages) {
+        seenChatMessageIdsRef.current.add(m.id);
+      }
+      return;
+    }
+    let added = 0;
+    for (const m of messages) {
+      if (seenChatMessageIdsRef.current.has(m.id)) continue;
+      seenChatMessageIdsRef.current.add(m.id);
+      if (!m.isLocal) added += 1;
+    }
+    if (added > 0) {
+      setUnreadChatCount((prev) => prev + added);
+    }
+  }, [port.chatMessages, isChatOpen]);
 
   // Sync start error callout: re-show when engine sets a new error or wizard reopens.
   useEffect(() => {
@@ -1691,6 +1718,7 @@ export function P2PJamPresenter({ port }: { port: P2PJamPresenterPort }): React.
     setIsSettingsOpen(false);
     setIsInputPanelOpen(false);
     setIsChatOpen(true);
+    setUnreadChatCount(0);
   };
 
   const handleSendChat = (): void => {
@@ -2093,11 +2121,24 @@ export function P2PJamPresenter({ port }: { port: P2PJamPresenterPort }): React.
               <button
                 type="button"
                 aria-expanded={isChatOpen}
+                aria-label={
+                  unreadChatCount > 0
+                    ? `Chat, ${unreadChatCount} unread`
+                    : "Chat"
+                }
                 onClick={openChat}
-                className={`${GLASS_SHARP} flex h-12 w-12 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 font-mono text-[7px] font-semibold uppercase tracking-[0.12em] text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white/80`}
+                className={`${GLASS_SHARP} relative flex h-12 w-12 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 font-mono text-[7px] font-semibold uppercase tracking-[0.12em] text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white/80`}
               >
                 <MessageSquare size={15} strokeWidth={1.75} />
                 Chat
+                {unreadChatCount > 0 ? (
+                  <span
+                    aria-hidden
+                    className="absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full border border-black/40 bg-[#ef4444] px-1 text-[9px] font-bold leading-none text-white shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
+                  >
+                    {unreadChatCount > 9 ? "9+" : unreadChatCount}
+                  </span>
+                ) : null}
               </button>
 
               {/* Far right — Start Kite Sync opens setup wizard (+ Sync-only start error) */}

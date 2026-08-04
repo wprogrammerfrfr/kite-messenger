@@ -251,6 +251,9 @@ const RESET_BTN: React.CSSProperties = {
 
 const MAX_ACTIVE_INPUT_DEVICES = 3;
 const CALIBRATION_DISMISSED_STORAGE_KEY = "kite_calibration_dismissed";
+const TUTORIAL_WATCHED_STORAGE_KEY = "kite-loop-tutorial-watched-v1";
+const TUTORIAL_LATER_STORAGE_KEY = "kite-loop-tutorial-later-v1";
+const TUTORIAL_VIDEO_URL = "https://youtu.be/4pTQ3RoJbQA";
 
 const glass: React.CSSProperties = {
   background: "rgba(10,10,10,0.75)",
@@ -2228,6 +2231,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [tunerInstrumentId, setTunerInstrumentId] =
     useState<KiteTunerInstrumentId>(DEFAULT_INSTRUMENT_ID);
   const [calibrationDismissed, setCalibrationDismissed] = useState(false);
+  const [showTutorialModal, setShowTutorialModal] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const webcamFrameRef = useRef<HTMLDivElement>(null);
@@ -2404,6 +2408,27 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     }
   }, []);
 
+  // First-visit tutorial: defer while RTL wizard is open; permanent only after watching video.
+  useEffect(() => {
+    if (looperHandlers.guidedRtlWizard.open) {
+      setShowTutorialModal(false);
+      return;
+    }
+    try {
+      if (window.localStorage.getItem(TUTORIAL_WATCHED_STORAGE_KEY) === "1") {
+        setShowTutorialModal(false);
+        return;
+      }
+      if (window.sessionStorage.getItem(TUTORIAL_LATER_STORAGE_KEY) === "1") {
+        setShowTutorialModal(false);
+        return;
+      }
+    } catch {
+      /* storage unavailable — still offer tutorial this visit */
+    }
+    setShowTutorialModal(true);
+  }, [looperHandlers.guidedRtlWizard.open]);
+
   // First-boot / stale: auto-open guided wizard once Solo Studio is ready and idle.
   const autoWizardLaunchedRef = useRef(false);
   useEffect(() => {
@@ -2469,6 +2494,25 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     } catch {
       /* ignore storage write errors */
     }
+  };
+
+  const dismissTutorialMaybeLater = (): void => {
+    setShowTutorialModal(false);
+    try {
+      window.sessionStorage.setItem(TUTORIAL_LATER_STORAGE_KEY, "1");
+    } catch {
+      /* ignore storage write errors */
+    }
+  };
+
+  const openTutorialVideo = (): void => {
+    try {
+      window.localStorage.setItem(TUTORIAL_WATCHED_STORAGE_KEY, "1");
+    } catch {
+      /* ignore storage write errors */
+    }
+    setShowTutorialModal(false);
+    window.open(TUTORIAL_VIDEO_URL, "_blank", "noopener,noreferrer");
   };
 
   const launchGuidedCalibration = (): void => {
@@ -3080,6 +3124,42 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           onCancel={looperHandlers.onCancelGuidedRtlWizard}
           onRetryCapture={looperHandlers.onRetryGuidedRtlCapture}
         />
+      ) : null}
+
+      {showTutorialModal ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="kite-loop-tutorial-title"
+        >
+          <div
+            className="w-full max-w-sm space-y-4 rounded-xl border border-white/[0.08] bg-[rgba(10,10,10,0.92)] px-5 py-5 shadow-[0_16px_48px_rgba(0,0,0,0.55)] backdrop-blur-[18px]"
+          >
+            <p
+              id="kite-loop-tutorial-title"
+              className="m-0 text-center text-sm font-medium leading-snug text-white/90"
+            >
+              First time? Watch this tutorial video if you need help!
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={openTutorialVideo}
+                className="cursor-pointer rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-2.5 text-xs font-semibold text-emerald-400 transition-colors hover:border-emerald-500/55 hover:bg-emerald-500/20"
+              >
+                Watch tutorial
+              </button>
+              <button
+                type="button"
+                onClick={dismissTutorialMaybeLater}
+                className="cursor-pointer rounded-lg border border-white/[0.1] bg-transparent px-3 py-2.5 text-xs font-medium text-stone-400 transition-colors hover:border-white/[0.16] hover:text-stone-300"
+              >
+                Maybe later
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       <AnimatePresence>
