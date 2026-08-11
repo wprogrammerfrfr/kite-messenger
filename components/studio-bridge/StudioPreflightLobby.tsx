@@ -41,6 +41,7 @@ export type StudioPreflightLobbyProps = {
   onConfirmGuidedRtlWizard: () => void;
   onCancelGuidedRtlWizard: () => void;
   onRetryGuidedRtlCapture: () => void;
+  onLatencyMsChange?: (ms: number) => void;
   calibrationDisabled?: boolean;
 };
 
@@ -162,6 +163,7 @@ function StudioPreflightLobbyInner({
   onConfirmGuidedRtlWizard,
   onCancelGuidedRtlWizard,
   onRetryGuidedRtlCapture,
+  onLatencyMsChange,
   calibrationDisabled = false,
 }: StudioPreflightLobbyProps) {
   return (
@@ -451,6 +453,7 @@ function StudioPreflightLobbyInner({
                 onBeginWizard={onBeginGuidedRtlWizard}
                 onStartCapture={onStartGuidedRtlCapture}
                 onPreviewLatencyMs={onPreviewGuidedRtlLatencyMs}
+                onLatencyMsChange={onLatencyMsChange}
                 onConfirm={onConfirmGuidedRtlWizard}
                 onCancel={onCancelGuidedRtlWizard}
                 onRetryCapture={onRetryGuidedRtlCapture}

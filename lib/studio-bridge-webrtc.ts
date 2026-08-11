@@ -242,6 +242,7 @@ export function getStudioAudioConstraints(
     echoCancellation: { exact: false },
     noiseSuppression: { exact: false },
     autoGainControl: { exact: false },
+    ...({ latency: { ideal: 0 } } as unknown as MediaTrackConstraints),
     sampleRate: { ideal: 48000 },
   };
 }

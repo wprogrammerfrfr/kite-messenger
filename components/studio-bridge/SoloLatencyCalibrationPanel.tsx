@@ -11,11 +11,17 @@ export type SoloLatencyCalibrationPanelProps = {
   stale: boolean;
   staleMessage: string | null;
   disabled?: boolean;
+  /**
+   * True when any solo loop buffer already exists — recalibrate/confirm only affects new takes.
+   */
+  hasExistingLoops?: boolean;
   /** Guided wizard controller state from the engine. */
   wizard: GuidedRtlWizardState;
   onBeginWizard: () => void;
   onStartCapture: () => void;
   onPreviewLatencyMs: (ms: number) => void;
+  /** Manual RTL without clap capture (lobby/settings when wizard closed). */
+  onLatencyMsChange?: (ms: number) => void;
   onConfirm: () => void;
   onCancel: () => void;
   onRetryCapture: () => void;
@@ -65,15 +71,18 @@ export function SoloLatencyCalibrationPanel({
   stale,
   staleMessage,
   disabled = false,
+  hasExistingLoops = false,
   wizard,
   onBeginWizard,
   onStartCapture: _onStartCapture,
   onPreviewLatencyMs,
+  onLatencyMsChange,
   onConfirm,
   onCancel,
   onRetryCapture,
 }: SoloLatencyCalibrationPanelProps): React.JSX.Element {
   const sliderId = useId();
+  const manualSliderId = useId();
   const isLobby = variant === "lobby";
   const isWizardOverlay = variant === "wizard";
   const busy =
@@ -93,6 +102,13 @@ export function SoloLatencyCalibrationPanel({
     wizard.countdownBeatRemaining != null;
   const showCaptureProgress = wizard.open && wizard.phase === "capturing";
   const progressPct = Math.round(Math.max(0, Math.min(1, wizard.captureProgress01)) * 100);
+  const showManualSlider =
+    !wizard.open &&
+    !isWizardOverlay &&
+    typeof onLatencyMsChange === "function";
+  const showExistingLoopsWarning =
+    hasExistingLoops &&
+    (wizard.open || showManualSlider);
 
   const shellStyle: React.CSSProperties = isLobby
     ? {}
@@ -112,6 +128,18 @@ export function SoloLatencyCalibrationPanel({
   const overlayClass = isWizardOverlay
     ? "fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
     : undefined;
+
+  const warnStyle: React.CSSProperties | undefined = isLobby
+    ? undefined
+    : {
+        borderRadius: 8,
+        border: "1px solid rgba(251,191,36,0.35)",
+        background: "rgba(251,191,36,0.08)",
+        color: "#fbbf24",
+        fontSize: 9,
+        lineHeight: 1.5,
+        padding: "7px 8px",
+      };
 
   const inner = (
     <div className={cardClass} style={shellStyle}>
@@ -185,6 +213,21 @@ export function SoloLatencyCalibrationPanel({
         </div>
       ) : null}
 
+      {showExistingLoopsWarning ? (
+        <div
+          className={
+            isLobby
+              ? "rounded-lg border border-amber-500/35 bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-200"
+              : undefined
+          }
+          style={warnStyle}
+          role="status"
+        >
+          Loops already recorded — a new RTL applies to new takes only. Use Stop &amp; Reset before
+          re-aligning a long session.
+        </div>
+      ) : null}
+
       {!wizard.open ? (
         <div className={isLobby ? "flex flex-col gap-2" : undefined} style={isLobby ? undefined : { display: "flex", flexDirection: "column", gap: 8 }}>
           <p
@@ -195,9 +238,81 @@ export function SoloLatencyCalibrationPanel({
                 : { color: "rgba(255,255,255,0.4)", fontSize: 9, lineHeight: 1.5 }
             }
           >
-            Guided calibration: clap four beats with the metronome, then drag the RTL slider until
-            your claps lock to the grid. Confirmed values persist for Solo Studio.
+            Set RTL with the slider below, or run guided clap calibration to preview alignment
+            against the metronome. Values persist for Solo Studio.
           </p>
+
+          {showManualSlider ? (
+            <div
+              className={isLobby ? "space-y-2" : undefined}
+              style={isLobby ? undefined : { display: "flex", flexDirection: "column", gap: 8 }}
+            >
+              <label
+                htmlFor={manualSliderId}
+                className={isLobby ? "text-[10px] text-stone-400" : undefined}
+                style={isLobby ? undefined : { color: "rgba(255,255,255,0.4)", fontSize: 9 }}
+              >
+                Manual RTL compensation (0–{SOLO_LATENCY_APPLIED_MAX_MS} ms)
+              </label>
+              <div
+                className={isLobby ? "flex items-center gap-2" : undefined}
+                style={isLobby ? undefined : { display: "flex", alignItems: "center", gap: 8 }}
+              >
+                <input
+                  id={manualSliderId}
+                  type="range"
+                  min={0}
+                  max={SOLO_LATENCY_APPLIED_MAX_MS}
+                  step={1}
+                  value={latencyMs}
+                  disabled={disabled}
+                  aria-valuemin={0}
+                  aria-valuemax={SOLO_LATENCY_APPLIED_MAX_MS}
+                  aria-valuenow={latencyMs}
+                  aria-label="Manual round-trip latency compensation in milliseconds"
+                  onChange={(e) => onLatencyMsChange?.(Number(e.target.value))}
+                  className={isLobby ? "flex-1 accent-emerald-500" : undefined}
+                  style={
+                    isLobby
+                      ? undefined
+                      : {
+                          flex: 1,
+                          accentColor: "#22c55e",
+                          cursor: disabled ? "not-allowed" : "pointer",
+                          height: 4,
+                          appearance: "none",
+                          WebkitAppearance: "none",
+                          borderRadius: 9999,
+                          outline: "none",
+                          opacity: disabled ? 0.5 : 1,
+                          background: `linear-gradient(to right,#22c55e ${(latencyMs / SOLO_LATENCY_APPLIED_MAX_MS) * 100}%,rgba(255,255,255,0.08) ${(latencyMs / SOLO_LATENCY_APPLIED_MAX_MS) * 100}%)`,
+                        }
+                  }
+                />
+                <span
+                  className={
+                    isLobby
+                      ? "font-mono text-[10px] text-emerald-400 min-w-[38px] text-right"
+                      : undefined
+                  }
+                  style={
+                    isLobby
+                      ? undefined
+                      : {
+                          color: "#22c55e",
+                          fontSize: 10,
+                          fontFamily: "monospace",
+                          minWidth: 38,
+                          textAlign: "right",
+                        }
+                  }
+                >
+                  {latencyMs}ms
+                </span>
+              </div>
+            </div>
+          ) : null}
+
           <button
             type="button"
             disabled={disabled}

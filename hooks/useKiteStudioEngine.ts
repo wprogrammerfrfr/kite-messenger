@@ -274,7 +274,12 @@ const REMOTE_COMPRESSOR_RATIO     = 3;
 const REMOTE_COMPRESSOR_ATTACK    = 0.003;
 const REMOTE_COMPRESSOR_RELEASE   = 0.1;
 const SOLO_LATENCY_STALE_MESSAGE =
-  "Audio hardware changed — re-calibrate RTL.";
+  "Audio hardware or path latency changed — re-calibrate RTL.";
+const GUIDED_RTL_CLOCK_STALL_MS = 2000;
+const GUIDED_RTL_CLOCK_STALL_MESSAGE =
+  "Audio clock stalled — tap Resume Audio if needed, then Retry.";
+const GUIDED_RTL_SUSPEND_MESSAGE =
+  "Audio was suspended — tap Retry to restart calibration.";
 
 const SESSION_VIDEO_MIME_CANDIDATES = [
   "video/webm;codecs=vp9,opus",
@@ -546,6 +551,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [guidedRtlWizard, setGuidedRtlWizard] = useState<GuidedRtlWizardState>(GUIDED_RTL_WIZARD_IDLE);
   const guidedRtlWizardOpenRef = useRef(false);
   const guidedRtlTransitionTimerRef = useRef<number | null>(null);
+  const guidedRtlWatchdogTimerRef = useRef<number | null>(null);
+  const guidedRtlCalStateSeenRef = useRef(false);
+  const guidedRtlAudioCtxStateHandlerRef = useRef<(() => void) | null>(null);
+  const guidedRtlVisibilityHandlerRef = useRef<(() => void) | null>(null);
   const [soloLooperMode, setSoloLooperMode] = useState<SoloLooperMode>("free");
   const soloLooperModeRef = useRef(soloLooperMode);
   const [handsfreeAssist, setHandsfreeAssistState] = useState(true);
@@ -957,6 +966,20 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     const ctx = studioAudioContextRef.current;
     const sampleRate =
       ctx && ctx.state !== "closed" ? Math.round(ctx.sampleRate) : KITE_TARGET_SAMPLE_RATE;
+    if (ctx && ctx.state === "running") {
+      if (Number.isFinite(ctx.baseLatency)) {
+        audioBaseLatencySecRef.current = ctx.baseLatency;
+      }
+      if (Number.isFinite(ctx.outputLatency)) {
+        audioOutputLatencySecRef.current = ctx.outputLatency;
+      }
+    }
+    const baseLatencyMs = Number.isFinite(audioBaseLatencySecRef.current)
+      ? Math.round(audioBaseLatencySecRef.current * 1000)
+      : undefined;
+    const outputLatencyMs = Number.isFinite(audioOutputLatencySecRef.current)
+      ? Math.round(audioOutputLatencySecRef.current * 1000)
+      : undefined;
     return buildSoloLatencyHwFingerprint({
       primaryInputDeviceId: resolvePrimaryInputDeviceId(
         activeDeviceIdsRef.current,
@@ -965,6 +988,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       activeInputDeviceIds: activeDeviceIdsRef.current,
       audioOutputDeviceIds: outputIds,
       sampleRate,
+      ...(baseLatencyMs !== undefined ? { baseLatencyMs } : {}),
+      ...(outputLatencyMs !== undefined ? { outputLatencyMs } : {}),
     });
   }, []);
 
@@ -1029,6 +1054,88 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     guidedRtlWizardOpenRef.current = guidedRtlWizard.open;
   }, [guidedRtlWizard.open]);
 
+  const clearGuidedRtlClockGuards = useCallback(() => {
+    if (guidedRtlWatchdogTimerRef.current !== null) {
+      window.clearTimeout(guidedRtlWatchdogTimerRef.current);
+      guidedRtlWatchdogTimerRef.current = null;
+    }
+    const ctx = studioAudioContextRef.current;
+    const stateHandler = guidedRtlAudioCtxStateHandlerRef.current;
+    if (ctx && stateHandler) {
+      try {
+        ctx.removeEventListener("statechange", stateHandler);
+      } catch {
+        /* ignore */
+      }
+    }
+    guidedRtlAudioCtxStateHandlerRef.current = null;
+    const visHandler = guidedRtlVisibilityHandlerRef.current;
+    if (visHandler && typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", visHandler);
+    }
+    guidedRtlVisibilityHandlerRef.current = null;
+  }, []);
+
+  const armGuidedRtlClockGuards = useCallback(() => {
+    clearGuidedRtlClockGuards();
+    guidedRtlCalStateSeenRef.current = false;
+
+    const failClock = (error: string): void => {
+      if (!mountedRef.current || !guidedRtlWizardOpenRef.current) return;
+      clearGuidedRtlClockGuards();
+      try {
+        soloLooperEngineRef.current?.cancelGuidedCalibration();
+      } catch {
+        /* ignore */
+      }
+      try {
+        soloLooperEngineRef.current?.stopAudibleMetronome();
+      } catch {
+        /* ignore */
+      }
+      setGuidedRtlWizard((prev) => ({
+        ...prev,
+        phase: "error",
+        error,
+        message: null,
+        countdownBeatRemaining: null,
+      }));
+    };
+
+    const onCtxState = (): void => {
+      const active = studioAudioContextRef.current;
+      if (!active || !guidedRtlWizardOpenRef.current) return;
+      const state = active.state as string;
+      if (state === "suspended" || state === "interrupted") {
+        failClock(GUIDED_RTL_SUSPEND_MESSAGE);
+      }
+    };
+    guidedRtlAudioCtxStateHandlerRef.current = onCtxState;
+    studioAudioContextRef.current?.addEventListener("statechange", onCtxState);
+
+    const onVisibility = (): void => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") {
+        return;
+      }
+      const active = studioAudioContextRef.current;
+      if (!active || !guidedRtlWizardOpenRef.current) return;
+      if (active.state !== "running") {
+        failClock(GUIDED_RTL_SUSPEND_MESSAGE);
+      }
+    };
+    guidedRtlVisibilityHandlerRef.current = onVisibility;
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+
+    guidedRtlWatchdogTimerRef.current = window.setTimeout(() => {
+      guidedRtlWatchdogTimerRef.current = null;
+      if (!mountedRef.current || !guidedRtlWizardOpenRef.current) return;
+      if (guidedRtlCalStateSeenRef.current) return;
+      failClock(GUIDED_RTL_CLOCK_STALL_MESSAGE);
+    }, GUIDED_RTL_CLOCK_STALL_MS);
+  }, [clearGuidedRtlClockGuards]);
+
   useEffect(() => {
     const stored = readSoloLatencyMs();
     if (stored !== null) {
@@ -1038,6 +1145,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     }
     soloLatencyPersistenceReadyRef.current = true;
   }, [evaluateSoloLatencyHwStale]);
+
+  useEffect(() => {
+    if (!audioContextReady) return;
+    void evaluateSoloLatencyHwStale();
+  }, [audioContextReady, evaluateSoloLatencyHwStale]);
 
   useEffect(() => {
     if (!soloLatencyPersistenceReadyRef.current) {
@@ -4243,6 +4355,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
       if (event.type === "GUIDED_CAL_CAPTURE_COMPLETE") {
         if (!mountedRef.current || !guidedRtlWizardOpenRef.current) return;
+        guidedRtlCalStateSeenRef.current = true;
+        clearGuidedRtlClockGuards();
         if (guidedRtlTransitionTimerRef.current !== null) {
           window.clearTimeout(guidedRtlTransitionTimerRef.current);
           guidedRtlTransitionTimerRef.current = null;
@@ -4269,7 +4383,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
       if (event.type === "GUIDED_CAL_STATE") {
         if (!mountedRef.current || !guidedRtlWizardOpenRef.current) return;
+        guidedRtlCalStateSeenRef.current = true;
+        if (guidedRtlWatchdogTimerRef.current !== null) {
+          window.clearTimeout(guidedRtlWatchdogTimerRef.current);
+          guidedRtlWatchdogTimerRef.current = null;
+        }
         if (event.error === "capture_too_short") {
+          clearGuidedRtlClockGuards();
           setGuidedRtlWizard((prev) => ({
             ...prev,
             phase: "error",
@@ -4282,6 +4402,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           return;
         }
         if (event.error) {
+          clearGuidedRtlClockGuards();
           setGuidedRtlWizard((prev) => ({
             ...prev,
             phase: "error",
@@ -4383,7 +4504,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloLooperStateRef.current = "captured";
       setSoloLooperState("captured");
     },
-    [cancelScheduledMetronomeClicks, sessionId, syncActiveRecordTrackIndex, syncHandsfreeSequenceActive, buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale, lockSoloTrackBarCount, clearAllSoloTrackBarCountLocks]
+    [cancelScheduledMetronomeClicks, sessionId, syncActiveRecordTrackIndex, syncHandsfreeSequenceActive, buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale, clearGuidedRtlClockGuards, lockSoloTrackBarCount, clearAllSoloTrackBarCountLocks]
   );
 
   const ensureSoloLooperEngineBootstrapped = useCallback(async (): Promise<SoloLooperEngine> => {
@@ -5933,7 +6054,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       window.clearTimeout(guidedRtlTransitionTimerRef.current);
       guidedRtlTransitionTimerRef.current = null;
     }
-  }, []);
+    clearGuidedRtlClockGuards();
+  }, [clearGuidedRtlClockGuards]);
 
   const stopGuidedRtlAudio = useCallback(() => {
     const engine = soloLooperEngineRef.current;
@@ -5970,7 +6092,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       try {
         const engine = await ensureSoloLooperEngineBootstrapped();
         const ctx = studioAudioContextRef.current;
-        if (!ctx || ctx.state !== "running") {
+        if (!ctx || ctx.state === "closed") {
           setGuidedRtlWizard({
             ...GUIDED_RTL_WIZARD_IDLE,
             open: true,
@@ -5979,6 +6101,24 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           });
           return;
         }
+        await ctx.resume().catch(() => {});
+        if (ctx.state !== "running") {
+          setGuidedRtlWizard({
+            ...GUIDED_RTL_WIZARD_IDLE,
+            open: true,
+            phase: "error",
+            error: "Audio engine could not start.",
+          });
+          return;
+        }
+        setAudioContextReady(true);
+
+        if (isMasterPausedRef.current) {
+          engine.setPaused(false);
+          isMasterPausedRef.current = false;
+          setIsMasterPaused(false);
+        }
+
         const bpm = Math.max(
           30,
           Math.min(300, kiteIntervalTimingRef.current?.bpm || kiteSetupTempoRef.current || 120)
@@ -5994,6 +6134,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           engine.startAudibleMetronome(bpm);
         }
         engine.startGuidedCalCapture();
+        armGuidedRtlClockGuards();
 
         guidedRtlWizardOpenRef.current = true;
         setGuidedRtlWizard({
@@ -6008,6 +6149,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           captureBeatIndex: null,
         });
       } catch (error) {
+        clearGuidedRtlClockGuards();
         setGuidedRtlWizard({
           ...GUIDED_RTL_WIZARD_IDLE,
           open: true,
@@ -6016,7 +6158,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         });
       }
     })();
-  }, [clearGuidedRtlTransitionTimer, ensureSoloLooperEngineBootstrapped]);
+  }, [
+    armGuidedRtlClockGuards,
+    clearGuidedRtlClockGuards,
+    clearGuidedRtlTransitionTimer,
+    ensureSoloLooperEngineBootstrapped,
+  ]);
 
   const startGuidedRtlCapture = useCallback(() => {
     const engine = soloLooperEngineRef.current;
@@ -6125,7 +6272,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     if (!guidedRtlWizardOpenRef.current) return;
     const engine = soloLooperEngineRef.current;
     const ctx = studioAudioContextRef.current;
-    if (!engine || !ctx || ctx.state !== "running") {
+    if (!engine || !ctx || ctx.state === "closed") {
       setGuidedRtlWizard((prev) => ({
         ...prev,
         phase: "error",
@@ -6134,31 +6281,62 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }));
       return;
     }
-    clearGuidedRtlTransitionTimer();
-    const bpm = Math.max(
-      30,
-      Math.min(300, kiteIntervalTimingRef.current?.bpm || kiteSetupTempoRef.current || 120)
-    );
-    const beatFrames = Math.max(1, Math.round((60 / bpm) * ctx.sampleRate));
-    const targetFrames = beatFrames * 4;
-    const countInFrames = beatFrames * 4;
-    engine.cancelGuidedCalibration();
-    engine.beginGuidedCalibration(targetFrames, countInFrames);
-    if (!isVisualMetronomeOnlyRef.current) {
-      engine.startAudibleMetronome(bpm);
-    }
-    engine.startGuidedCalCapture();
-    setGuidedRtlWizard((prev) => ({
-      ...prev,
-      phase: "countdown",
-      draftLatencyMs: prev.committedLatencyMs,
-      countdownBeatRemaining: 4,
-      captureProgress01: 0,
-      captureBeatIndex: null,
-      message: "Retry — get ready, don’t clap yet (4)",
-      error: null,
-    }));
-  }, [clearGuidedRtlTransitionTimer]);
+    void (async () => {
+      try {
+        await ctx.resume().catch(() => {});
+        if (ctx.state !== "running") {
+          setGuidedRtlWizard((prev) => ({
+            ...prev,
+            phase: "error",
+            error: "Audio engine unavailable. Close and reopen calibration.",
+            message: null,
+          }));
+          return;
+        }
+        setAudioContextReady(true);
+
+        if (isMasterPausedRef.current) {
+          engine.setPaused(false);
+          isMasterPausedRef.current = false;
+          setIsMasterPaused(false);
+        }
+
+        clearGuidedRtlTransitionTimer();
+        const bpm = Math.max(
+          30,
+          Math.min(300, kiteIntervalTimingRef.current?.bpm || kiteSetupTempoRef.current || 120)
+        );
+        const beatFrames = Math.max(1, Math.round((60 / bpm) * ctx.sampleRate));
+        const targetFrames = beatFrames * 4;
+        const countInFrames = beatFrames * 4;
+        engine.cancelGuidedCalibration();
+        engine.beginGuidedCalibration(targetFrames, countInFrames);
+        if (!isVisualMetronomeOnlyRef.current) {
+          engine.startAudibleMetronome(bpm);
+        }
+        engine.startGuidedCalCapture();
+        armGuidedRtlClockGuards();
+        setGuidedRtlWizard((prev) => ({
+          ...prev,
+          phase: "countdown",
+          draftLatencyMs: prev.committedLatencyMs,
+          countdownBeatRemaining: 4,
+          captureProgress01: 0,
+          captureBeatIndex: null,
+          message: "Retry — get ready, don’t clap yet (4)",
+          error: null,
+        }));
+      } catch (error) {
+        clearGuidedRtlClockGuards();
+        setGuidedRtlWizard((prev) => ({
+          ...prev,
+          phase: "error",
+          error: error instanceof Error ? error.message : "Could not retry calibration.",
+          message: null,
+        }));
+      }
+    })();
+  }, [armGuidedRtlClockGuards, clearGuidedRtlClockGuards, clearGuidedRtlTransitionTimer]);
 
   const handleStopAndResetSoloLooper = useCallback(() => {
     if (guidedRtlWizardOpenRef.current) {
@@ -6775,8 +6953,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      clearGuidedRtlClockGuards();
     };
-  }, []);
+  }, [clearGuidedRtlClockGuards]);
 
   useEffect(() => {
     let cancelled = false;

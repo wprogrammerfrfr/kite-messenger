@@ -128,6 +128,8 @@ export type KiteLoopV4LooperHandlers = {
   onConfirmGuidedRtlWizard: () => void;
   onCancelGuidedRtlWizard: () => void;
   onRetryGuidedRtlCapture: () => void;
+  onLatencyMsChange: (ms: number) => void;
+  hasExistingLoops: boolean;
   latencyCalibrationStale: boolean;
   latencyStaleMessage: string | null;
   onTempoSliderChange: (value: number) => void;
@@ -1458,10 +1460,12 @@ function SettingsModal({
               stale={handlers.latencyCalibrationStale}
               staleMessage={handlers.latencyStaleMessage}
               disabled={cfg.isTimingLocked}
+              hasExistingLoops={handlers.hasExistingLoops}
               wizard={handlers.guidedRtlWizard}
               onBeginWizard={handlers.onBeginGuidedRtlWizard}
               onStartCapture={handlers.onStartGuidedRtlCapture}
               onPreviewLatencyMs={handlers.onPreviewGuidedRtlLatencyMs}
+              onLatencyMsChange={handlers.onLatencyMsChange}
               onConfirm={handlers.onConfirmGuidedRtlWizard}
               onCancel={handlers.onCancelGuidedRtlWizard}
               onRetryCapture={handlers.onRetryGuidedRtlCapture}
@@ -3116,6 +3120,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           stale={looperHandlers.latencyCalibrationStale}
           staleMessage={looperHandlers.latencyStaleMessage}
           disabled={looperConfig.isTimingLocked}
+          hasExistingLoops={looperHandlers.hasExistingLoops}
           wizard={looperHandlers.guidedRtlWizard}
           onBeginWizard={looperHandlers.onBeginGuidedRtlWizard}
           onStartCapture={looperHandlers.onStartGuidedRtlCapture}

@@ -6,6 +6,10 @@ export type BuildSoloLatencyHwFingerprintOptions = {
   audioOutputDeviceIds: readonly string[];
   sampleRate: number;
   calibratedAt?: number;
+  /** Rounded AudioContext.baseLatency in ms. */
+  baseLatencyMs?: number;
+  /** Rounded AudioContext.outputLatency in ms. */
+  outputLatencyMs?: number;
 };
 
 function sortedUniqueIds(ids: readonly string[]): string[] {
@@ -52,7 +56,7 @@ export function resolvePrimaryInputDeviceId(
 export function buildSoloLatencyHwFingerprint(
   options: BuildSoloLatencyHwFingerprintOptions
 ): SoloLatencyHwFingerprint {
-  return {
+  const fingerprint: SoloLatencyHwFingerprint = {
     v: 1,
     primaryInputDeviceId: options.primaryInputDeviceId.trim() || "default",
     activeInputDeviceIds: sortedUniqueIds(options.activeInputDeviceIds),
@@ -60,6 +64,19 @@ export function buildSoloLatencyHwFingerprint(
     sampleRate: Math.round(options.sampleRate),
     calibratedAt: options.calibratedAt ?? Date.now(),
   };
+  if (
+    options.baseLatencyMs !== undefined &&
+    Number.isFinite(options.baseLatencyMs)
+  ) {
+    fingerprint.baseLatencyMs = Math.round(options.baseLatencyMs);
+  }
+  if (
+    options.outputLatencyMs !== undefined &&
+    Number.isFinite(options.outputLatencyMs)
+  ) {
+    fingerprint.outputLatencyMs = Math.round(options.outputLatencyMs);
+  }
+  return fingerprint;
 }
 
 export function isSoloLatencyHwStale(
@@ -82,6 +99,21 @@ export function isSoloLatencyHwStale(
     return true;
   }
   if (Math.round(saved.sampleRate) !== Math.round(current.sampleRate)) {
+    return true;
+  }
+  // HAL fields: only compare when both sides have them (legacy stored fp without HAL stays valid).
+  if (
+    saved.baseLatencyMs !== undefined &&
+    current.baseLatencyMs !== undefined &&
+    Math.round(saved.baseLatencyMs) !== Math.round(current.baseLatencyMs)
+  ) {
+    return true;
+  }
+  if (
+    saved.outputLatencyMs !== undefined &&
+    current.outputLatencyMs !== undefined &&
+    Math.round(saved.outputLatencyMs) !== Math.round(current.outputLatencyMs)
+  ) {
     return true;
   }
   return false;

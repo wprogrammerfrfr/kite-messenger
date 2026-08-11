@@ -14,6 +14,10 @@ export type SoloLatencyHwFingerprint = {
   audioOutputDeviceIds: string[];
   sampleRate: number;
   calibratedAt: number;
+  /** Rounded AudioContext.baseLatency in ms at calibration (optional for legacy stored fp). */
+  baseLatencyMs?: number;
+  /** Rounded AudioContext.outputLatency in ms at calibration (optional for legacy stored fp). */
+  outputLatencyMs?: number;
 };
 
 export function clampSoloLatencyMs(value: number): number {
@@ -85,16 +89,25 @@ function isValidHwFingerprint(value: unknown): value is SoloLatencyHwFingerprint
     return false;
   }
   const fp = value as SoloLatencyHwFingerprint;
-  return (
-    fp.v === 1 &&
-    typeof fp.primaryInputDeviceId === "string" &&
-    Array.isArray(fp.activeInputDeviceIds) &&
-    fp.activeInputDeviceIds.every((id) => typeof id === "string") &&
-    Array.isArray(fp.audioOutputDeviceIds) &&
-    fp.audioOutputDeviceIds.every((id) => typeof id === "string") &&
-    Number.isFinite(fp.sampleRate) &&
-    Number.isFinite(fp.calibratedAt)
-  );
+  if (
+    fp.v !== 1 ||
+    typeof fp.primaryInputDeviceId !== "string" ||
+    !Array.isArray(fp.activeInputDeviceIds) ||
+    !fp.activeInputDeviceIds.every((id) => typeof id === "string") ||
+    !Array.isArray(fp.audioOutputDeviceIds) ||
+    !fp.audioOutputDeviceIds.every((id) => typeof id === "string") ||
+    !Number.isFinite(fp.sampleRate) ||
+    !Number.isFinite(fp.calibratedAt)
+  ) {
+    return false;
+  }
+  if (fp.baseLatencyMs !== undefined && !Number.isFinite(fp.baseLatencyMs)) {
+    return false;
+  }
+  if (fp.outputLatencyMs !== undefined && !Number.isFinite(fp.outputLatencyMs)) {
+    return false;
+  }
+  return true;
 }
 
 export function readSoloLatencyHwFingerprint(): SoloLatencyHwFingerprint | null {

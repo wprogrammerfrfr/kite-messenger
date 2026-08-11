@@ -419,6 +419,7 @@ export default function StudioBridgePage() {
   const confirmGuidedRtlWizard = engineActions.confirmGuidedRtlWizard;
   const cancelGuidedRtlWizard = engineActions.cancelGuidedRtlWizard;
   const retryGuidedRtlCapture = engineActions.retryGuidedRtlCapture;
+  const handleSoloLatencyMsChange = engineActions.handleSoloLatencyMsChange;
   const handleStopAndResetSoloLooper = engineActions.handleStopAndResetSoloLooper;
   const handleToggleMasterPause = engineActions.handleToggleMasterPause;
   const handleResetSoloTrack = engineActions.handleResetSoloTrack;
@@ -1158,6 +1159,7 @@ export default function StudioBridgePage() {
               onConfirmGuidedRtlWizard={confirmGuidedRtlWizard}
               onCancelGuidedRtlWizard={cancelGuidedRtlWizard}
               onRetryGuidedRtlCapture={retryGuidedRtlCapture}
+              onLatencyMsChange={handleSoloLatencyMsChange}
               calibrationDisabled={micPermissionDenied || !localMicStream}
             />
           ) : showP2PV2Connecting ? (
@@ -2238,6 +2240,10 @@ export default function StudioBridgePage() {
             onConfirmGuidedRtlWizard: confirmGuidedRtlWizard,
             onCancelGuidedRtlWizard: cancelGuidedRtlWizard,
             onRetryGuidedRtlCapture: retryGuidedRtlCapture,
+            onLatencyMsChange: handleSoloLatencyMsChange,
+            hasExistingLoops:
+              soloLooperState !== "idle" ||
+              (soloTrackSlotUi?.some((slot) => slot.mode !== "idle") ?? false),
             latencyCalibrationStale: soloLatencyCalibrationStale,
             latencyStaleMessage: soloLatencyStaleMessage,
             onTempoSliderChange: (v) => {
