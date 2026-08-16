@@ -1019,8 +1019,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     const current = await buildCurrentSoloLatencyHwFingerprint();
     if (isSoloLatencyHwStale(saved, current)) {
       markSoloLatencyStale();
+    } else {
+      clearSoloLatencyStale();
     }
-  }, [buildCurrentSoloLatencyHwFingerprint, markSoloLatencyStale]);
+  }, [buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale, markSoloLatencyStale]);
 
   useEffect(() => {
     isMicMutedRef.current = isMicMuted;

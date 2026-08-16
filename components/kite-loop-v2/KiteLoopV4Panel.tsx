@@ -2433,33 +2433,6 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     setShowTutorialModal(true);
   }, [looperHandlers.guidedRtlWizard.open]);
 
-  // First-boot / stale: auto-open guided wizard once Solo Studio is ready and idle.
-  const autoWizardLaunchedRef = useRef(false);
-  useEffect(() => {
-    if (autoWizardLaunchedRef.current) return;
-    if (looperHandlers.guidedRtlWizard.open) {
-      autoWizardLaunchedRef.current = true;
-      return;
-    }
-    if (looperConfig.isTimingLocked) return;
-    const shouldAutoOpen =
-      (looperState.showCalibrationOnboardingHint || looperState.latencyCalibrationStale) &&
-      !calibrationDismissed &&
-      looperState.soloLooperState === "idle" &&
-      !looperState.isRecordingArmed;
-    if (!shouldAutoOpen) return;
-    autoWizardLaunchedRef.current = true;
-    looperHandlers.onBeginGuidedRtlWizard();
-  }, [
-    calibrationDismissed,
-    looperConfig.isTimingLocked,
-    looperHandlers,
-    looperState.isRecordingArmed,
-    looperState.latencyCalibrationStale,
-    looperState.showCalibrationOnboardingHint,
-    looperState.soloLooperState,
-  ]);
-
   const masterPaused = looperState.isMasterPaused;
   const solo = looperState.soloLooperState;
   const sessionTapeState = looperState.sessionRecorderState;
@@ -2961,8 +2934,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 </div>
                 <div style={{ color: "rgba(255,255,255,0.52)", fontSize: 10, lineHeight: 1.4 }}>
                   {looperState.latencyCalibrationStale
-                    ? "Audio hardware changed. Run the guided clap wizard for tighter loop timing."
-                    : "Run the guided clap wizard once for tighter loop timing on this device."}
+                    ? "Audio path changed. Optional: run click alignment (headphones off) or set RTL in Settings."
+                    : "Optional: run click alignment (headphones off) or set RTL in Settings for tighter timing."}
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>

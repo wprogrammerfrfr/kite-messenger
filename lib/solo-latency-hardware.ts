@@ -95,25 +95,10 @@ export function isSoloLatencyHwStale(
   if (!deviceIdSetsEqual(saved.activeInputDeviceIds, current.activeInputDeviceIds)) {
     return true;
   }
-  if (!deviceIdSetsEqual(saved.audioOutputDeviceIds, current.audioOutputDeviceIds)) {
-    return true;
-  }
+  // Output id set churn and HAL (baseLatency / outputLatency) are ignored — plugging
+  // wired headphones often changes those without a meaningful RTL change on the same mic.
+  // Input device ids + sample rate still gate stale (headset mic switch, etc.).
   if (Math.round(saved.sampleRate) !== Math.round(current.sampleRate)) {
-    return true;
-  }
-  // HAL fields: only compare when both sides have them (legacy stored fp without HAL stays valid).
-  if (
-    saved.baseLatencyMs !== undefined &&
-    current.baseLatencyMs !== undefined &&
-    Math.round(saved.baseLatencyMs) !== Math.round(current.baseLatencyMs)
-  ) {
-    return true;
-  }
-  if (
-    saved.outputLatencyMs !== undefined &&
-    current.outputLatencyMs !== undefined &&
-    Math.round(saved.outputLatencyMs) !== Math.round(current.outputLatencyMs)
-  ) {
     return true;
   }
   return false;

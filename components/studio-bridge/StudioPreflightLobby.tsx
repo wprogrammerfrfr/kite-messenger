@@ -431,7 +431,10 @@ function StudioPreflightLobbyInner({
                   </li>
                   <li className="flex items-center gap-2">
                     <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
-                    <span>align RTL with the guided clap + slider wizard</span>
+                    <span>
+                      optional RTL — skip, set the slider yourself, or run click alignment
+                      (headphones off)
+                    </span>
                   </li>
                   <li className="flex items-center gap-2">
                     <span className="h-2 w-2 rotate-45 rounded-[1px] bg-emerald-400 shadow-[0_0_12px_rgba(34,197,94,0.65)]" aria-hidden />
@@ -439,7 +442,8 @@ function StudioPreflightLobbyInner({
                   </li>
                 </ul>
                 <p className="mt-3 text-[11px] leading-relaxed text-stone-500">
-                  You can enter now; calibrate anytime in Settings for tighter timing.
+                  You can enter now without calibrating. After a click wizard, put on wired
+                  headphones to play. Recalibrate anytime in Settings.
                 </p>
               </div>
 

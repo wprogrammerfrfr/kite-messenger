@@ -20,7 +20,7 @@ export type SoloLatencyCalibrationPanelProps = {
   onBeginWizard: () => void;
   onStartCapture: () => void;
   onPreviewLatencyMs: (ms: number) => void;
-  /** Manual RTL without clap capture (lobby/settings when wizard closed). */
+  /** Manual RTL without guided capture (lobby/settings when wizard closed). */
   onLatencyMsChange?: (ms: number) => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -52,7 +52,7 @@ function phaseTitle(phase: GuidedRtlWizardState["phase"]): string {
     case "countdown":
       return "Step 1 — Count in";
     case "capturing":
-      return "Step 2 — Clap four beats";
+      return "Step 2 — Record the click";
     case "transition":
       return "Step 3 — Ready to align";
     case "adjusting":
@@ -62,6 +62,34 @@ function phaseTitle(phase: GuidedRtlWizardState["phase"]): string {
       return "Calibration needs a retry";
     default:
       return "RTL Calibration";
+  }
+}
+
+/** Panel-owned status copy — ignore clap-oriented engine `wizard.message`. */
+function phaseStatusMessage(
+  wizard: GuidedRtlWizardState
+): string | null {
+  switch (wizard.phase) {
+    case "metronome":
+    case "countdown": {
+      const remaining = wizard.countdownBeatRemaining;
+      return remaining != null
+        ? `Headphones off — wait for the click (${remaining})`
+        : "Headphones off — wait for the click";
+    }
+    case "capturing": {
+      const beat = wizard.captureBeatIndex;
+      return beat != null
+        ? `Keep headphones off — mic is recording the metronome (beat ${beat} of 4)`
+        : "Keep headphones off — mic is recording the metronome";
+    }
+    case "transition":
+      return "Clicks captured — drag until the two clicks become one.";
+    case "adjusting":
+    case "confirming":
+      return "Drag until the two clicks become one, then confirm.";
+    default:
+      return null;
   }
 }
 
@@ -238,8 +266,9 @@ export function SoloLatencyCalibrationPanel({
                 : { color: "rgba(255,255,255,0.4)", fontSize: 9, lineHeight: 1.5 }
             }
           >
-            Set RTL with the slider below, or run guided clap calibration to preview alignment
-            against the metronome. Values persist for Solo Studio.
+            Optional — set RTL on the slider and enter, or run guided click alignment (headphones
+            off so the mic hears the metronome). Wear wired headphones after you confirm. Values
+            persist for Solo Studio.
           </p>
 
           {showManualSlider ? (
@@ -342,19 +371,23 @@ export function SoloLatencyCalibrationPanel({
         </div>
       ) : (
         <div className={isLobby ? "space-y-3" : undefined} style={isLobby ? undefined : { display: "flex", flexDirection: "column", gap: 10 }}>
-          {wizard.message ? (
-            <p
-              className={isLobby ? "text-[11px] leading-relaxed text-stone-300" : undefined}
-              style={
-                isLobby
-                  ? undefined
-                  : { color: "rgba(255,255,255,0.65)", fontSize: 10, lineHeight: 1.5 }
-              }
-              role="status"
-            >
-              {wizard.message}
-            </p>
-          ) : null}
+          {(() => {
+            const status = phaseStatusMessage(wizard);
+            if (!status) return null;
+            return (
+              <p
+                className={isLobby ? "text-[11px] leading-relaxed text-stone-300" : undefined}
+                style={
+                  isLobby
+                    ? undefined
+                    : { color: "rgba(255,255,255,0.65)", fontSize: 10, lineHeight: 1.5 }
+                }
+                role="status"
+              >
+                {status}
+              </p>
+            );
+          })()}
 
           {wizard.error ? (
             <div
@@ -419,7 +452,7 @@ export function SoloLatencyCalibrationPanel({
                 className={isLobby ? "text-[10px] text-stone-500" : undefined}
                 style={isLobby ? undefined : { color: "rgba(255,255,255,0.35)", fontSize: 9 }}
               >
-                Get ready — don’t clap yet
+                Headphones off — wait for the click
               </p>
             </div>
           ) : null}
@@ -433,7 +466,7 @@ export function SoloLatencyCalibrationPanel({
                 className={isLobby ? "text-[10px] font-medium text-emerald-400" : undefined}
                 style={isLobby ? undefined : { color: "#22c55e", fontSize: 10, fontWeight: 600 }}
               >
-                Clap now
+                Recording the metronome
                 {wizard.captureBeatIndex != null
                   ? ` — beat ${wizard.captureBeatIndex} of 4`
                   : " — four beats"}
@@ -443,7 +476,7 @@ export function SoloLatencyCalibrationPanel({
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={progressPct}
-                aria-label="Clap capture progress"
+                aria-label="Metronome capture progress"
                 className={isLobby ? "h-2 w-full overflow-hidden rounded-full bg-white/[0.08]" : undefined}
                 style={
                   isLobby
@@ -553,7 +586,7 @@ export function SoloLatencyCalibrationPanel({
                 className={isLobby ? "text-[10px] text-stone-500" : undefined}
                 style={isLobby ? undefined : { color: "rgba(255,255,255,0.35)", fontSize: 9 }}
               >
-                Step 5 — Confirm when claps lock to the click. Cancel restores your previous value.
+                Step 5 — Confirm when the two clicks become one. Cancel restores your previous value.
               </p>
             </div>
           ) : null}
@@ -586,7 +619,7 @@ export function SoloLatencyCalibrationPanel({
                       }
                 }
               >
-                Retry claps
+                Retry capture
               </button>
             ) : null}
 
