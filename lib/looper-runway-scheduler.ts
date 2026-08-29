@@ -27,6 +27,8 @@ export type StartLooperRunwayOptions = {
   bpm: number;
   /** Defaults to 4. */
   beatCount?: number;
+  /** When set, beat 4 (GO) lands on this AudioContext time instead of starting from now. */
+  goAtContextSec?: number;
   /** Small lead after `audioContext.currentTime` before beat 1. */
   leadInSec?: number;
   pumpIntervalSec?: number;
@@ -48,6 +50,7 @@ export async function startLooperRunway(
     audioContext,
     bpm,
     beatCount = LOOPER_RUNWAY_BEAT_COUNT,
+    goAtContextSec,
     leadInSec = DEFAULT_LEAD_SEC,
     pumpIntervalSec = 0.05,
     isAlive,
@@ -60,7 +63,10 @@ export async function startLooperRunway(
   }
   const safeBeatCount = Math.max(1, Math.min(32, Math.floor(beatCount)));
   const beatSec = 60 / bpm;
-  const startAt = audioContext.currentTime + Math.max(0, leadInSec);
+  const startAt =
+    goAtContextSec !== undefined && Number.isFinite(goAtContextSec)
+      ? goAtContextSec - (safeBeatCount - 1) * beatSec
+      : audioContext.currentTime + Math.max(0, leadInSec);
 
   let nextBeat = 1;
   let runwayFinished = false;

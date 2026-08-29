@@ -90,6 +90,9 @@ export type KiteLoopV4LooperState = {
   sessionRecorderState: KiteLoopV4SessionRecorderState;
   recordingArmedCountdown: number | null;
   runwayDisplay: RunwayDisplayLabel | null;
+  /** Subtle boundary-aligned Timing Assist cue (Grid overdub / Handsfree Assist). */
+  assistBoundaryCountdown: RunwayDisplayLabel | null;
+  assistBoundaryTrackIndex: 1 | 2 | 3 | 4 | null;
   runwayPhase: LooperRunwayPhase;
   runwayVisualOnly: boolean;
   loopProgress: number;
@@ -104,6 +107,9 @@ export type KiteLoopV4LooperConfig = {
   handsfreeAssist: boolean;
   /** True when Assist toggle must not change (timing locked, sequence active, or Handsfree off). */
   handsfreeAssistDisabled: boolean;
+  timingAssist: boolean;
+  /** True when Timing Assist toggle must not change (timing locked or sequence active). */
+  timingAssistDisabled: boolean;
   latencyMs: number;
   kiteSetupTempo: number;
   kiteSetupTimeSignatureTop: number;
@@ -121,6 +127,7 @@ export type KiteLoopV4LooperHandlers = {
   onEndSession: () => void;
   onLoopModeChange: (value: SoloLooperMode) => void;
   onHandsfreeAssistChange: (on: boolean) => void;
+  onTimingAssistChange: (on: boolean) => void;
   guidedRtlWizard: GuidedRtlWizardState;
   onBeginGuidedRtlWizard: () => void;
   onStartGuidedRtlCapture: () => void;
@@ -878,6 +885,7 @@ type TrackColumnProps = {
   registerTrackFillEl: (trackIndex: 1 | 2 | 3 | 4, el: HTMLDivElement | null) => void;
   gridLikeMode: boolean;
   compact?: boolean;
+  assistBoundaryCountdown?: RunwayDisplayLabel | null;
 };
 
 type BarCountStripProps = {
@@ -960,10 +968,16 @@ function BarCountStrip({
   );
 }
 
-function TrackColumn({ lane, registerTrackFillEl, gridLikeMode, compact = false }: TrackColumnProps): React.JSX.Element {
+function TrackColumn({
+  lane,
+  registerTrackFillEl,
+  gridLikeMode,
+  compact = false,
+  assistBoundaryCountdown = null,
+}: TrackColumnProps): React.JSX.Element {
   const visual = mapLaneToRecVisual(lane);
   const cfg = REC_CFG[visual];
-  const isPulsing = visual === "waiting";
+  const isPulsing = visual === "waiting" && assistBoundaryCountdown == null;
   const isMaster = lane.trackIndex === 1;
   const faderPct = Math.min(100, Math.max(0, Math.round(lane.volume * 100)));
   const ambient = resolveAmbientBackdropStyle(lane.workletMode, lane.progress);
@@ -999,6 +1013,15 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode, compact = false 
     e.stopPropagation();
     if (!lane.resetDisabled) lane.onResetTrack();
   };
+
+  const recLabel =
+    isMaster && visual === "idle" && !lane.isEngineRecording
+      ? "START"
+      : visual === "waiting" && assistBoundaryCountdown != null
+        ? assistBoundaryCountdown === "GO"
+          ? "GO"
+          : String(assistBoundaryCountdown)
+        : cfg.lbl;
 
   return (
     <div
@@ -1147,7 +1170,7 @@ function TrackColumn({ lane, registerTrackFillEl, gridLikeMode, compact = false 
           }}
         />
         <span style={{ fontSize: 7, letterSpacing: "0.12em", color: cfg.col, textTransform: "uppercase" }}>
-          {isMaster && visual === "idle" && !lane.isEngineRecording ? "START" : cfg.lbl}
+          {recLabel}
         </span>
       </motion.button>
 
@@ -1553,6 +1576,34 @@ function SettingsModal({
                   </span>
                 ) : null}
               </div>
+              <div
+                style={{
+                  borderTop: "1px solid rgba(255,255,255,0.05)",
+                  paddingTop: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10,
+                  marginTop: 4,
+                  pointerEvents: locked ? "none" : undefined,
+                  opacity: locked ? 0.45 : 1,
+                }}
+              >
+                {sLabel("Assists")}
+                <Toggle
+                  checked={cfg.timingAssist}
+                  onChange={handlers.onTimingAssistChange}
+                  label="Timing Assist"
+                  sublabel="3-2-1-GO at loop boundary before Grid overdubs and Handsfree Assist takes"
+                  disabled={cfg.timingAssistDisabled}
+                />
+                <Toggle
+                  checked={cfg.handsfreeAssist}
+                  onChange={handlers.onHandsfreeAssistChange}
+                  label="Handsfree Assist"
+                  sublabel="Wait one full loop between takes"
+                  disabled={cfg.handsfreeAssistDisabled}
+                />
+              </div>
             </div>
           </div>
 
@@ -1576,13 +1627,6 @@ function SettingsModal({
                 onChange={handleHandsfreeToggle}
                 label="Handsfree Mode"
                 sublabel="Auto-record tracks 1→4 at loop boundaries"
-              />
-              <Toggle
-                checked={cfg.handsfreeAssist}
-                onChange={handlers.onHandsfreeAssistChange}
-                label="Handsfree Assist"
-                sublabel="Wait one full loop between takes"
-                disabled={cfg.handsfreeAssistDisabled}
               />
               <span style={{ color: "rgba(255,255,255,0.28)", fontSize: 9, lineHeight: 1.45 }}>
                 Set bar length on each track lane below.
@@ -1923,6 +1967,62 @@ function RunwayOverlay({ countdown }: RunwayOverlayProps): React.JSX.Element {
             ? "0 0 80px rgba(34,197,94,0.8), 0 0 160px rgba(34,197,94,0.4)"
             : "0 0 80px rgba(255,69,0,0.8), 0 0 160px rgba(255,69,0,0.4)",
           userSelect: "none",
+        }}
+      >
+        {display}
+      </span>
+    </motion.div>
+  );
+}
+
+type AssistBoundaryCueProps = {
+  countdown: RunwayDisplayLabel;
+  trackIndex: 1 | 2 | 3 | 4;
+};
+
+function AssistBoundaryCue({ countdown, trackIndex }: AssistBoundaryCueProps): React.JSX.Element {
+  const display = countdown === "GO" ? "GO" : String(countdown);
+  const isGo = countdown === "GO";
+  const accent = isGo ? EMERALD : ORANGE;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10, scale: 0.88 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -8, scale: 0.94 }}
+      transition={{ type: "spring", stiffness: 380, damping: 26 }}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 10,
+        width: "100%",
+        marginBottom: 6,
+        pointerEvents: "none",
+        userSelect: "none",
+      }}
+    >
+      <span
+        style={{
+          fontSize: 10,
+          letterSpacing: "0.18em",
+          textTransform: "uppercase",
+          color: "rgba(255,255,255,0.5)",
+          textShadow: "0 1px 3px rgba(0,0,0,0.85)",
+        }}
+      >
+        Track {trackIndex}
+      </span>
+      <span
+        style={{
+          fontFamily: "monospace",
+          fontWeight: 700,
+          lineHeight: 1,
+          fontSize: isGo ? "clamp(72px, 14vw, 128px)" : "clamp(64px, 12vw, 112px)",
+          color: accent,
+          textShadow: isGo
+            ? "0 0 48px rgba(34,197,94,0.65), 0 0 96px rgba(34,197,94,0.35), 0 2px 8px rgba(0,0,0,0.8)"
+            : "0 0 48px rgba(255,69,0,0.6), 0 0 96px rgba(255,69,0,0.28), 0 2px 8px rgba(0,0,0,0.8)",
         }}
       >
         {display}
@@ -2852,6 +2952,16 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           gap: isAirSynthActive ? 8 : 12,
         }}
       >
+        <AnimatePresence>
+          {looperState.assistBoundaryCountdown != null &&
+          looperState.assistBoundaryTrackIndex != null ? (
+            <AssistBoundaryCue
+              countdown={looperState.assistBoundaryCountdown}
+              trackIndex={looperState.assistBoundaryTrackIndex}
+            />
+          ) : null}
+        </AnimatePresence>
+
         <p
           style={{
             color: "rgba(255, 255, 255, 0.95)",
@@ -2984,6 +3094,11 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 registerTrackFillEl={registerTrackFillEl}
                 gridLikeMode={gridLikeMode}
                 compact={isAirSynthActive}
+                assistBoundaryCountdown={
+                  looperState.assistBoundaryTrackIndex === lane.trackIndex
+                    ? looperState.assistBoundaryCountdown
+                    : null
+                }
               />
             ))}
           </div>

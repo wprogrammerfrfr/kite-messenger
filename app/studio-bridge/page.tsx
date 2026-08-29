@@ -341,6 +341,7 @@ export default function StudioBridgePage() {
   const guidedRtlWizard = engineState.guidedRtlWizard;
   const soloLooperMode = engineState.soloLooperMode;
   const handsfreeAssist = engineState.handsfreeAssist;
+  const timingAssist = engineState.timingAssist;
   const soloTrackBarCounts = engineState.soloTrackBarCounts;
   const soloTrackBarCountsLocked = engineState.soloTrackBarCountsLocked;
   const handsfreeSequenceActive = engineState.handsfreeSequenceActive;
@@ -384,6 +385,8 @@ export default function StudioBridgePage() {
   const loopProgress = presenterState.loopProgress;
   const recordingArmedCountdown = presenterState.recordingArmedCountdown;
   const soloRunwayDisplay = presenterState.soloRunwayDisplay;
+  const assistBoundaryCountdown = presenterState.assistBoundaryCountdown;
+  const assistBoundaryTrackIndex = presenterState.assistBoundaryTrackIndex;
   const soloTrackSlotUi = presenterState.soloTrackSlotUi;
   const focusedTrackIndex = presenterState.focusedTrackIndex;
   const soloOverdubArmedTrackIndex = presenterState.soloOverdubArmedTrackIndex;
@@ -437,6 +440,7 @@ export default function StudioBridgePage() {
   const setSoloInputGain = engineActions.setSoloInputGain;
   const setSoloLooperMode = engineActions.setSoloLooperMode;
   const setHandsfreeAssist = engineActions.setHandsfreeAssist;
+  const setTimingAssist = engineActions.setTimingAssist;
   const setSoloTrackBarCount = engineActions.setSoloTrackBarCount;
   const setKiteSetupTempo = engineActions.setKiteSetupTempo;
   const setKiteSetupTimeSignatureTop = engineActions.setKiteSetupTimeSignatureTop;
@@ -2201,6 +2205,8 @@ export default function StudioBridgePage() {
             sessionRecorderState: soloSessionRecorderState,
             recordingArmedCountdown,
             runwayDisplay: soloRunwayDisplay,
+            assistBoundaryCountdown,
+            assistBoundaryTrackIndex,
             runwayPhase: isRecordingArmed ? "armed" : "idle",
             runwayVisualOnly: isVisualMetronomeOnly,
             loopProgress,
@@ -2217,6 +2223,11 @@ export default function StudioBridgePage() {
               soloLooperState !== "idle" ||
               handsfreeSequenceActive ||
               soloLooperMode !== "handsfree",
+            timingAssist,
+            timingAssistDisabled:
+              isRecordingArmed ||
+              soloLooperState !== "idle" ||
+              handsfreeSequenceActive,
             latencyMs: soloLooperLatencyMs,
             kiteSetupTempo,
             kiteSetupTimeSignatureTop,
@@ -2233,6 +2244,7 @@ export default function StudioBridgePage() {
             onEndSession: returnToLobby,
             onLoopModeChange: setSoloLooperMode,
             onHandsfreeAssistChange: setHandsfreeAssist,
+            onTimingAssistChange: setTimingAssist,
             guidedRtlWizard,
             onBeginGuidedRtlWizard: beginGuidedRtlWizard,
             onStartGuidedRtlCapture: startGuidedRtlCapture,

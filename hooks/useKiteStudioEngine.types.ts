@@ -186,6 +186,8 @@ export type KiteEngineState = {
   soloLooperMode: SoloLooperMode;
   /** Handsfree Assist: one full loop between takes when true; immediate handoff when false. */
   handsfreeAssist: boolean;
+  /** Timing Assist: 3-2-1-GO before each track records when true. */
+  timingAssist: boolean;
   /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
   handsfreeSequenceActive: boolean;
   /** Per-track bar counts (1–4 lanes); global BPM/time signature apply. */
@@ -332,6 +334,7 @@ export type KiteEngineActions = {
   setSoloInputGain: (gain: number) => void;
   setSoloLooperMode: (mode: SoloLooperMode) => void;
   setHandsfreeAssist: (on: boolean) => void;
+  setTimingAssist: (on: boolean) => void;
   setSoloTrackBarCount: (trackIndex: 1 | 2 | 3 | 4, bars: number) => void;
   setKiteSetupTempo: (bpm: number) => void;
   setKiteSetupTimeSignatureTop: (top: number) => void;
@@ -393,6 +396,9 @@ export type KitePresenterState = {
   loopProgress: number;
   recordingArmedCountdown: number | null;
   soloRunwayDisplay: RunwayDisplayLabel | null;
+  /** Subtle boundary-aligned Timing Assist cue (Grid overdub / Handsfree Assist). */
+  assistBoundaryCountdown: RunwayDisplayLabel | null;
+  assistBoundaryTrackIndex: 1 | 2 | 3 | 4 | null;
   soloTrackSlotUi: SoloLooperPlaybackUiStateEvent["slots"] | null;
   focusedTrackIndex: 1 | 2 | 3 | 4;
   soloOverdubArmedTrackIndex: number | null;

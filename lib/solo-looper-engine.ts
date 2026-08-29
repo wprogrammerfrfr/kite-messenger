@@ -131,6 +131,13 @@ export type SoloLooperHandsfreeAdvanceArmedEvent = {
   sampleRate: number;
 };
 
+export type SoloLooperHandsfreeCountdownReadyEvent = {
+  type: "HANDSFREE_COUNTDOWN_READY";
+  fromTrack: number;
+  toTrack: number;
+  sampleRate: number;
+};
+
 export type SoloLooperHandsfreeSequenceCompleteEvent = {
   type: "HANDSFREE_SEQUENCE_COMPLETE";
   trackIndex: 4;
@@ -147,6 +154,7 @@ export type SoloLooperEngineEvent =
   | SoloLooperGuidedCalCaptureCompleteEvent
   | SoloLooperHandsfreeTrackAdvancedEvent
   | SoloLooperHandsfreeAdvanceArmedEvent
+  | SoloLooperHandsfreeCountdownReadyEvent
   | SoloLooperHandsfreeSequenceCompleteEvent
   | SoloLooperPlaybackUiStateEvent
   | SoloLooperOverdubArmedEvent
@@ -199,6 +207,8 @@ export type SoloLooperStartRecordingParams = {
   handsfreeTrackTargets?: readonly [number, number, number, number];
   /** Handsfree: true = one-loop gap between takes; false = immediate handoff. */
   handsfreeAssist?: boolean;
+  /** Handsfree: true = 3-2-1-GO before each next-track handoff when Handsfree Assist is on. */
+  timingAssist?: boolean;
 };
 
 export type SoloLooperSetTrackTargetLengthParams = {
@@ -264,6 +274,8 @@ export type SoloLooperEngine = {
   armOverdub(params: SoloLooperArmOverdubParams): void;
   /** Disarm overdub; optional trackIndex must match armed track (worklet A4). */
   disarmOverdub(trackIndex?: 2 | 3 | 4): void;
+  /** Handsfree timing assist: begin next track after main-thread 3-2-1-GO completes. */
+  confirmHandsfreeCountdown(): void;
   /**
    * Guided wizard: allocate a transport-neutral clap buffer for `targetFrames`.
    * Optional `countInFrames` arms a 4-beat countdown before capture writes begin.
@@ -461,6 +473,7 @@ export async function buildSoloLooperEngine(
       "GUIDED_CAL_CAPTURE_COMPLETE",
       "HANDSFREE_TRACK_ADVANCED",
       "HANDSFREE_ADVANCE_ARMED",
+      "HANDSFREE_COUNTDOWN_READY",
       "HANDSFREE_SEQUENCE_COMPLETE",
     ] as const;
     if (allowlist.includes(msgType as (typeof allowlist)[number])) {
@@ -738,6 +751,10 @@ export async function buildSoloLooperEngine(
         ...(trackIndex !== undefined ? { trackIndex } : {}),
       });
     },
+    confirmHandsfreeCountdown(): void {
+      if (tornDown) return;
+      workletNode.port.postMessage({ type: "CONFIRM_HANDSFREE_COUNTDOWN" });
+    },
     beginGuidedCalibration(targetFrames: number, countInFrames?: number): void {
       if (tornDown) return;
       const frames = Math.floor(Number(targetFrames));
@@ -794,6 +811,9 @@ export async function buildSoloLooperEngine(
           : {}),
         ...(params?.handsfreeAssist !== undefined
           ? { handsfreeAssist: params.handsfreeAssist }
+          : {}),
+        ...(params?.timingAssist !== undefined
+          ? { timingAssist: params.timingAssist }
           : {}),
       });
     },

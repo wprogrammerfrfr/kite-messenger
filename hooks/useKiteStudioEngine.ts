@@ -186,6 +186,21 @@ function logDriftDiagnostic(
   if (process.env.NODE_ENV === "production") return;
   console.debug(`[Kite drift] ${label}`, { mode, ...payload });
 }
+
+function shouldUseGridBoundaryTimingAssist(
+  mode: SoloLooperMode,
+  timingAssist: boolean
+): boolean {
+  return timingAssist && mode === "grid";
+}
+
+function shouldUseHandsfreeAssistBoundaryTimingAssist(
+  mode: SoloLooperMode,
+  timingAssist: boolean,
+  handsfreeAssist: boolean
+): boolean {
+  return timingAssist && mode === "handsfree" && handsfreeAssist;
+}
 type JamSetupLockMessage = {
   type: "JAM_SETUP_LOCK";
   action: JamSetupLockAction;
@@ -517,6 +532,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [recordingArmedCountdown, setRecordingArmedCountdown] = useState<number | null>(null);
   /** Solo 4-beat runway: 3 → 2 → 1 → GO, driven by `startLooperRunway`. */
   const [soloRunwayDisplay, setSoloRunwayDisplay] = useState<RunwayDisplayLabel | null>(null);
+  /** Boundary-aligned Timing Assist cue (separate from Track 1 armed runway). */
+  const [assistBoundaryCountdown, setAssistBoundaryCountdown] = useState<RunwayDisplayLabel | null>(
+    null
+  );
+  const [assistBoundaryTrackIndex, setAssistBoundaryTrackIndex] = useState<1 | 2 | 3 | 4 | null>(
+    null
+  );
   /** Latest per-slot snapshot from solo worklet (playback/recording cursors). */
   const [soloTrackSlotUi, setSoloTrackSlotUi] = useState<SoloLooperPlaybackUiStateEvent["slots"] | null>(
     null
@@ -559,6 +581,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloLooperModeRef = useRef(soloLooperMode);
   const [handsfreeAssist, setHandsfreeAssistState] = useState(true);
   const handsfreeAssistRef = useRef(true);
+  const [timingAssist, setTimingAssistState] = useState(false);
+  const timingAssistRef = useRef(false);
   const [handsfreeSequenceActive, setHandsfreeSequenceActive] = useState(false);
   const handsfreeSequenceActiveRef = useRef(false);
   const [soloTrackBarCounts, setSoloTrackBarCounts] = useState<[number, number, number, number]>([
@@ -836,6 +860,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloCountInBeatSecRef = useRef(0);
   const soloCountInDownbeatRafRef = useRef<number | null>(null);
   const soloRunwayGoClearTimerRef = useRef<number | null>(null);
+  const assistBoundaryPumpRef = useRef<MetronomePumpHandle | null>(null);
+  const assistBoundaryGenerationRef = useRef(0);
+  const assistBoundaryScheduleRafRef = useRef<number | null>(null);
+  const assistBoundaryGoClearTimerRef = useRef<number | null>(null);
   const scheduledMetronomeOscillatorsRef = useRef<Set<OscillatorNode>>(new Set());
   const kiteLoopChunksRef = useRef<ReturnType<typeof createLoadIntervalChunks> | null>(null);
   const kiteLoopChunkSenderRef = useRef<KiteDataChannelChunkSender | null>(null);
@@ -1178,9 +1206,18 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     handsfreeAssistRef.current = handsfreeAssist;
   }, [handsfreeAssist]);
 
+  useEffect(() => {
+    timingAssistRef.current = timingAssist;
+  }, [timingAssist]);
+
   const setHandsfreeAssist = useCallback((on: boolean) => {
     handsfreeAssistRef.current = on;
     setHandsfreeAssistState(on);
+  }, []);
+
+  const setTimingAssist = useCallback((on: boolean) => {
+    timingAssistRef.current = on;
+    setTimingAssistState(on);
   }, []);
 
   useEffect(() => {
@@ -3779,6 +3816,22 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setVisualActiveBeatInBar(null);
   }, []);
 
+  const clearAssistBoundaryCountdown = useCallback(() => {
+    assistBoundaryGenerationRef.current += 1;
+    if (assistBoundaryScheduleRafRef.current !== null) {
+      cancelAnimationFrame(assistBoundaryScheduleRafRef.current);
+      assistBoundaryScheduleRafRef.current = null;
+    }
+    if (assistBoundaryGoClearTimerRef.current !== null) {
+      clearTimeout(assistBoundaryGoClearTimerRef.current);
+      assistBoundaryGoClearTimerRef.current = null;
+    }
+    assistBoundaryPumpRef.current?.teardown();
+    assistBoundaryPumpRef.current = null;
+    setAssistBoundaryCountdown(null);
+    setAssistBoundaryTrackIndex(null);
+  }, []);
+
   const cancelSoloCountInDownbeatWait = useCallback(() => {
     if (soloCountInDownbeatRafRef.current !== null) {
       cancelAnimationFrame(soloCountInDownbeatRafRef.current);
@@ -3853,6 +3906,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         void stopSoloSessionRecording();
       }
       teardownSoloCountInPump();
+      clearAssistBoundaryCountdown();
       if (!preserveTiming) {
         kiteIntervalTimingRef.current = null;
       }
@@ -3939,6 +3993,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       stopSoloSessionRecording,
       teardownAllInterfaceLiveMonitorGraphs,
       teardownSoloCountInPump,
+      clearAssistBoundaryCountdown,
     ]
   );
 
@@ -4099,6 +4154,309 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setVisualActiveBeatInBar(null);
   }, []);
 
+  const runSoloRecordingRunway = useCallback(
+    async (params: {
+      timing: { bpm: number; beatsPerBar: number };
+      onDownbeat: () => void | Promise<void>;
+      showArmedOverlay?: boolean;
+    }): Promise<boolean> => {
+      const ctx = studioAudioContextRef.current;
+      if (!ctx || ctx.state === "closed") return false;
+      await ctx.resume();
+      if (!mountedRef.current || ctx.state !== "running") return false;
+
+      const showArmedOverlay = params.showArmedOverlay !== false;
+      if (showArmedOverlay) {
+        clearSoloRunwayDisplay();
+        setRecordingArmedCountdown(3);
+        isRecordingArmedRef.current = true;
+        setIsRecordingArmed(true);
+      } else {
+        clearSoloRunwayDisplay();
+      }
+
+      soloCountInPumpGenerationRef.current += 1;
+      const gen = soloCountInPumpGenerationRef.current;
+
+      try {
+        const pump = await startLooperRunway({
+          audioContext: ctx,
+          bpm: params.timing.bpm,
+          beatCount: params.timing.beatsPerBar,
+          isAlive: () => mountedRef.current && gen === soloCountInPumpGenerationRef.current,
+          onBeat: (payload) => {
+            if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
+
+            if (soloRunwayGoClearTimerRef.current !== null) {
+              clearTimeout(soloRunwayGoClearTimerRef.current);
+              soloRunwayGoClearTimerRef.current = null;
+            }
+
+            setSoloRunwayDisplay(payload.displayLabel);
+            if (payload.displayLabel === "3") {
+              setVisualActiveBeatInBar(0);
+            } else if (payload.displayLabel === "2") {
+              setVisualActiveBeatInBar(1);
+            } else if (payload.displayLabel === "1") {
+              setVisualActiveBeatInBar(2);
+            } else if (payload.displayLabel === "GO") {
+              setVisualActiveBeatInBar(3);
+            }
+
+            if (payload.playClick) {
+              playSoloMetronomeClick(payload.isGoBeat, payload.contextTime, true);
+            }
+
+            if (!payload.isGoBeat) {
+              const count =
+                payload.displayLabel === "3"
+                  ? 3
+                  : payload.displayLabel === "2"
+                    ? 2
+                    : payload.displayLabel === "1"
+                      ? 1
+                      : null;
+              if (count !== null && showArmedOverlay) {
+                setRecordingArmedCountdown(count);
+              }
+              return;
+            }
+
+            soloRunwayGoClearTimerRef.current = window.setTimeout(() => {
+              soloRunwayGoClearTimerRef.current = null;
+              if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
+              setSoloRunwayDisplay(null);
+            }, 400);
+
+            const beatDurationSeconds = 60 / Math.max(1, params.timing.bpm);
+            const recordAnchorContextSec = payload.contextTime + beatDurationSeconds;
+            soloCountInBeatSecRef.current = beatDurationSeconds;
+            soloCountInEndAtContextSecRef.current = recordAnchorContextSec;
+
+            scheduleSoloCountInDownbeat({
+              ctx,
+              downbeatContextSec: recordAnchorContextSec,
+              gen,
+              onDownbeat: async () => {
+                if (showArmedOverlay) {
+                  isRecordingArmedRef.current = false;
+                  setIsRecordingArmed(false);
+                  setRecordingArmedCountdown(null);
+                }
+                await Promise.resolve(params.onDownbeat());
+              },
+            });
+          },
+          onRunwayEnd: () => {
+            if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
+            soloCountInPumpRef.current?.teardown();
+            soloCountInPumpRef.current = null;
+          },
+        });
+
+        if (gen !== soloCountInPumpGenerationRef.current) {
+          pump.teardown();
+          if (showArmedOverlay) {
+            isRecordingArmedRef.current = false;
+            setIsRecordingArmed(false);
+            setRecordingArmedCountdown(null);
+          }
+          clearSoloRunwayDisplay();
+          return false;
+        }
+        if (studioAudioContextRef.current?.state !== "running") {
+          pump.teardown();
+          if (showArmedOverlay) {
+            isRecordingArmedRef.current = false;
+            setIsRecordingArmed(false);
+            setRecordingArmedCountdown(null);
+          }
+          clearSoloRunwayDisplay();
+          return false;
+        }
+        soloCountInPumpRef.current = pump;
+        return true;
+      } catch (pumpErr) {
+        console.error("[Solo runway] AudioWorklet pump failed:", pumpErr);
+        teardownSoloCountInPump();
+        if (showArmedOverlay) {
+          isRecordingArmedRef.current = false;
+          setIsRecordingArmed(false);
+          setRecordingArmedCountdown(null);
+        }
+        throw pumpErr;
+      }
+    },
+    [
+      clearSoloRunwayDisplay,
+      playSoloMetronomeClick,
+      scheduleSoloCountInDownbeat,
+      teardownSoloCountInPump,
+    ]
+  );
+
+  const resolveAssistBoundaryTiming = useCallback((): { bpm: number; beatsPerBar: number } => {
+    const timingSnapshot = kiteIntervalTimingRef.current;
+    const bpm = Math.max(
+      1,
+      Math.round(timingSnapshot?.bpm ?? kiteSetupTempoRef.current ?? 120)
+    );
+    const beatsPerBar = Math.max(
+      1,
+      Math.round(
+        timingSnapshot?.beatsPerBar ??
+          timingSnapshot?.timeSignatureTop ??
+          kiteSetupTimeSignatureTopRef.current ??
+          4
+      )
+    );
+    return { bpm, beatsPerBar };
+  }, []);
+
+  const computeMasterLoopBoundaryGoAt = useCallback((): number | null => {
+    const ctx = studioAudioContextRef.current;
+    const masterFrames = masterLoopIntervalFramesRef.current;
+    const masterSlot = soloTrackSlotUiLatestRef.current?.find((s) => s.trackIndex === 1);
+    if (
+      !ctx ||
+      ctx.state !== "running" ||
+      masterFrames == null ||
+      masterFrames <= 0 ||
+      !masterSlot ||
+      masterSlot.mode !== "playing"
+    ) {
+      return null;
+    }
+    const sampleRate = Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
+    const playbackCursor = Math.max(0, Math.min(masterFrames, masterSlot.playbackCursor));
+    const framesRemaining = Math.max(0, masterFrames - playbackCursor);
+    return ctx.currentTime + framesRemaining / sampleRate;
+  }, []);
+
+  const runBoundaryAssistCountdown = useCallback(
+    async (params: {
+      timing: { bpm: number; beatsPerBar: number };
+      goAtContextSec: number;
+      trackIndex: 1 | 2 | 3 | 4;
+      onGo?: () => void;
+    }): Promise<void> => {
+      const ctx = studioAudioContextRef.current;
+      if (!ctx || ctx.state !== "running" || !mountedRef.current) return;
+
+      assistBoundaryGenerationRef.current += 1;
+      const gen = assistBoundaryGenerationRef.current;
+      setAssistBoundaryTrackIndex(params.trackIndex);
+
+      try {
+        const pump = await startLooperRunway({
+          audioContext: ctx,
+          bpm: params.timing.bpm,
+          beatCount: params.timing.beatsPerBar,
+          goAtContextSec: params.goAtContextSec,
+          isAlive: () => mountedRef.current && gen === assistBoundaryGenerationRef.current,
+          onBeat: (payload) => {
+            if (!mountedRef.current || gen !== assistBoundaryGenerationRef.current) return;
+
+            if (assistBoundaryGoClearTimerRef.current !== null) {
+              clearTimeout(assistBoundaryGoClearTimerRef.current);
+              assistBoundaryGoClearTimerRef.current = null;
+            }
+
+            setAssistBoundaryCountdown(payload.displayLabel);
+
+            if (payload.playClick) {
+              playSoloMetronomeClick(payload.isGoBeat, payload.contextTime, true);
+            }
+
+            if (!payload.isGoBeat) {
+              return;
+            }
+
+            assistBoundaryGoClearTimerRef.current = window.setTimeout(() => {
+              assistBoundaryGoClearTimerRef.current = null;
+              if (!mountedRef.current || gen !== assistBoundaryGenerationRef.current) return;
+              setAssistBoundaryCountdown(null);
+              setAssistBoundaryTrackIndex(null);
+            }, 400);
+
+            params.onGo?.();
+          },
+          onRunwayEnd: () => {
+            if (!mountedRef.current || gen !== assistBoundaryGenerationRef.current) return;
+            assistBoundaryPumpRef.current?.teardown();
+            assistBoundaryPumpRef.current = null;
+          },
+        });
+
+        if (gen !== assistBoundaryGenerationRef.current) {
+          pump.teardown();
+          return;
+        }
+        if (studioAudioContextRef.current?.state !== "running") {
+          pump.teardown();
+          return;
+        }
+        assistBoundaryPumpRef.current = pump;
+      } catch (err) {
+        console.error("[Boundary assist countdown] pump failed:", err);
+        clearAssistBoundaryCountdown();
+        throw err;
+      }
+    },
+    [clearAssistBoundaryCountdown, playSoloMetronomeClick]
+  );
+
+  const scheduleBoundaryAssistCountdown = useCallback(
+    (params: {
+      trackIndex: 1 | 2 | 3 | 4;
+      timing: { bpm: number; beatsPerBar: number };
+      getBoundaryGoAtContextSec: () => number | null;
+      onGo?: () => void;
+    }) => {
+      clearAssistBoundaryCountdown();
+      assistBoundaryGenerationRef.current += 1;
+      const gen = assistBoundaryGenerationRef.current;
+      const beatSec = 60 / Math.max(1, params.timing.bpm);
+      const runwayDurationSec = Math.max(0, (params.timing.beatsPerBar - 1) * beatSec);
+
+      const tick = (): void => {
+        if (!mountedRef.current || gen !== assistBoundaryGenerationRef.current) {
+          assistBoundaryScheduleRafRef.current = null;
+          return;
+        }
+        const ctx = studioAudioContextRef.current;
+        if (!ctx || ctx.state !== "running") {
+          assistBoundaryScheduleRafRef.current = requestAnimationFrame(tick);
+          return;
+        }
+        const boundaryGoAt = params.getBoundaryGoAtContextSec();
+        if (boundaryGoAt == null || !Number.isFinite(boundaryGoAt)) {
+          assistBoundaryScheduleRafRef.current = requestAnimationFrame(tick);
+          return;
+        }
+        const cueStartAt = boundaryGoAt - runwayDurationSec;
+        const eps = ctx.sampleRate > 0 ? 2 / ctx.sampleRate : 0.001;
+        if (ctx.currentTime + eps >= cueStartAt) {
+          assistBoundaryScheduleRafRef.current = null;
+          void runBoundaryAssistCountdown({
+            timing: params.timing,
+            goAtContextSec: boundaryGoAt,
+            trackIndex: params.trackIndex,
+            onGo: params.onGo,
+          }).catch((err) => {
+            console.error("[Boundary assist countdown] schedule failed:", err);
+            params.onGo?.();
+          });
+          return;
+        }
+        assistBoundaryScheduleRafRef.current = requestAnimationFrame(tick);
+      };
+
+      assistBoundaryScheduleRafRef.current = requestAnimationFrame(tick);
+    },
+    [clearAssistBoundaryCountdown, runBoundaryAssistCountdown]
+  );
+
   const handleSoloLooperEvent = useCallback(
     (event: SoloLooperEngineEvent, ctx: AudioContext) => {
       /*
@@ -4182,6 +4540,19 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         if (!mountedRef.current) return;
         soloOverdubArmedTrackIndexRef.current = event.trackIndex;
         setSoloOverdubArmedTrackIndex(event.trackIndex);
+        if (
+          shouldUseGridBoundaryTimingAssist(
+            soloLooperModeRef.current,
+            timingAssistRef.current
+          )
+        ) {
+          const trackIndex = event.trackIndex as 2 | 3 | 4;
+          scheduleBoundaryAssistCountdown({
+            trackIndex,
+            timing: resolveAssistBoundaryTiming(),
+            getBoundaryGoAtContextSec: computeMasterLoopBoundaryGoAt,
+          });
+        }
         return;
       }
       if (event.type === "OVERDUB_ARM_REJECTED") {
@@ -4210,6 +4581,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
       if (event.type === "OVERDUB_STARTED") {
         if (!mountedRef.current) return;
+        clearAssistBoundaryCountdown();
         if (soloLooperModeRef.current === "free") {
           logDriftDiagnostic("OVERDUB_STARTED", "free", {
             trackIndex: event.trackIndex,
@@ -4233,6 +4605,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           soloOverdubArmedTrackIndexRef.current = null;
           setSoloOverdubArmedTrackIndex(null);
         }
+        clearAssistBoundaryCountdown();
         return;
       }
       if (event.type === "HANDSFREE_ADVANCE_ARMED") {
@@ -4246,10 +4619,41 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         setLoopProgress(100);
         soloLooperStateRef.current = "captured";
         setSoloLooperState("captured");
+        if (
+          shouldUseHandsfreeAssistBoundaryTimingAssist(
+            soloLooperModeRef.current,
+            timingAssistRef.current,
+            handsfreeAssistRef.current
+          )
+        ) {
+          const ctx = studioAudioContextRef.current;
+          const masterFrames = masterLoopIntervalFramesRef.current;
+          const toTrack = Math.max(2, Math.min(4, Math.round(event.toTrack))) as 2 | 3 | 4;
+          if (ctx && masterFrames != null && masterFrames > 0) {
+            const sampleRate =
+              Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
+            const listenThroughSec = masterFrames / sampleRate;
+            const boundaryGoAt = ctx.currentTime + listenThroughSec;
+            scheduleBoundaryAssistCountdown({
+              trackIndex: toTrack,
+              timing: resolveAssistBoundaryTiming(),
+              getBoundaryGoAtContextSec: () => boundaryGoAt,
+              onGo: () => {
+                soloLooperEngineRef.current?.confirmHandsfreeCountdown();
+              },
+            });
+          }
+        }
+        return;
+      }
+      if (event.type === "HANDSFREE_COUNTDOWN_READY") {
+        if (!mountedRef.current) return;
+        soloLooperEngineRef.current?.confirmHandsfreeCountdown();
         return;
       }
       if (event.type === "HANDSFREE_TRACK_ADVANCED") {
         if (!mountedRef.current) return;
+        clearAssistBoundaryCountdown();
         syncActiveRecordTrackIndex(event.toTrack);
         soloLooperStateRef.current = "recording";
         setSoloLooperState("recording");
@@ -4506,7 +4910,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloLooperStateRef.current = "captured";
       setSoloLooperState("captured");
     },
-    [cancelScheduledMetronomeClicks, sessionId, syncActiveRecordTrackIndex, syncHandsfreeSequenceActive, buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale, clearGuidedRtlClockGuards, lockSoloTrackBarCount, clearAllSoloTrackBarCountLocks]
+    [cancelScheduledMetronomeClicks, clearAssistBoundaryCountdown, computeMasterLoopBoundaryGoAt, resolveAssistBoundaryTiming, runSoloRecordingRunway, scheduleBoundaryAssistCountdown, sessionId, syncActiveRecordTrackIndex, syncHandsfreeSequenceActive, buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale, clearGuidedRtlClockGuards, lockSoloTrackBarCount, clearAllSoloTrackBarCountLocks]
   );
 
   const ensureSoloLooperEngineBootstrapped = useCallback(async (): Promise<SoloLooperEngine> => {
@@ -4814,7 +5218,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           ...(targetLengthFrames !== undefined ? { targetLengthFrames } : {}),
           ...(handsfreeTrackTargets !== undefined ? { handsfreeTrackTargets } : {}),
           ...(soloLooperModeRef.current === "handsfree"
-            ? { handsfreeAssist: handsfreeAssistRef.current }
+            ? {
+                handsfreeAssist: handsfreeAssistRef.current,
+                timingAssist: timingAssistRef.current,
+              }
             : {}),
         };
       };
@@ -5890,111 +6297,22 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         setSoloLooperState("idle");
         setLoopProgress(0);
 
-        clearSoloRunwayDisplay();
-        setRecordingArmedCountdown(3);
-
-        soloCountInPumpGenerationRef.current += 1;
-        const gen = soloCountInPumpGenerationRef.current;
-
         try {
-          const pump = await startLooperRunway({
-            audioContext: ctx,
-            bpm: timing.bpm,
-            beatCount: timing.beatsPerBar,
-            isAlive: () => mountedRef.current && gen === soloCountInPumpGenerationRef.current,
-            onBeat: (payload) => {
-              if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
-
-              if (soloRunwayGoClearTimerRef.current !== null) {
-                clearTimeout(soloRunwayGoClearTimerRef.current);
-                soloRunwayGoClearTimerRef.current = null;
-              }
-
-              setSoloRunwayDisplay(payload.displayLabel);
-              if (payload.displayLabel === "3") {
-                setVisualActiveBeatInBar(0);
-              } else if (payload.displayLabel === "2") {
-                setVisualActiveBeatInBar(1);
-              } else if (payload.displayLabel === "1") {
-                setVisualActiveBeatInBar(2);
-              } else if (payload.displayLabel === "GO") {
-                setVisualActiveBeatInBar(3);
-              }
-
-              if (payload.playClick) {
-                playSoloMetronomeClick(payload.isGoBeat, payload.contextTime, true);
-              }
-
-              if (!payload.isGoBeat) {
-                const count =
-                  payload.displayLabel === "3"
-                    ? 3
-                    : payload.displayLabel === "2"
-                      ? 2
-                      : payload.displayLabel === "1"
-                        ? 1
-                        : null;
-                if (count !== null) {
-                  setRecordingArmedCountdown(count);
-                }
-                return;
-              }
-
-              soloRunwayGoClearTimerRef.current = window.setTimeout(() => {
-                soloRunwayGoClearTimerRef.current = null;
-                if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
-                setSoloRunwayDisplay(null);
-              }, 400);
-
-              const beatDurationSeconds = 60 / Math.max(1, timing.bpm);
-              const recordAnchorContextSec = payload.contextTime + beatDurationSeconds;
-              soloCountInBeatSecRef.current = beatDurationSeconds;
-              soloCountInEndAtContextSecRef.current = recordAnchorContextSec;
-
-              scheduleSoloCountInDownbeat({
-                ctx,
-                downbeatContextSec: recordAnchorContextSec,
-                gen,
-                onDownbeat: async () => {
-                  // Safari guard: resume before capture anchor — Safari may suspend during count-in.
-                  await ctx.resume();
-                  isRecordingArmedRef.current = false;
-                  setIsRecordingArmed(false);
-                  setRecordingArmedCountdown(null);
-                  soloLooperStateRef.current = "recording";
-                  setSoloLooperState("recording");
-                  syncActiveRecordTrackIndex(1);
-                  hasCapturedFirstKiteLoopRef.current = false;
-                  recordingStartBpmRef.current = timing.bpm;
-                  setVisualActiveBeatInBar(0);
-                  await startSoloLooper(timing, { recordStartContextSec: recordAnchorContextSec });
-                },
+          await runSoloRecordingRunway({
+            timing,
+            onDownbeat: async () => {
+              await ctx.resume();
+              soloLooperStateRef.current = "recording";
+              setSoloLooperState("recording");
+              syncActiveRecordTrackIndex(1);
+              hasCapturedFirstKiteLoopRef.current = false;
+              recordingStartBpmRef.current = timing.bpm;
+              setVisualActiveBeatInBar(0);
+              await startSoloLooper(timing, {
+                recordStartContextSec: soloCountInEndAtContextSecRef.current,
               });
             },
-            onRunwayEnd: () => {
-              if (!mountedRef.current || gen !== soloCountInPumpGenerationRef.current) return;
-              soloCountInPumpRef.current?.teardown();
-              soloCountInPumpRef.current = null;
-            },
           });
-
-          if (gen !== soloCountInPumpGenerationRef.current) {
-            pump.teardown();
-            isRecordingArmedRef.current = false;
-            setIsRecordingArmed(false);
-            setRecordingArmedCountdown(null);
-            clearSoloRunwayDisplay();
-            return;
-          }
-          if (studioAudioContextRef.current?.state !== "running") {
-            pump.teardown();
-            isRecordingArmedRef.current = false;
-            setIsRecordingArmed(false);
-            setRecordingArmedCountdown(null);
-            clearSoloRunwayDisplay();
-            return;
-          }
-          soloCountInPumpRef.current = pump;
         } catch (pumpErr) {
           console.error("[Solo runway] AudioWorklet pump failed:", pumpErr);
           teardownSoloCountInPump();
@@ -6017,8 +6335,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     clearSoloRunwayDisplay,
     deriveKiteTimingMetadata,
     ensureStudioAudioContext,
-    playSoloMetronomeClick,
-    scheduleSoloCountInDownbeat,
+    runSoloRecordingRunway,
     startSoloLooper,
     syncActiveRecordTrackIndex,
     teardownSoloCountInPump,
@@ -6356,6 +6673,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setIsRecordingArmed(false);
     setRecordingArmedCountdown(null);
     clearSoloRunwayDisplay();
+    clearAssistBoundaryCountdown();
     masterLoopIntervalFramesRef.current = null;
     isMasterPausedRef.current = false;
     soloMetronomeAnchorContextSecRef.current = null;
@@ -6379,7 +6697,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     handsfreeTrackTargetFramesRef.current = null;
     clearAllSoloTrackBarCountLocks();
     setKiteMode("solo");
-  }, [applyPedalFocus, cancelScheduledMetronomeClicks, cleanupKiteEngine, clearGuidedRtlTransitionTimer, clearSoloRunwayDisplay, stopGuidedRtlAudio, syncHandsfreeSequenceActive, clearAllSoloTrackBarCountLocks]);
+  }, [applyPedalFocus, cancelScheduledMetronomeClicks, cleanupKiteEngine, clearAssistBoundaryCountdown, clearGuidedRtlTransitionTimer, clearSoloRunwayDisplay, stopGuidedRtlAudio, syncHandsfreeSequenceActive, clearAllSoloTrackBarCountLocks]);
 
   const handleSoloTrackVolumeChange = useCallback((trackIndex: 1 | 2 | 3 | 4, linear: number) => {
     const g = Math.max(0, Math.min(1, linear));
@@ -8870,6 +9188,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     guidedRtlWizard,
     soloLooperMode,
     handsfreeAssist,
+    timingAssist,
     handsfreeSequenceActive,
     soloTrackBarCounts,
     soloTrackBarCountsLocked,
@@ -8941,6 +9260,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       guidedRtlWizard,
       soloLooperMode,
       handsfreeAssist,
+      timingAssist,
       handsfreeSequenceActive,
       soloTrackBarCounts,
       soloTrackBarCountsLocked,
@@ -9002,6 +9322,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setSoloInputGain,
     setSoloLooperMode,
     setHandsfreeAssist,
+    setTimingAssist,
     setSoloTrackBarCount,
     setKiteSetupTempo,
     setKiteSetupTimeSignatureTop,
@@ -9071,6 +9392,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       setSoloInputGain,
       setSoloLooperMode,
       setHandsfreeAssist,
+      setTimingAssist,
       setSoloTrackBarCount,
       setKiteSetupTempo,
       setKiteSetupTimeSignatureTop,
@@ -9155,6 +9477,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     loopProgress,
     recordingArmedCountdown,
     soloRunwayDisplay,
+    assistBoundaryCountdown,
+    assistBoundaryTrackIndex,
     soloTrackSlotUi,
     focusedTrackIndex,
     soloOverdubArmedTrackIndex,
@@ -9197,6 +9521,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       loopProgress,
       recordingArmedCountdown,
       soloRunwayDisplay,
+      assistBoundaryCountdown,
+      assistBoundaryTrackIndex,
       soloTrackSlotUi,
       focusedTrackIndex,
       soloOverdubArmedTrackIndex,

@@ -111,6 +111,16 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeAdvanceArm = null;
     /** Latched at START_RECORDING: true = one-loop gap; false = immediate handoff. */
     this.handsfreeAssist = false;
+    /** Latched at START_RECORDING: true = 3-2-1-GO before next-track handoff when Assist is on. */
+    this.timingAssist = false;
+    /** Deferred handoff after main-thread countdown completes. */
+    this.handsfreeCountdownPending = null;
+
+    /** Post-boundary mono tail capture for handsfree RTL fill (independent of active slot). */
+    this.handsfreeTailCapture = null;
+
+    /** Opt-in finalize diagnostics (no cost when false). */
+    this.finalizeDiagnosticsEnabled = false;
 
     /**
      * Wizard-only clap buffer — independent of trackSlots / transport.
@@ -162,6 +172,11 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
 
       if (data.type === "DISARM_OVERDUB") {
         this.disarmOverdub(data);
+        return;
+      }
+
+      if (data.type === "CONFIRM_HANDSFREE_COUNTDOWN") {
+        this.confirmHandsfreeCountdown();
         return;
       }
 
@@ -227,6 +242,11 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
 
       if (data.type === "CANCEL_GUIDED_CALIBRATION") {
         this.cancelGuidedCalibration();
+        return;
+      }
+
+      if (data.type === "SET_FINALIZE_DIAGNOSTICS") {
+        this.finalizeDiagnosticsEnabled = data.enabled === true;
         return;
       }
     };
@@ -376,7 +396,10 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeStartLatencyOffsetFrames = 0;
     this.handsfreeSequenceTargetFrames = null;
     this.handsfreeAdvanceArm = null;
+    this.handsfreeCountdownPending = null;
     this.handsfreeAssist = false;
+    this.timingAssist = false;
+    this.handsfreeTailCapture = null;
     for (let i = 0; i < MAX_TRACK_INDEX; i += 1) {
       this.trackSlots[i] = createEmptySlot();
     }
@@ -730,7 +753,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       this.activeTrackIndex = 1;
       this.handsfreeSequenceActive = false;
       this.handsfreeAdvanceArm = null;
+      this.handsfreeCountdownPending = null;
       this.handsfreeAssist = false;
+      this.timingAssist = false;
       this.handsfreeStartLatencyOffsetFrames = 0;
       this.handsfreeSequenceTargetFrames = null;
       for (let i = 0; i < MAX_TRACK_INDEX; i += 1) {
@@ -835,6 +860,243 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     return Math.max(0, Math.min(rawOffset, recordedFrames - 1));
   }
 
+  /** Clamp provision record cap to allocated buffer (prevents silent write drops). */
+  clampRecordProvisionFrames(slot, requestedCursor) {
+    const channels = Math.max(1, Math.floor(Number(slot.channelCount) || 1));
+    const bufferCap = slot.recordingBuffer
+      ? Math.floor(slot.recordingBuffer.length / channels)
+      : 0;
+    if (bufferCap > 0) {
+      return Math.max(0, Math.min(Math.floor(requestedCursor), bufferCap, this.maxRecordingFrames));
+    }
+    return Math.max(0, Math.min(Math.floor(requestedCursor), this.maxRecordingFrames));
+  }
+
+  /** Grid/handsfree extract start: epoch + RTL shift (pre-roll epoch for T1, 0 for boundary handoff). */
+  computeGridReadStartFrame(slot, latencyOffsetFrames) {
+    const epoch = slot.recordingEpochFrames || 0;
+    const latencyShift = this.resolveLatencyShiftFrames(slot, latencyOffsetFrames);
+    return epoch + latencyShift;
+  }
+
+  /** Frames still missing after musical boundary for latency-shifted handsfree extract. */
+  computeHandsfreeTailDeficit(slot, transportIntervalFrames, latencyOffsetFrames) {
+    const readStart = this.computeGridReadStartFrame(slot, latencyOffsetFrames);
+    const n = Math.max(1, Math.floor(Number(transportIntervalFrames) || 1));
+    const channels = Math.max(1, Math.floor(Number(slot.channelCount) || 1));
+    const bufferFrames = slot.recordingBuffer
+      ? Math.floor(slot.recordingBuffer.length / channels)
+      : 0;
+    const recordedFrames = Math.max(
+      0,
+      Math.min(Math.floor(Number(slot.recordCursor) || 0), bufferFrames)
+    );
+    return Math.max(0, readStart + n - recordedFrames);
+  }
+
+  armHandsfreeTailCapture(trackIndex, slot, transportIntervalFrames, latencyOffsetFrames, deficitFrames) {
+    const deficit = Math.max(0, Math.floor(Number(deficitFrames) || 0));
+    if (deficit <= 0) {
+      return;
+    }
+    const seamPad = Math.min(
+      LOOP_CROSSFADE_SAMPLES,
+      Math.floor(Math.max(1, transportIntervalFrames) / 2)
+    );
+    const framesNeeded = deficit + Math.max(0, seamPad);
+    this.handsfreeTailCapture = {
+      trackIndex,
+      channels: Math.max(1, Math.min(2, Math.floor(Number(slot.channelCount) || 1))),
+      intervalFrames: Math.max(1, Math.floor(Number(transportIntervalFrames) || 1)),
+      deficitFrames: deficit,
+      framesNeeded,
+      cursor: 0,
+      buffer: new Float32Array(Math.max(1, framesNeeded)),
+    };
+  }
+
+  writeHandsfreeTailCaptureFrame(monoSample) {
+    const cap = this.handsfreeTailCapture;
+    if (!cap || cap.cursor >= cap.framesNeeded) {
+      return;
+    }
+    cap.buffer[cap.cursor] = monoSample;
+    cap.cursor += 1;
+    if (cap.cursor >= cap.framesNeeded) {
+      this.patchHandsfreeTailCapture();
+    }
+  }
+
+  /** True when the loop head has a sharp attack — prefer tail-side seam to preserve punch. */
+  shouldPreferTailSeamOverHead(playback, channels, W) {
+    if (W < 2) {
+      return false;
+    }
+    let peak = 0;
+    let sum = 0;
+    for (let i = 0; i < W; i += 1) {
+      const s = Math.abs(playback[i * channels] || 0);
+      peak = Math.max(peak, s);
+      sum += s;
+    }
+    const avg = sum / W;
+    return peak > 0.05 && peak > avg * 2.5;
+  }
+
+  applyGridLikeSeamCrossfade(playback, recBuf, channels, n, readStartFrame, recordedFrames) {
+    const crossfadeSamples = Math.min(LOOP_CROSSFADE_SAMPLES, Math.floor(n / 2));
+    if (crossfadeSamples < 2 || !recBuf || recordedFrames <= 0) {
+      return;
+    }
+    const postEnd = recordedFrames - readStartFrame - n;
+    const preStart = readStartFrame;
+    if (postEnd >= 2) {
+      const W = Math.min(crossfadeSamples, postEnd, Math.floor(n / 2));
+      if (W >= 2 && !this.shouldPreferTailSeamOverHead(playback, channels, W)) {
+        const denom = W - 1;
+        for (let i = 0; i < W; i += 1) {
+          const theta = (i / denom) * (Math.PI / 2);
+          const headGain = Math.sin(theta);
+          const contGain = Math.cos(theta);
+          const headBase = i * channels;
+          const contFrame = readStartFrame + n + i;
+          for (let c = 0; c < channels; c += 1) {
+            const head = playback[headBase + c];
+            const cont = recBuf[contFrame * channels + c] || 0;
+            playback[headBase + c] = head * headGain + cont * contGain;
+          }
+        }
+        return;
+      }
+    }
+    if (preStart >= 2) {
+      const W = Math.min(crossfadeSamples, preStart, Math.floor(n / 2));
+      if (W >= 2) {
+        const fadeOutStart = n - W;
+        const denom = W - 1;
+        for (let i = 0; i < W; i += 1) {
+          const theta = (i / denom) * (Math.PI / 2);
+          const tailGain = Math.cos(theta);
+          const preGain = Math.sin(theta);
+          const tailBase = (fadeOutStart + i) * channels;
+          const preFrame = readStartFrame - W + i;
+          for (let c = 0; c < channels; c += 1) {
+            const tail = playback[tailBase + c];
+            const pre = recBuf[preFrame * channels + c] || 0;
+            playback[tailBase + c] = tail * tailGain + pre * preGain;
+          }
+        }
+      }
+    }
+  }
+
+  applyHandsfreeTailSeamCrossfade(playback, tailBuf, channels, n, deficitFrames) {
+    const crossfadeSamples = Math.min(LOOP_CROSSFADE_SAMPLES, Math.floor(n / 2));
+    const deficit = Math.max(0, Math.floor(Number(deficitFrames) || 0));
+    const W = Math.min(crossfadeSamples, tailBuf.length - deficit, Math.floor(n / 2));
+    if (W < 2 || deficit >= tailBuf.length) {
+      return;
+    }
+    const denom = W - 1;
+    for (let i = 0; i < W; i += 1) {
+      const theta = (i / denom) * (Math.PI / 2);
+      const headGain = Math.sin(theta);
+      const contGain = Math.cos(theta);
+      const headBase = i * channels;
+      const contSample = tailBuf[deficit + i] || 0;
+      for (let c = 0; c < channels; c += 1) {
+        const head = playback[headBase + c];
+        playback[headBase + c] = head * headGain + contSample * contGain;
+      }
+    }
+  }
+
+  patchHandsfreeTailCapture() {
+    const cap = this.handsfreeTailCapture;
+    if (!cap) {
+      return;
+    }
+    const slot = this.getSlotForTrack(cap.trackIndex);
+    if (!slot.playbackBuffer || slot.mode !== "playing") {
+      this.handsfreeTailCapture = null;
+      return;
+    }
+    const channels = cap.channels;
+    const n = cap.intervalFrames;
+    const playback = slot.playbackBuffer;
+    const deficit = cap.deficitFrames;
+    const fillStart = Math.max(0, n - deficit);
+    for (let i = 0; i < deficit && i < cap.buffer.length; i += 1) {
+      const sample = cap.buffer[i] || 0;
+      const base = (fillStart + i) * channels;
+      for (let c = 0; c < channels; c += 1) {
+        playback[base + c] = sample;
+      }
+    }
+    this.applyHandsfreeTailSeamCrossfade(playback, cap.buffer, channels, n, deficit);
+    const transferBuffer = playback.slice().buffer;
+    try {
+      this.port.postMessage(
+        {
+          type: "LOOP_READY",
+          trackIndex: cap.trackIndex,
+          loopId: slot.loopId,
+          sampleRate,
+          intervalFrames: slot.intervalFrames,
+          channelCount: slot.channelCount,
+          buffer: transferBuffer,
+          tailPatched: true,
+        },
+        [transferBuffer]
+      );
+    } catch {
+      /* ignore */
+    }
+    this.handsfreeTailCapture = null;
+  }
+
+  postFinalizeDiagnostic(payload) {
+    if (!this.finalizeDiagnosticsEnabled) {
+      return;
+    }
+    try {
+      this.port.postMessage({ type: "FINALIZE_DIAGNOSTIC", sampleRate, ...payload });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Grid/handsfree: absolute recordCursor needed before extract can fill the full loop span. */
+  computeGridRequiredRecordCursor(slot, transportIntervalFrames, latencyOffsetFrames) {
+    const epoch = slot.recordingEpochFrames || 0;
+    const latencyShift = this.resolveLatencyShiftFrames(slot, latencyOffsetFrames);
+    const n = Math.max(1, Math.floor(Number(transportIntervalFrames) || 1));
+    return epoch + latencyShift + n;
+  }
+
+  /** True when RTL post-roll deferral is safe (grid T1 only — must not delay handsfree handoff). */
+  shouldDeferGridPostRoll(slot, trackIndex) {
+    return slot.loopMode === "grid" && trackIndex === 1;
+  }
+
+  /** Defer grid/handsfree finalize until post-roll supplies enough tail for latency-shifted extract. */
+  beginGridPostRollDefer(slot, transportIntervalFrames, options) {
+    const epoch = slot.recordingEpochFrames || 0;
+    const latencyShift = this.resolveLatencyShiftFrames(slot, options.latencyOffsetFrames);
+    const n = Math.max(1, Math.floor(Number(transportIntervalFrames) || 1));
+    const relativeTarget = latencyShift + n;
+    slot.stopTargetFrames = relativeTarget;
+    slot.stopOptions = {
+      ...options,
+      transportIntervalFrames: n,
+    };
+    slot.targetLengthFrames = null;
+    slot.intervalFrames = this.clampRecordProvisionFrames(
+      slot,
+      Math.max(slot.intervalFrames, epoch + relativeTarget)
+    );
+  }
+
   findNearestZeroCrossing(buffer, targetIndex, maxWindow, channels, direction = -1) {
     if (!buffer || buffer.length <= 0) {
       return targetIndex;
@@ -892,9 +1154,10 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       Math.min(Math.floor(Number(nextIntervalFrames) || 1), this.maxRecordingFrames)
     );
     const isFreeMaster = targetTrackIndex === 1 && slot.loopMode === "free";
+    const isGridLike = this.isGridLikeLoopMode(slot.loopMode);
     let extractionEndFrames = transportIntervalFrames;
     let startOffset = 0;
-    if (targetTrackIndex === 1) {
+    if (targetTrackIndex === 1 && !isGridLike) {
       const optimizedFrames = this.findNearestZeroCrossing(
         slot.recordingBuffer,
         transportIntervalFrames,
@@ -964,10 +1227,18 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       0,
       Math.min(Math.floor(Number(slot.recordCursor) || 0), bufferFrames)
     );
-    const readStartFrame = Math.max(
-      0,
-      Math.min(startOffset + latencyShiftFrames, Math.max(0, recordedFrames - 1))
-    );
+    const readStartFrame = isGridLike
+      ? Math.max(
+          0,
+          Math.min(
+            this.computeGridReadStartFrame(slot, options.latencyOffsetFrames),
+            Math.max(0, recordedFrames - 1)
+          )
+        )
+      : Math.max(
+          0,
+          Math.min(startOffset + latencyShiftFrames, Math.max(0, recordedFrames - 1))
+        );
     const availableReadFrames = Math.max(0, recordedFrames - readStartFrame);
     const extractionWindowFrames = Math.max(0, extractionEndFrames - startOffset);
     const extractedFrames = Math.max(
@@ -985,23 +1256,48 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     const endOffsetIndex = (readStartFrame + copyFrames) * channels;
     playback.set(slot.recordingBuffer.subarray(startOffsetIndex, endOffsetIndex));
 
-    const crossfadeSamples = Math.min(LOOP_CROSSFADE_SAMPLES, Math.floor(n / 2));
-    if (crossfadeSamples >= 2 && recorded > 0) {
-      const fadeOutStart = n - crossfadeSamples;
-      const denom = crossfadeSamples - 1;
-      for (let i = 0; i < crossfadeSamples; i += 1) {
-        const theta = (i / denom) * (Math.PI / 2);
-        const tailGain = Math.cos(theta);
-        const headGain = Math.sin(theta);
-        const tailBase = (fadeOutStart + i) * channels;
-        const headBase = i * channels;
-        for (let c = 0; c < channels; c += 1) {
-          const tail = playback[tailBase + c];
-          const head = playback[headBase + c];
-          playback[tailBase + c] = tail * tailGain + head * headGain;
+    if (isGridLike && slot.recordingBuffer) {
+      this.applyGridLikeSeamCrossfade(
+        playback,
+        slot.recordingBuffer,
+        channels,
+        n,
+        readStartFrame,
+        recordedFrames
+      );
+    } else if (!isGridLike) {
+      const crossfadeSamples = Math.min(LOOP_CROSSFADE_SAMPLES, Math.floor(n / 2));
+      if (crossfadeSamples >= 2 && recorded > 0) {
+        const fadeOutStart = n - crossfadeSamples;
+        const denom = crossfadeSamples - 1;
+        for (let i = 0; i < crossfadeSamples; i += 1) {
+          const theta = (i / denom) * (Math.PI / 2);
+          const tailGain = Math.cos(theta);
+          const headGain = Math.sin(theta);
+          const tailBase = (fadeOutStart + i) * channels;
+          const headBase = i * channels;
+          for (let c = 0; c < channels; c += 1) {
+            const tail = playback[tailBase + c];
+            const head = playback[headBase + c];
+            playback[tailBase + c] = tail * tailGain + head * headGain;
+          }
         }
       }
     }
+
+    this.postFinalizeDiagnostic({
+      trackIndex: targetTrackIndex,
+      loopMode: slot.loopMode,
+      epochFrames: slot.recordingEpochFrames || 0,
+      readStartFrame,
+      extractedFrames: copyFrames,
+      intervalFrames: n,
+      latencyShiftFrames,
+      phaseSource:
+        this.isOverdubTrackIndex(targetTrackIndex) && masterPhase !== null
+          ? "phase_lock"
+          : "zero",
+    });
 
     slot.recordingBuffer = null;
     slot.playbackBuffer = playback;
@@ -1009,6 +1305,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     slot.recordCursor = 0;
     slot.targetLengthFrames = null;
     slot.latencyOffsetFrames = 0;
+    slot.stopTargetFrames = null;
+    slot.stopOptions = null;
     if (this.isOverdubTrackIndex(targetTrackIndex) && masterPhase !== null) {
       // Phase-lock: transportIntervalFrames must be beat-quantized per track.
       slot.playbackCursor = masterPhase % transportIntervalFrames;
@@ -1078,6 +1376,19 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     }
   }
 
+  postHandsfreeCountdownReady(fromTrack, toTrack) {
+    try {
+      this.port.postMessage({
+        type: "HANDSFREE_COUNTDOWN_READY",
+        fromTrack,
+        toTrack,
+        sampleRate,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
   postHandsfreeSequenceComplete() {
     const slot = this.getSlotForTrack(4);
     try {
@@ -1089,6 +1400,41 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     } catch {
       /* ignore */
     }
+  }
+
+  /** After grid/handsfree auto-stop finalize: handsfree advance or AUTO_STOP_COMPLETED. */
+  handleGridRecordingComplete(capTrackIndex, monoSample) {
+    const finishedSlot = this.getSlotForTrack(capTrackIndex);
+    if (this.handsfreeSequenceActive) {
+      if (capTrackIndex < MAX_TRACK_INDEX) {
+        if (this.handsfreeAssist) {
+          this.handsfreeAdvanceArm = {
+            nextTrackIndex: capTrackIndex + 1,
+            fromTrack: capTrackIndex,
+            seenNonWrap: false,
+          };
+          this.postHandsfreeAdvanceArmed(capTrackIndex, capTrackIndex + 1);
+        } else {
+          this.beginHandsfreeRecordingAtBoundary(
+            capTrackIndex + 1,
+            capTrackIndex,
+            0,
+            monoSample
+          );
+        }
+      } else {
+        this.handsfreeSequenceActive = false;
+        this.handsfreeAdvanceArm = null;
+        this.handsfreeCountdownPending = null;
+        this.handsfreeAssist = false;
+        this.timingAssist = false;
+        this.postHandsfreeSequenceComplete();
+        this.postAutoStopCompleted(capTrackIndex);
+      }
+    } else {
+      this.postAutoStopCompleted(capTrackIndex);
+    }
+    return finishedSlot;
   }
 
   /**
@@ -1106,7 +1452,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       this.postConfigureRejected("master_not_playing_at_handoff", nextTrackIndex);
       this.handsfreeSequenceActive = false;
       this.handsfreeAdvanceArm = null;
+      this.handsfreeCountdownPending = null;
       this.handsfreeAssist = false;
+      this.timingAssist = false;
       return false;
     }
 
@@ -1152,12 +1500,35 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     return true;
   }
 
+  confirmHandsfreeCountdown() {
+    const pending = this.handsfreeCountdownPending;
+    if (!pending || !this.handsfreeSequenceActive) return;
+    this.handsfreeCountdownPending = null;
+    const master = this.trackSlots[0];
+    if (master.mode !== "playing" || master.intervalFrames <= 0) {
+      this.postConfigureRejected("master_not_playing_at_countdown_confirm", pending.nextTrackIndex);
+      this.handsfreeSequenceActive = false;
+      this.handsfreeAdvanceArm = null;
+      this.handsfreeAssist = false;
+      this.timingAssist = false;
+      return;
+    }
+    const rem = master.intervalFrames - master.playbackCursor;
+    this.beginHandsfreeRecordingAtBoundary(
+      pending.nextTrackIndex,
+      pending.fromTrack,
+      Math.max(0, rem)
+    );
+  }
+
   /** V4.1: atomic pedal-up finalize (no bridge intervalFrames). */
   stopRecording(data) {
     if (this.handsfreeSequenceActive) {
       this.handsfreeSequenceActive = false;
       this.handsfreeAdvanceArm = null;
+      this.handsfreeCountdownPending = null;
       this.handsfreeAssist = false;
+      this.timingAssist = false;
     }
     const explicitTrack = this.normalizeTrackIndex(data.trackIndex);
     const targetTrackIndex = explicitTrack !== null ? explicitTrack : this.activeTrackIndex;
@@ -1217,10 +1588,17 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       return;
     }
 
-    if (slot.recordCursor < (slot.recordingEpochFrames || 0) + nextIntervalFrames) {
-      // Post-roll: mic stays hot — keep recording until we reach the quantized boundary.
-      // Capture finalization options now (masterPhase must be snapshotted at stop time).
-      slot.stopTargetFrames = nextIntervalFrames;
+    const epochFrames = slot.recordingEpochFrames || 0;
+    const isGridOnly = slot.loopMode === "grid";
+    const latencyShift = this.resolveLatencyShiftFrames(slot, data.latencyOffsetFrames);
+    const postRollRelative =
+      isGridOnly && targetTrackIndex === 1
+        ? latencyShift + nextIntervalFrames
+        : nextIntervalFrames;
+
+    if (slot.recordCursor < epochFrames + postRollRelative) {
+      // Post-roll: mic stays hot until quantized boundary (+ latency tail for grid T1 only).
+      slot.stopTargetFrames = postRollRelative;
       slot.stopOptions = {
         masterPhase,
         channelCount: nextChannelCount,
@@ -1229,11 +1607,14 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
           ? nextIntervalFrames
           : this.computeRawTargetFrames(slot),
         latencyOffsetFrames: data.latencyOffsetFrames,
+        ...(isGridOnly && targetTrackIndex === 1
+          ? { transportIntervalFrames: nextIntervalFrames }
+          : {}),
       };
-      // Extend the provision cap so the recording loop doesn't hit it prematurely.
-      slot.intervalFrames =
-        (slot.recordingEpochFrames || 0) +
-        nextIntervalFrames;
+      slot.intervalFrames = this.clampRecordProvisionFrames(
+        slot,
+        Math.max(slot.intervalFrames, epochFrames + postRollRelative)
+      );
       return;
     }
 
@@ -1540,7 +1921,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     if (slot.loopMode === "handsfree") {
       this.handsfreeSequenceActive = true;
       this.handsfreeAdvanceArm = null;
+      this.handsfreeCountdownPending = null;
       this.handsfreeAssist = data.handsfreeAssist === true;
+      this.timingAssist = data.timingAssist === true;
       this.handsfreeStartLatencyOffsetFrames = slot.latencyOffsetFrames;
       if (Array.isArray(data.handsfreeTrackTargets)) {
         this.handsfreeSequenceTargetFrames = [];
@@ -1566,7 +1949,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       this.handsfreeStartLatencyOffsetFrames = 0;
       this.handsfreeSequenceTargetFrames = null;
       this.handsfreeAdvanceArm = null;
+      this.handsfreeCountdownPending = null;
       this.handsfreeAssist = false;
+      this.timingAssist = false;
     }
     slot.mode = "recording";
     slot.playbackCursor = 0;
@@ -1603,7 +1988,10 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeStartLatencyOffsetFrames = 0;
     this.handsfreeSequenceTargetFrames = null;
     this.handsfreeAdvanceArm = null;
+    this.handsfreeCountdownPending = null;
     this.handsfreeAssist = false;
+    this.timingAssist = false;
+    this.handsfreeTailCapture = null;
     const slot = this.getActiveSlot();
     slot.mode = "idle";
     this.reportState("STOPPED");
@@ -1773,11 +2161,19 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       } else if (this.handsfreeAdvanceArm.seenNonWrap) {
         const arm = this.handsfreeAdvanceArm;
         this.handsfreeAdvanceArm = null;
-        this.beginHandsfreeRecordingAtBoundary(
-          arm.nextTrackIndex,
-          arm.fromTrack,
-          Math.max(0, rem)
-        );
+        if (this.handsfreeAssist && this.timingAssist) {
+          this.handsfreeCountdownPending = {
+            nextTrackIndex: arm.nextTrackIndex,
+            fromTrack: arm.fromTrack,
+            rem: Math.max(0, rem),
+          };
+        } else {
+          this.beginHandsfreeRecordingAtBoundary(
+            arm.nextTrackIndex,
+            arm.fromTrack,
+            Math.max(0, rem)
+          );
+        }
       }
     }
 
@@ -1810,6 +2206,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       // Guided capture writes once per frame (mono), independent of track recording.
       if (!this.isPaused) {
         this.writeGuidedCalCaptureFrame(monoSample);
+        this.writeHandsfreeTailCaptureFrame(monoSample);
       }
 
       let slotJustFinished = null;
@@ -1839,49 +2236,47 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
             const targetFrames = active.targetLengthFrames;
             const latencyOffsetFrames = active.latencyOffsetFrames;
             const capTrackIndex = this.activeTrackIndex;
-            active.targetLengthFrames = null;
-            this.finalizeRecordingSlot(capTrackIndex, targetFrames, {
+            const finalizeOptions = {
               masterPhase: this.snapshotMasterPhase(),
               channelCount: active.channelCount,
               loopId: active.loopId,
               requestedIntervalFrames: targetFrames,
               latencyOffsetFrames,
-            });
-            const finishedSlot = this.getSlotForTrack(capTrackIndex);
-            if (this.handsfreeSequenceActive) {
-              if (capTrackIndex < MAX_TRACK_INDEX) {
-                if (this.handsfreeAssist) {
-                  this.handsfreeAdvanceArm = {
-                    nextTrackIndex: capTrackIndex + 1,
-                    fromTrack: capTrackIndex,
-                    // Require leaving the wrap window once so we don't fire on the
-                    // same boundary that just ended the take (T2–T3 near master wrap).
-                    seenNonWrap: false,
-                  };
-                  this.postHandsfreeAdvanceArmed(capTrackIndex, capTrackIndex + 1);
-                } else {
-                  this.beginHandsfreeRecordingAtBoundary(
-                    capTrackIndex + 1,
+            };
+            active.targetLengthFrames = null;
+            const usePostRollDefer = this.shouldDeferGridPostRoll(active, capTrackIndex);
+            const requiredCursor = usePostRollDefer
+              ? this.computeGridRequiredRecordCursor(
+                  active,
+                  targetFrames,
+                  latencyOffsetFrames
+                )
+              : active.recordCursor;
+            let finishedSlot = null;
+            if (!usePostRollDefer || active.recordCursor >= requiredCursor) {
+              if (active.loopMode === "handsfree") {
+                const tailDeficit = this.computeHandsfreeTailDeficit(
+                  active,
+                  targetFrames,
+                  latencyOffsetFrames
+                );
+                if (tailDeficit > 0) {
+                  this.armHandsfreeTailCapture(
                     capTrackIndex,
-                    0,
-                    monoSample
+                    active,
+                    targetFrames,
+                    latencyOffsetFrames,
+                    tailDeficit
                   );
                 }
-              } else {
-                this.handsfreeSequenceActive = false;
-                this.handsfreeAdvanceArm = null;
-                this.handsfreeAssist = false;
-                this.postHandsfreeSequenceComplete();
-                this.postAutoStopCompleted(capTrackIndex);
               }
-              if (finishedSlot.mode === "playing") {
-                slotJustFinished = finishedSlot;
-              }
+              this.finalizeRecordingSlot(capTrackIndex, targetFrames, finalizeOptions);
+              finishedSlot = this.handleGridRecordingComplete(capTrackIndex, monoSample);
             } else {
-              this.postAutoStopCompleted(capTrackIndex);
-              if (finishedSlot.mode === "playing") {
-                slotJustFinished = finishedSlot;
-              }
+              this.beginGridPostRollDefer(active, targetFrames, finalizeOptions);
+            }
+            if (finishedSlot && finishedSlot.mode === "playing") {
+              slotJustFinished = finishedSlot;
             }
           } else if (
             active.loopMode === "free" &&
@@ -1915,16 +2310,35 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
               (active.recordingEpochFrames || 0) +
               active.stopTargetFrames
           ) {
-            // Deferred (post-roll) finalization: we have now recorded up to the quantized boundary.
             const tf = active.stopTargetFrames;
             const opts = active.stopOptions;
             const capTrackIndex = this.activeTrackIndex;
+            const transportFrames =
+              opts && opts.transportIntervalFrames !== undefined
+                ? opts.transportIntervalFrames
+                : tf;
             active.stopTargetFrames = null;
             active.stopOptions = null;
             active.pendingStopAbsoluteFrame = null;
-            this.finalizeRecordingSlot(capTrackIndex, tf, opts);
-            if (active.mode === "playing") {
-              slotJustFinished = active;
+            const finalizeOpts = opts ? { ...opts } : {};
+            if (this.isOverdubTrackIndex(capTrackIndex)) {
+              const freshPhase = this.snapshotMasterPhase();
+              if (freshPhase !== null) {
+                finalizeOpts.masterPhase = freshPhase;
+              }
+            }
+            this.finalizeRecordingSlot(capTrackIndex, transportFrames, finalizeOpts);
+            let finishedSlot = this.getSlotForTrack(capTrackIndex);
+            if (
+              active.loopMode === "grid" &&
+              capTrackIndex === 1 &&
+              opts &&
+              opts.transportIntervalFrames !== undefined
+            ) {
+              finishedSlot = this.handleGridRecordingComplete(capTrackIndex, monoSample);
+            }
+            if (finishedSlot.mode === "playing") {
+              slotJustFinished = finishedSlot;
             }
           } else if (active.recordCursor >= active.intervalFrames) {
             active.recordCursor = active.intervalFrames;
