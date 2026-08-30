@@ -13,10 +13,34 @@ import {
   type MusicalKey,
 } from "./kite-theremin-types";
 
+const WASM_LOCAL = "/mediapipe/tasks-vision/wasm";
 const WASM_CDN =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
-const MODEL_URL =
+const MODEL_LOCAL = "/mediapipe/hand_landmarker.task";
+const MODEL_CDN =
   "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+
+async function resolveVisionWasmBase(): Promise<string> {
+  if (typeof fetch === "undefined") return WASM_CDN;
+  try {
+    const probe = await fetch(`${WASM_LOCAL}/vision_wasm_internal.js`, { method: "HEAD" });
+    if (probe.ok) return WASM_LOCAL;
+  } catch {
+    /* fall through to CDN */
+  }
+  return WASM_CDN;
+}
+
+async function resolveHandLandmarkerModelUrl(): Promise<string> {
+  if (typeof fetch === "undefined") return MODEL_CDN;
+  try {
+    const probe = await fetch(MODEL_LOCAL, { method: "HEAD" });
+    if (probe.ok) return MODEL_LOCAL;
+  } catch {
+    /* fall through to CDN */
+  }
+  return MODEL_CDN;
+}
 
 /** MediaPipe HandLandmarker landmark index for index fingertip. */
 const INDEX_FINGER_TIP = 8;
@@ -216,9 +240,13 @@ function mapResultToFrame(
 }
 
 export async function createKiteThereminVision(): Promise<KiteThereminVision> {
-  const vision = await FilesetResolver.forVisionTasks(WASM_CDN);
+  const [wasmBase, modelAssetPath] = await Promise.all([
+    resolveVisionWasmBase(),
+    resolveHandLandmarkerModelUrl(),
+  ]);
+  const vision = await FilesetResolver.forVisionTasks(wasmBase);
   const landmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+    baseOptions: { modelAssetPath, delegate: "GPU" },
     runningMode: "VIDEO",
     numHands: 2,
   });

@@ -494,7 +494,10 @@ export function useKiteTunerEngine(config: UseKiteTunerEngineConfig): UseKiteTun
       rafIdRef.current = requestAnimationFrame(tick);
     };
 
-    if (ctx.state === "suspended") {
+    const needsResume =
+      ctx.state === "suspended" ||
+      (ctx.state as string) === "interrupted";
+    if (needsResume) {
       void ctx.resume().then(() => {
         if (!cancelled) mountGraph();
       });

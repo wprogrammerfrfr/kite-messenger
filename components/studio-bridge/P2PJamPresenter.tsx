@@ -176,7 +176,7 @@ function P2PSettingsPanel({
       aria-label="P2P Jam settings"
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
-      className={`${GLASS_PANEL} pointer-events-auto relative z-10 flex max-h-[min(78vh,640px)] w-[360px] max-w-[calc(100vw-32px)] flex-col gap-4 overflow-y-auto p-4`}
+      className={`${GLASS_PANEL} pointer-events-auto relative z-10 flex max-h-[min(78dvh,640px)] w-[360px] max-w-[calc(100vw-32px)] flex-col gap-4 overflow-y-auto p-4`}
     >
       <div className="flex items-center justify-between">
         <span className="text-[13px] font-bold text-white/85">Jam Settings</span>
@@ -522,7 +522,7 @@ function P2PInputDevicePanel({
       aria-label="Input device"
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
-      className={`${GLASS_PANEL} pointer-events-auto relative z-10 flex h-[min(80vh,550px)] w-[min(600px,calc(100vw-32px))] flex-col overflow-hidden`}
+      className={`${GLASS_PANEL} pointer-events-auto relative z-10 flex h-[min(80dvh,550px)] w-[min(600px,calc(100vw-32px))] flex-col overflow-hidden`}
     >
       <div className="flex items-center justify-between border-b border-white/[0.06] px-[18px] pb-3.5 pt-4">
         <span className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.18em] text-white/75">
@@ -762,7 +762,7 @@ function KiteSyncSetupWizard({
       aria-label="Kite Sync setup wizard"
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
-      className={`${GLASS_PANEL} pointer-events-auto relative z-10 flex max-h-[min(86vh,680px)] w-[min(720px,calc(100vw-32px))] flex-col overflow-hidden`}
+      className={`${GLASS_PANEL} pointer-events-auto relative z-10 flex max-h-[min(86dvh,680px)] w-[min(720px,calc(100vw-32px))] flex-col overflow-hidden`}
     >
       {/* Header */}
       <div className="flex items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4">

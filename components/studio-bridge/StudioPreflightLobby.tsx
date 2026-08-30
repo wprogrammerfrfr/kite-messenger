@@ -168,7 +168,7 @@ function StudioPreflightLobbyInner({
 }: StudioPreflightLobbyProps) {
   return (
     <div
-      className="relative flex min-h-screen w-full flex-col overflow-hidden bg-stone-950 font-sans antialiased caret-transparent outline-none select-none"
+      className="relative flex min-h-[100dvh] w-full flex-col overflow-hidden bg-stone-950 font-sans antialiased caret-transparent outline-none select-none"
       style={{ fontFamily: "'Sora', 'DM Sans', system-ui, sans-serif" }}
     >
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">

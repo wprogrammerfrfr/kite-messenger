@@ -14,6 +14,17 @@ import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { TrackRecorder } from "@/lib/track-recorder";
 import {
+  canUseDisplayMedia,
+  canUseMediaRecorder,
+  resolveSessionDownloadExtension,
+  selectSessionAudioMediaRecorderOptions,
+  selectSessionVideoMediaRecorderOptions,
+  type SoloSessionRecorderCaptureMode,
+} from "@/lib/studio-session-recorder";
+import { shareOrDownloadBlob } from "@/lib/studio-mobile-share";
+import { micPermissionRecoveryHint } from "@/lib/studio-mic-permission-copy";
+import { isStudioSafariWebKitEngine } from "@/lib/studio-webkit-detect";
+import {
   calcInputNudgeFrames,
   calcIntervalFrames,
   calcLoopDurationSeconds,
@@ -106,6 +117,7 @@ import type {
   BroadcastStatus,
   SoloLooperState,
   SoloSessionRecorderState,
+  SoloSessionRecorderCaptureMode as SoloSessionRecorderCaptureModeType,
   JamSetupLock,
   KiteSetupOrigin,
   DeviceFlagMap,
@@ -296,31 +308,6 @@ const GUIDED_RTL_CLOCK_STALL_MESSAGE =
 const GUIDED_RTL_SUSPEND_MESSAGE =
   "Audio was suspended — tap Retry to restart calibration.";
 
-const SESSION_VIDEO_MIME_CANDIDATES = [
-  "video/webm;codecs=vp9,opus",
-  "video/webm;codecs=vp8,opus",
-  "video/webm",
-] as const;
-
-function selectSessionVideoMediaRecorderOptions(): MediaRecorderOptions {
-  if (typeof MediaRecorder === "undefined") {
-    throw new Error("MediaRecorder is not available in this environment.");
-  }
-  for (const mime of SESSION_VIDEO_MIME_CANDIDATES) {
-    if (MediaRecorder.isTypeSupported(mime)) {
-      return {
-        mimeType: mime,
-        videoBitsPerSecond: 2_500_000,
-        audioBitsPerSecond: 320_000,
-      };
-    }
-  }
-  return {
-    videoBitsPerSecond: 2_500_000,
-    audioBitsPerSecond: 320_000,
-  };
-}
-
 function stopSoloSessionDisplayTracks(displayStreamRef: { current: MediaStream | null }): void {
   const stream = displayStreamRef.current;
   if (!stream) return;
@@ -357,15 +344,6 @@ function normalizeStudioSessionId(raw: string): string {
 
 function randomSessionId(): string {
   return normalizeStudioSessionId(Math.random().toString(36).slice(2, 8));
-}
-
-/** True for Safari/WebKit UAs, false for Chromium-based browsers that also advertise "Safari". */
-function isStudioSafariWebKitEngine(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const ua = navigator.userAgent;
-  if (!/Safari/i.test(ua)) return false;
-  if (/Chrome|Chromium|Edg|OPR|Brave/i.test(ua)) return false;
-  return true;
 }
 
 const MIC_ACCESS_DENIED_COPY =
@@ -606,6 +584,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [isMasterPaused, setIsMasterPaused] = useState(false);
   const [soloSessionRecorderState, setSoloSessionRecorderState] =
     useState<SoloSessionRecorderState>("idle");
+  const [soloSessionRecorderCaptureMode, setSoloSessionRecorderCaptureMode] =
+    useState<SoloSessionRecorderCaptureModeType | null>(null);
+  const [soloSessionRecorderError, setSoloSessionRecorderError] =
+    useState<string | null>(null);
+  const soloSessionRecorderSupportsScreenCapture = useMemo(
+    () => canUseDisplayMedia(),
+    []
+  );
   const [loopChunkSendError, setLoopChunkSendError] = useState<string | null>(null);
   const [loopChunkSendProgress, setLoopChunkSendProgress] = useState<KiteLoopChunkSendProgress>({
     status: "idle",
@@ -775,6 +761,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloSessionMediaRecorderRef = useRef<MediaRecorder | null>(null);
   const soloSessionChunksRef = useRef<BlobPart[]>([]);
   const soloSessionDisplayStreamRef = useRef<MediaStream | null>(null);
+  const soloSessionCaptureModeRef = useRef<SoloSessionRecorderCaptureMode | null>(null);
+  const studioReadyStateHandlerRef = useRef<(() => void) | null>(null);
   const soloMetronomeLastBeatRef = useRef<number | null>(null);
   const soloMetronomeAnchorContextSecRef = useRef<number | null>(null);
   /** Spacebar routes to this track (1–4) on pedal down; lane arms sync this ref. */
@@ -955,7 +943,53 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   });
   const studioAudioContextRef =
     kiteStudioHost.studioAudioContextRef as MutableRefObject<AudioContext | null>;
-  const ensureStudioAudioContext = kiteStudioHost.ensureContext;
+  const ensureStudioAudioContextBase = kiteStudioHost.ensureContext;
+
+  const syncStudioContextReadyFromState = useCallback(() => {
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") {
+      setAudioContextReady(false);
+      return;
+    }
+    setAudioContextReady(ctx.state === "running");
+  }, []);
+
+  const attachStudioContextReadyListener = useCallback(
+    (ctx: AudioContext) => {
+      if (studioReadyStateHandlerRef.current) {
+        try {
+          ctx.removeEventListener("statechange", studioReadyStateHandlerRef.current);
+        } catch {
+          /* ignore */
+        }
+      }
+      const handler = (): void => {
+        syncStudioContextReadyFromState();
+      };
+      studioReadyStateHandlerRef.current = handler;
+      ctx.addEventListener("statechange", handler);
+      syncStudioContextReadyFromState();
+    },
+    [syncStudioContextReadyFromState]
+  );
+
+  const ensureStudioAudioContext = useCallback((): AudioContext => {
+    const ctx = ensureStudioAudioContextBase();
+    attachStudioContextReadyListener(ctx);
+    return ctx;
+  }, [attachStudioContextReadyListener, ensureStudioAudioContextBase]);
+
+  useEffect(() => {
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "visible") return;
+      const ctx = studioAudioContextRef.current;
+      if (ctx && ctx.state !== "closed") {
+        syncStudioContextReadyFromState();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [syncStudioContextReadyFromState]);
   const getStudioAudioContext = kiteStudioHost.getContext;
   const getStudioKiteSampleRate = kiteStudioHost.getSampleRate;
   const closeStudioAudioContext = kiteStudioHost.closeContext;
@@ -3692,15 +3726,26 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [clearRecordedBlobUrl, clearRecordingInterval]);
 
   const downloadSoloSessionBlob = useCallback((blob: Blob, ext: string) => {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `kite-loop-session-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const filename = `kite-loop-session-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
+    void shareOrDownloadBlob(blob, filename);
   }, []);
+
+  const resetSoloSessionRecorderUi = useCallback(() => {
+    setSoloSessionRecorderCaptureMode(null);
+    soloSessionCaptureModeRef.current = null;
+    setSoloSessionRecorderState("idle");
+  }, []);
+
+  const failSoloSessionRecorder = useCallback(
+    (message: string) => {
+      stopSoloSessionDisplayTracks(soloSessionDisplayStreamRef);
+      soloSessionMediaRecorderRef.current = null;
+      soloSessionChunksRef.current = [];
+      resetSoloSessionRecorderUi();
+      setSoloSessionRecorderError(message);
+    },
+    [resetSoloSessionRecorderUi]
+  );
 
   const stopSoloSessionRecording = useCallback(async () => {
     const recorder = soloSessionMediaRecorderRef.current;
@@ -3731,16 +3776,20 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         recorder.stop();
       });
       if (blob.size > 0) {
-        downloadSoloSessionBlob(blob, "webm");
+        const ext = resolveSessionDownloadExtension(blob.type || recorder.mimeType || "");
+        downloadSoloSessionBlob(blob, ext);
       }
     } catch (err) {
       console.error("[Solo session recorder] Failed to stop:", err);
+      setSoloSessionRecorderError(
+        err instanceof Error ? err.message : "Could not save session recording."
+      );
     } finally {
       stopSoloSessionDisplayTracks(soloSessionDisplayStreamRef);
       soloSessionChunksRef.current = [];
-      setSoloSessionRecorderState("idle");
+      resetSoloSessionRecorderUi();
     }
-  }, [downloadSoloSessionBlob]);
+  }, [downloadSoloSessionBlob, resetSoloSessionRecorderUi]);
 
   const clearJamSetupLockTimer = useCallback(() => {
     if (jamSetupLockTimerRef.current !== null) {
@@ -4979,18 +5028,18 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const startSoloSessionRecording = useCallback(async () => {
     if (soloSessionMediaRecorderRef.current) return;
 
-    let displayStream: MediaStream;
-    try {
-      displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30, max: 30 } },
-        audio: false,
-      });
-    } catch (err) {
-      console.warn("[Solo session recorder] Display capture cancelled or denied:", err);
+    if (!canUseMediaRecorder()) {
+      failSoloSessionRecorder("Recording is not supported in this browser.");
       return;
     }
 
-    soloSessionDisplayStreamRef.current = displayStream;
+    setSoloSessionRecorderError(null);
+    setSoloSessionRecorderState("requesting");
+
+    const screenCaptureAvailable = canUseDisplayMedia();
+    let captureMode: SoloSessionRecorderCaptureMode = screenCaptureAvailable
+      ? "screen-video"
+      : "audio-only";
 
     try {
       const engine = await ensureSoloLooperEngineBootstrapped();
@@ -4999,26 +5048,56 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         throw new Error("Session recording audio stream is unavailable.");
       }
 
-      const combinedStream = new MediaStream([
-        ...displayStream.getVideoTracks(),
-        ...recordingStream.getAudioTracks(),
-      ]);
+      let streamForRecorder: MediaStream;
+
+      if (screenCaptureAvailable) {
+        let displayStream: MediaStream;
+        try {
+          displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: { ideal: 30, max: 30 } },
+            audio: false,
+          });
+        } catch (err) {
+          const denied = isMicPermissionDeniedError(err);
+          throw new Error(
+            denied
+              ? "Screen capture permission denied."
+              : "Screen capture cancelled or unavailable."
+          );
+        }
+        soloSessionDisplayStreamRef.current = displayStream;
+        streamForRecorder = new MediaStream([
+          ...displayStream.getVideoTracks(),
+          ...recordingStream.getAudioTracks(),
+        ]);
+        captureMode = "screen-video";
+      } else {
+        streamForRecorder = recordingStream;
+        captureMode = "audio-only";
+      }
+
+      setSoloSessionRecorderCaptureMode(captureMode);
+      soloSessionCaptureModeRef.current = captureMode;
 
       soloSessionChunksRef.current = [];
-      const recorderOptions = selectSessionVideoMediaRecorderOptions();
+      const recorderOptions =
+        captureMode === "screen-video"
+          ? selectSessionVideoMediaRecorderOptions()
+          : selectSessionAudioMediaRecorderOptions().mediaRecorderOptions;
+
       let recorder: MediaRecorder;
       try {
-        recorder = new MediaRecorder(combinedStream, recorderOptions);
+        recorder = new MediaRecorder(streamForRecorder, recorderOptions);
       } catch (primaryErr) {
         try {
           const { mimeType } = recorderOptions;
           recorder = new MediaRecorder(
-            combinedStream,
+            streamForRecorder,
             mimeType ? { mimeType } : {}
           );
         } catch {
           try {
-            recorder = new MediaRecorder(combinedStream);
+            recorder = new MediaRecorder(streamForRecorder);
           } catch (fallbackErr) {
             throw primaryErr instanceof Error ? primaryErr : fallbackErr;
           }
@@ -5033,16 +5112,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
       soloSessionMediaRecorderRef.current = recorder;
       recorder.start(1000);
-
       setSoloSessionRecorderState("recording");
     } catch (err) {
       console.error("[Solo session recorder] Failed to start:", err);
-      stopSoloSessionDisplayTracks(soloSessionDisplayStreamRef);
-      soloSessionMediaRecorderRef.current = null;
-      soloSessionChunksRef.current = [];
-      setSoloSessionRecorderState("idle");
+      failSoloSessionRecorder(
+        err instanceof Error ? err.message : "Could not start session recording."
+      );
     }
-  }, [ensureSoloLooperEngineBootstrapped]);
+  }, [ensureSoloLooperEngineBootstrapped, failSoloSessionRecorder]);
 
   const handleToggleSoloSessionRecording = useCallback(() => {
     if (soloSessionMediaRecorderRef.current) {
@@ -6208,19 +6285,56 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       setRecordingArmedCountdown(null);
       setSoloLooperState("idle");
       setKiteMode(kiteSetupMode === "sync" ? "broadcast" : "solo");
-      setStudioUiPhase("studio");
       if (kiteSetupOrigin === "connected") {
         sendJamSetupLock("release");
       }
-      // Sync: UI/timing only — engine + SET_INTERVAL + count-in owned by handleStartBroadcastCountIn.
       if (kiteSetupMode === "sync") {
         deriveKiteTimingMetadata();
         syncInitiatorIdRef.current = localJamSetupOwnerId;
         if (mountedRef.current) {
           setSyncInitiatorId(localJamSetupOwnerId);
         }
+        setStudioUiPhase("studio");
       } else if (kiteSetupMode === "solo") {
         deriveKiteTimingMetadata();
+        if (!studioAudioContextRef.current) {
+          ensureStudioAudioContext();
+        }
+        await studioAudioContextRef.current!.resume();
+        const ctx = studioAudioContextRef.current;
+        if (!ctx || ctx.state !== "running") {
+          setAudioContextReady(false);
+          throw new Error("AudioContext is not running. Tap Resume Audio and try again.");
+        }
+        setAudioContextReady(true);
+        await rebuildMixerAndReplaceTrack();
+
+        const masterDestination = mixerMasterDestinationRef.current;
+        const masterTrack = masterDestination?.stream.getAudioTracks()[0] ?? null;
+        const fallbackLocalStream = localStreamRef.current;
+        const localStream =
+          masterDestination && masterTrack && masterTrack.readyState === "live"
+            ? masterDestination.stream
+            : fallbackLocalStream;
+        if (!localStream) {
+          throw new Error("Microphone stream is unavailable. Complete preflight and try again.");
+        }
+
+        ensureMetronomeGainNode(ctx);
+        setLoopProgress(0);
+        setSoloTrackSlotUi(null);
+        soloTrackSlotUiLatestRef.current = null;
+        setSoloTrackVolumes([1, 1, 1, 1]);
+        setSoloMasterLoopFrames(null);
+        applyPedalFocus(1);
+        soloOverdubArmedTrackIndexRef.current = null;
+        setSoloOverdubArmedTrackIndex(null);
+        syncActiveRecordTrackIndex(null);
+        const bpm = Math.max(40, Math.min(240, Math.round(metronomeBpm)));
+        setKiteSetupTempo(bpm);
+        deriveKiteTimingMetadata({ overrideBpm: bpm });
+        await ensureSoloLooperEngineBootstrapped();
+        setStudioUiPhase("studio");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not start Kite Sync.";
@@ -6232,11 +6346,18 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       setSoloLooperState("idle");
     }
   }, [
+    applyPedalFocus,
     deriveKiteTimingMetadata,
+    ensureMetronomeGainNode,
+    ensureSoloLooperEngineBootstrapped,
+    ensureStudioAudioContext,
     kiteSetupMode,
     kiteSetupOrigin,
     localJamSetupOwnerId,
+    metronomeBpm,
+    rebuildMixerAndReplaceTrack,
     sendJamSetupLock,
+    syncActiveRecordTrackIndex,
   ]);
 
   const handleRecordFirstLoop = useCallback(() => {
@@ -8863,9 +8984,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
               setStatusNote(MIC_ACCESS_DENIED_COPY);
               setMicPermissionHint(MIC_ACCESS_DENIED_COPY);
             } else {
-              setMicPermissionHint(
-                "Microphone Access Denied. Please click the camera icon in your browser address bar to reset."
-              );
+              setMicPermissionHint(micPermissionRecoveryHint());
               setStatusNote("Microphone Required.");
             }
           }
@@ -9192,9 +9311,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     handsfreeSequenceActive,
     soloTrackBarCounts,
     soloTrackBarCountsLocked,
-    isMasterPaused,
-    soloSessionRecorderState,
-    kiteSyncCountInActive,
+      isMasterPaused,
+      soloSessionRecorderState,
+      soloSessionRecorderCaptureMode,
+      soloSessionRecorderError,
+      soloSessionRecorderSupportsScreenCapture,
+      kiteSyncCountInActive,
     audibleSyncCountIn,
     kiteSyncReadinessPhase,
     metronomeVolume,
@@ -9266,6 +9388,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloTrackBarCountsLocked,
       isMasterPaused,
       soloSessionRecorderState,
+      soloSessionRecorderCaptureMode,
+      soloSessionRecorderError,
+      soloSessionRecorderSupportsScreenCapture,
       kiteSyncCountInActive,
       audibleSyncCountIn,
       kiteSyncReadinessPhase,

@@ -21,7 +21,8 @@ export type StudioUiPhase = "lobby" | "connecting" | "studio" | "kite-setup";
 export type KiteSetupStep = 1 | 2 | 3 | 4 | 5;
 export type BroadcastStatus = "idle" | "connecting" | "syncing" | "live";
 export type SoloLooperState = "idle" | "recording" | "captured" | "playing";
-export type SoloSessionRecorderState = "idle" | "recording" | "paused" | "saving";
+export type SoloSessionRecorderState = "idle" | "requesting" | "recording" | "saving";
+export type SoloSessionRecorderCaptureMode = "screen-video" | "audio-only";
 export type JamSetupLock = { ownerId: string; ownerName: string; expiresAt: number } | null;
 export type KiteSetupOrigin = "lobby" | "connected";
 
@@ -196,6 +197,12 @@ export type KiteEngineState = {
   soloTrackBarCountsLocked: [boolean, boolean, boolean, boolean];
   isMasterPaused: boolean;
   soloSessionRecorderState: SoloSessionRecorderState;
+  /** Active session export path; null when idle. */
+  soloSessionRecorderCaptureMode: SoloSessionRecorderCaptureMode | null;
+  /** Last user-facing session recorder error (cleared on next start). */
+  soloSessionRecorderError: string | null;
+  /** Whether `getDisplayMedia` is available in this browser. */
+  soloSessionRecorderSupportsScreenCapture: boolean;
   kiteSyncCountInActive: boolean;
   /**
    * When true, count-in metronome clicks bypass the muted gain node and play

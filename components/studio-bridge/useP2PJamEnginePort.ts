@@ -393,8 +393,20 @@ export function useP2PJamEnginePort(
 
       audioContextSuspended: !engineState.audioContextReady,
       onResumeAudio: () => {
-        void engineLegacy.studioAudioContextRef.current?.resume();
-        engineLegacy.setAudioContextReady(true);
+        void (async () => {
+          const ctx = engineLegacy.studioAudioContextRef.current;
+          if (!ctx) {
+            engineLegacy.setAudioContextReady(false);
+            return;
+          }
+          try {
+            await ctx.resume();
+          } catch {
+            engineLegacy.setAudioContextReady(false);
+            return;
+          }
+          engineLegacy.setAudioContextReady(ctx.state === "running");
+        })();
       },
 
       chatReady: presenterState.kiteChatReady,

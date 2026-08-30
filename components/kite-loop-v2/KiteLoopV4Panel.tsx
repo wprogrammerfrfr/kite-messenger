@@ -40,6 +40,7 @@ import type {
   GuidedRtlWizardState,
   SoloLooperMode,
   SoloLooperState,
+  SoloSessionRecorderCaptureMode,
 } from "@/hooks/useKiteStudioEngine.types";
 import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
 import KiteTunerPanel from "@/components/studio-bridge/KiteTunerPanel";
@@ -61,6 +62,8 @@ export type SoloTrackLaneView = {
   onVolumeChange: (linear: number) => void;
   onArmRecord: () => void;
   armDisabled: boolean;
+  /** Shown when armDisabled — explains count-in, pause, or master-loop guard. */
+  armDisabledReason?: string | null;
   armLabel: string;
   onResetTrack: () => void;
   resetDisabled: boolean;
@@ -81,13 +84,20 @@ export type SoloTrackLaneView = {
 // ─────────────────────────────────────────────────────────────────────────────
 // Public prop types — grouped buckets (mirror integration plan).
 
-export type KiteLoopV4SessionRecorderState = "idle" | "recording" | "paused" | "saving";
+export type KiteLoopV4SessionRecorderState =
+  | "idle"
+  | "requesting"
+  | "recording"
+  | "saving";
 
 export type KiteLoopV4LooperState = {
   soloLooperState: SoloLooperState;
   isRecordingArmed: boolean;
   isMasterPaused: boolean;
   sessionRecorderState: KiteLoopV4SessionRecorderState;
+  sessionRecorderCaptureMode: SoloSessionRecorderCaptureMode | null;
+  sessionRecorderError: string | null;
+  sessionRecorderSupportsScreenCapture: boolean;
   recordingArmedCountdown: number | null;
   runwayDisplay: RunwayDisplayLabel | null;
   /** Subtle boundary-aligned Timing Assist cue (Grid overdub / Handsfree Assist). */
@@ -158,6 +168,9 @@ export type KiteLoopV4InputDevicesProps = {
   registerMixerMeterElement: (laneKey: string, el: HTMLDivElement | null) => void;
   registerMasterLiveMeterElement: (el: HTMLDivElement | null) => void;
   recTrimSlot?: React.ReactNode;
+  /** When true, only one mic input can be active (iOS / mobile). */
+  mobileSingleInputOnly?: boolean;
+  mobileSingleInputHint?: string | null;
 };
 
 export type KiteLoopV4MetronomeProps = {
@@ -1009,6 +1022,9 @@ function TrackColumn({
           ? "Start first loop on Master 1"
           : `Record on ${trackDisplayName(lane.trackIndex)}`;
 
+  const recDisabledTitle =
+    lane.armDisabled && lane.armDisabledReason ? lane.armDisabledReason : undefined;
+
   const handleClear = (e: React.MouseEvent): void => {
     e.stopPropagation();
     if (!lane.resetDisabled) lane.onResetTrack();
@@ -1133,6 +1149,8 @@ function TrackColumn({
       <motion.button
         type="button"
         aria-label={recAriaLabel}
+        aria-disabled={!recInteractive}
+        title={recDisabledTitle}
         animate={isPulsing ? { opacity: [1, 0.5, 1] } : { opacity: recInteractive ? 1 : 0.45 }}
         transition={isPulsing ? { repeat: Infinity, duration: 0.9 } : {}}
         onPointerDown={handleRecPointerDown}
@@ -1141,8 +1159,10 @@ function TrackColumn({
         style={{
           position: "relative",
           zIndex: 1,
-          width: compact ? 56 : 80,
-          height: compact ? 56 : 80,
+          width: compact ? 56 : "clamp(48px, 14vw, 80px)",
+          height: compact ? 56 : "clamp(48px, 14vw, 80px)",
+          minWidth: 48,
+          minHeight: 48,
           borderRadius: "50%",
           display: "flex",
           flexDirection: "column",
@@ -1954,6 +1974,7 @@ function RunwayOverlay({ countdown }: RunwayOverlayProps): React.JSX.Element {
         justifyContent: "center",
         background: "rgba(0,0,0,0.6)",
         backdropFilter: "blur(4px)",
+        pointerEvents: "none",
       }}
     >
       <span
@@ -2048,7 +2069,7 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
     });
   }, [activeDeviceIds]);
 
-  const atDeviceCap = activeDeviceIds.length >= MAX_ACTIVE_INPUT_DEVICES;
+  const atDeviceCap = activeDeviceIds.length >= (inputDevices.mobileSingleInputOnly ? 1 : MAX_ACTIVE_INPUT_DEVICES);
 
   const laneCh = (lane: 0 | 1): number =>
     focusedSelectedDeviceId == null ? 75 : inputDevices.deviceVolumes[`${focusedSelectedDeviceId}:ch${lane}`] ?? 75;
@@ -2088,8 +2109,7 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
         top: 80,
         zIndex: 60,
         width: "min(600px, calc(100vw - 32px))",
-        height: "80vh",
-        maxHeight: 550,
+        height: "min(80dvh, 550px)",
       }}
     >
       <div
@@ -2155,6 +2175,18 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
               minHeight: 0,
             }}
           >
+            {inputDevices.mobileSingleInputHint ? (
+              <p
+                style={{
+                  color: "rgba(255,255,255,0.45)",
+                  fontSize: 10,
+                  lineHeight: 1.45,
+                  margin: "0 0 8px",
+                }}
+              >
+                {inputDevices.mobileSingleInputHint}
+              </p>
+            ) : null}
             <span
               style={{
                 color: "rgba(255,255,255,0.22)",
@@ -2173,7 +2205,13 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
                 <button
                   key={d.deviceId || d.groupId || d.label}
                   type="button"
-                  title={blocked ? `Maximum ${MAX_ACTIVE_INPUT_DEVICES} active inputs` : undefined}
+                  title={
+                    blocked
+                      ? inputDevices.mobileSingleInputOnly
+                        ? "Mobile browsers support one microphone input at a time."
+                        : `Maximum ${MAX_ACTIVE_INPUT_DEVICES} active inputs`
+                      : undefined
+                  }
                   onClick={() => handleToggleRow(d.deviceId, active)}
                   disabled={blocked}
                   style={{
@@ -2306,8 +2344,8 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
 
 const SESSION_COLORS: Record<KiteLoopV4SessionRecorderState, string> = {
   idle: "#ef4444",
+  requesting: "#f97316",
   recording: ORANGE,
-  paused: "#eab308",
   saving: EMERALD,
 };
 
@@ -2536,6 +2574,10 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const masterPaused = looperState.isMasterPaused;
   const solo = looperState.soloLooperState;
   const sessionTapeState = looperState.sessionRecorderState;
+  const sessionCaptureMode = looperState.sessionRecorderCaptureMode;
+  const sessionRecorderError = looperState.sessionRecorderError;
+  const sessionSupportsScreen = looperState.sessionRecorderSupportsScreenCapture;
+  const sessionIdleLabel = sessionSupportsScreen ? "Record Session" : "Record Audio";
 
   const masterTransportLive =
     !masterPaused &&
@@ -2630,6 +2672,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         display: "flex",
         flexDirection: "column",
         background: STUDIO_GLOW_ROOT_BG,
+        paddingTop: "env(safe-area-inset-top, 0px)",
+        paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}
     >
       <div
@@ -2709,7 +2753,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           display: "flex",
           alignItems: "flex-start",
           justifyContent: "space-between",
-          padding: "14px 16px 6px",
+          padding: "calc(14px + env(safe-area-inset-top, 0px)) 16px 6px",
         }}
       >
         <div style={{ display: "flex", gap: 8 }}>
@@ -2850,12 +2894,16 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           >
             <button
               type="button"
-              disabled={sessionTapeState === "saving"}
+              disabled={sessionTapeState === "saving" || sessionTapeState === "requesting"}
               onClick={() => looperHandlers.onToggleSessionRecording()}
               style={{
                 ...glassSharp,
-                padding: "7px 14px",
-                cursor: sessionTapeState === "saving" ? "wait" : "pointer",
+                padding: "10px 14px",
+                minHeight: 44,
+                cursor:
+                  sessionTapeState === "saving" || sessionTapeState === "requesting"
+                    ? "wait"
+                    : "pointer",
                 border: `1px solid ${sessionTapeState !== "idle" ? "rgba(255,69,0,0.45)" : "rgba(239, 68, 68, 0.5)"}`,
                 background: sessionTapeState !== "idle" ? "rgba(255,69,0,0.08)" : "rgba(239, 68, 68, 0.06)",
                 color: SESSION_COLORS[sessionTapeState],
@@ -2873,13 +2921,28 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 }}
               />
               {sessionTapeState === "idle"
-                ? "Record Session"
-                : sessionTapeState === "recording"
-                  ? "Recording…"
-                  : sessionTapeState === "paused"
-                    ? "Tape Paused"
+                ? sessionIdleLabel
+                : sessionTapeState === "requesting"
+                  ? "Starting…"
+                  : sessionTapeState === "recording"
+                    ? sessionCaptureMode === "audio-only"
+                      ? "Recording audio…"
+                      : "Recording…"
                     : "Saving…"}
             </button>
+
+            {sessionRecorderError ? (
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 10,
+                  lineHeight: 1.4,
+                  color: "rgba(252,165,165,0.95)",
+                }}
+              >
+                {sessionRecorderError}
+              </p>
+            ) : null}
 
             <AnimatePresence>
               {!inputsOpen ? (
@@ -2948,7 +3011,9 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "flex-end",
-          padding: isAirSynthActive ? "0 60px 10px" : "0 60px 18px",
+          padding: isAirSynthActive
+            ? "0 clamp(8px, 4vw, 60px) calc(10px + env(safe-area-inset-bottom, 0px))"
+            : "0 clamp(8px, 4vw, 60px) calc(18px + env(safe-area-inset-bottom, 0px))",
           gap: isAirSynthActive ? 8 : 12,
         }}
       >

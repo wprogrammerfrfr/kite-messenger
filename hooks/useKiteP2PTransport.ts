@@ -9,6 +9,7 @@ import {
   decodePeerDataChunk,
   type TurnCredentialsBundle,
 } from "@/lib/studio-bridge-webrtc";
+import { isStudioSafariWebKitEngine } from "@/lib/studio-webkit-detect";
 import { decodeLoadIntervalChunk } from "@/lib/kite-data-chunking";
 import { isPingMessage, isPongMessage } from "@/lib/p2p/data-channel-message-types";
 import {
@@ -50,12 +51,6 @@ function normalizeStudioSessionId(raw: string): string {
 
 function randomSessionId(): string {
   return normalizeStudioSessionId(Math.random().toString(36).slice(2, 8));
-}
-
-function isStudioSafariWebKitEngine(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const ua = navigator.userAgent;
-  return /Safari/i.test(ua) && !/Chrome|Chromium|Edg|OPR|CriOS|FxiOS/i.test(ua);
 }
 
 export type UseKiteP2PTransportConfig = {

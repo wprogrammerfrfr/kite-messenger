@@ -22,6 +22,8 @@ import type { KiteLoopV4InputDevicesProps, KiteLoopV4AirSynthProps, SoloTrackLan
 import type { AirSynthMode, MusicalKey } from "@/lib/theremin/kite-theremin-types";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
+import { isMobileDevice } from "@/lib/studio-bridge-webrtc";
+import { shareOrCopyText } from "@/lib/studio-mobile-share";
 import { useKiteStudioEngine } from "@/hooks/useKiteStudioEngine";
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
 import {
@@ -347,6 +349,11 @@ export default function StudioBridgePage() {
   const handsfreeSequenceActive = engineState.handsfreeSequenceActive;
   const isMasterPaused = engineState.isMasterPaused;
   const soloSessionRecorderState = engineState.soloSessionRecorderState;
+  const soloSessionRecorderCaptureMode = engineState.soloSessionRecorderCaptureMode;
+  const soloSessionRecorderError = engineState.soloSessionRecorderError;
+  const soloSessionRecorderSupportsScreenCapture =
+    engineState.soloSessionRecorderSupportsScreenCapture;
+  const mobileSingleInputOnly = useMemo(() => isMobileDevice(), []);
   const kiteSyncCountInActive = engineState.kiteSyncCountInActive;
   const metronomeVolume = engineState.metronomeVolume;
   const kiteIntervalTimingRef = engineState.kiteIntervalTimingRef;
@@ -631,6 +638,27 @@ export default function StudioBridgePage() {
         isRecordingArmed ||
         (soloLooperState === "recording" && !isThisTrackRecording);
       const trackIndex = n as 1 | 2 | 3 | 4;
+      const armDisabled = n === 1 ? track1ArmDisabled : secondaryBlocked;
+      const armDisabledReason = ((): string | null => {
+        if (!armDisabled) return null;
+        if (n === 1) {
+          if (isMasterPaused) return "Resume playback to record.";
+          if (isRecordingArmed) return "Count-in in progress.";
+          if (soloLooperState === "recording" && !isThisTrackRecording) {
+            return "Another track is recording.";
+          }
+          return "Recording unavailable.";
+        }
+        if (soloMasterLoopFrames == null || soloLooperState === "idle") {
+          return "Record Master 1 first.";
+        }
+        if (isRecordingArmed) return "Count-in in progress.";
+        if (isMasterPaused) return "Resume playback to overdub.";
+        if (soloLooperState === "recording" && !isThisTrackRecording) {
+          return "Another track is recording.";
+        }
+        return "Overdub unavailable.";
+      })();
       return {
         trackIndex,
         volume: soloTrackVolumes[n - 1],
@@ -638,7 +666,8 @@ export default function StudioBridgePage() {
         workletMode: slot?.mode ?? "idle",
         onVolumeChange: (lin: number) => handleSoloTrackVolumeChange(trackIndex, lin),
         onArmRecord: () => handleTrackTransportTap(trackIndex),
-        armDisabled: n === 1 ? track1ArmDisabled : secondaryBlocked,
+        armDisabled,
+        armDisabledReason,
         armLabel: n === 1 ? "Record" : "Overdub",
         isFocused: focusedTrackIndex === n,
         onRequestFocus: () => applyPedalFocus(trackIndex),
@@ -683,24 +712,16 @@ export default function StudioBridgePage() {
 
     const copyInviteLink = async () => {
     if (!inviteLink || typeof window === "undefined") return;
-    try {
-      await navigator.clipboard.writeText(inviteLink);
-      setStatusNote("Invite link copied.");
-    } catch {
-      setStatusNote("Copy failed. Share the URL manually.");
-    }
+    const shared = await shareOrCopyText(inviteLink, "Invite to Kite Studio");
+    setStatusNote(shared ? "Invite link copied." : "Copy failed. Share the URL manually.");
   };
 
   const copyRoomCode = async () => {
     if (!sessionId || typeof window === "undefined") return;
-    try {
-      await navigator.clipboard.writeText(sessionId.toUpperCase());
-      setRoomCopyNote("Room code copied.");
-      window.setTimeout(() => setRoomCopyNote(null), 1400);
-    } catch {
-      setRoomCopyNote("Copy not available.");
-      window.setTimeout(() => setRoomCopyNote(null), 1400);
-    }
+    const code = sessionId.toUpperCase();
+    const shared = await shareOrCopyText(code, "Kite room code");
+    setRoomCopyNote(shared ? "Room code copied." : "Copy not available.");
+    window.setTimeout(() => setRoomCopyNote(null), 1400);
   };
 
     const airSynthForPanel = useMemo<KiteLoopV4AirSynthProps>(
@@ -745,6 +766,10 @@ export default function StudioBridgePage() {
         onSetInterfaceLiveMonitor: setInterfaceLiveMonitorEnabledFlag,
         registerMixerMeterElement,
         registerMasterLiveMeterElement,
+        mobileSingleInputOnly,
+        mobileSingleInputHint: mobileSingleInputOnly
+          ? "Mobile browsers allow one microphone input. Output routing is controlled by your device."
+          : null,
         recTrimSlot: (
           <>
             <div
@@ -921,8 +946,7 @@ export default function StudioBridgePage() {
     setInterfaceLiveMonitorEnabledFlag,
     registerMixerMeterElement,
     registerMasterLiveMeterElement,
-    soloInputGain,
-    setSoloInputGain,
+    mobileSingleInputOnly,
   ]);
 
     const renderVisualMetronomeControls = () => (
@@ -964,7 +988,7 @@ export default function StudioBridgePage() {
   );
 
     return (
-    <div className="relative min-h-screen overflow-hidden text-white antialiased">
+    <div className="relative min-h-[100dvh] overflow-hidden text-white antialiased">
       <div className="fixed inset-0" style={{ backgroundColor: OBSIDIAN }} aria-hidden />
       <div
         className="pointer-events-none fixed inset-0 z-0"
@@ -1042,7 +1066,7 @@ export default function StudioBridgePage() {
       <audio ref={remoteAudioRef} className="sr-only" playsInline muted />
 
       <div
-        className={`relative z-10 mx-auto flex min-h-screen w-full flex-col ${
+        className={`relative z-10 mx-auto flex min-h-[100dvh] w-full flex-col ${
           showP2PV2Connected
             ? "max-w-none justify-start p-0"
             : showP2PV2Connecting
@@ -2203,6 +2227,9 @@ export default function StudioBridgePage() {
             isRecordingArmed,
             isMasterPaused,
             sessionRecorderState: soloSessionRecorderState,
+            sessionRecorderCaptureMode: soloSessionRecorderCaptureMode,
+            sessionRecorderError: soloSessionRecorderError,
+            sessionRecorderSupportsScreenCapture: soloSessionRecorderSupportsScreenCapture,
             recordingArmedCountdown,
             runwayDisplay: soloRunwayDisplay,
             assistBoundaryCountdown,

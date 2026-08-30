@@ -46,8 +46,9 @@ const serwist = new Serwist({
       handler: new NetworkOnly(),
     },
     {
-      matcher: ({ request, sameOrigin }) =>
+      matcher: ({ url, request, sameOrigin }) =>
         sameOrigin &&
+        !url.pathname.startsWith("/worklets/") &&
         (request.destination === "script" ||
           request.destination === "style" ||
           request.destination === "font"),
