@@ -8,36 +8,59 @@ import GlobalNavShell from "@/components/GlobalNavShell";
 
 const siteTitle = "Kite Studio";
 const siteDescription =
-  "The world's first browser-based loopstation and real-time musical collaboration platform for live P2P jam sessions.";
+  "The world's first web-based P2P jamming session and 4-track loopstation.";
+
+function resolveMetadataBase(): URL {
+  const fromEnv =
+    process.env.NEXT_PUBLIC_SITE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_APP_URL?.trim();
+  if (fromEnv) {
+    return new URL(fromEnv.replace(/\/$/, ""));
+  }
+  if (process.env.NODE_ENV === "production") {
+    return new URL("https://kitestudiopro.vercel.app");
+  }
+  return new URL("http://localhost:3000");
+}
 
 export const metadata: Metadata = {
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"
-  ),
+  metadataBase: resolveMetadataBase(),
   title: {
     default: siteTitle,
     template: "%s | Kite Studio",
   },
   description: siteDescription,
+  applicationName: siteTitle,
+  authors: [{ name: siteTitle }],
+  creator: siteTitle,
+  publisher: siteTitle,
   keywords: [
     "online jamming",
     "browser musical studio",
     "browser-based loopstation",
+    "4-track loopstation",
+    "web-based P2P jam",
     "looper",
     "real-time musical collaboration",
     "P2P jam room",
     "WebRTC music studio",
   ],
   icons: {
-    icon: "/kite-mobile-icon.svg",
-    shortcut: "/kite-mobile-icon.svg",
-    apple: "/kite-mobile-icon.svg",
+    icon: [
+      { url: "/icons/icon-192x192.png", sizes: "192x192", type: "image/png" },
+      { url: "/kite-mobile-icon.svg", type: "image/svg+xml" },
+    ],
+    shortcut: "/icons/icon-192x192.png",
+    apple: "/icons/icon-192x192.png",
   },
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Kite",
+    title: siteTitle,
+  },
+  alternates: {
+    canonical: "/",
   },
   openGraph: {
     title: siteTitle,

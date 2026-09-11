@@ -4,10 +4,20 @@ import { Suspense } from "react";
 import WelcomePage from "@/components/WelcomePage";
 
 const homeDescription =
-  "The world's first browser-based loopstation and real-time musical collaboration platform for live P2P jam sessions.";
+  "The world's first web-based P2P jamming session and 4-track loopstation.";
+
+const siteUrl = "https://kitestudiopro.vercel.app/";
+
+const websiteJsonLd = {
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  name: "Kite Studio",
+  alternateName: ["Kite", "kitestudiopro.vercel.app"],
+  url: siteUrl,
+  description: homeDescription,
+};
 
 export const metadata: Metadata = {
-  title: "Welcome",
   description: homeDescription,
   openGraph: {
     title: "Kite Studio",
@@ -43,8 +53,14 @@ function WelcomePageFallback() {
 
 export default function Home() {
   return (
-    <Suspense fallback={<WelcomePageFallback />}>
-      <WelcomePage />
-    </Suspense>
+    <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(websiteJsonLd) }}
+      />
+      <Suspense fallback={<WelcomePageFallback />}>
+        <WelcomePage />
+      </Suspense>
+    </>
   );
 }

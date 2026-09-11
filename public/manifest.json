@@ -1,7 +1,7 @@
 {
-  "name": "Kite — Secure Messaging",
-  "short_name": "Kite",
-  "description": "End-to-end encrypted messaging optimized for low bandwidth.",
+  "name": "Kite Studio",
+  "short_name": "Kite Studio",
+  "description": "The world's first web-based P2P jamming session and 4-track loopstation.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

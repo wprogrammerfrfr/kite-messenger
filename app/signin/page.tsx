@@ -5,7 +5,8 @@ import SignInPage from "@/components/SignInPage";
 
 export const metadata: Metadata = {
   title: "Sign in",
-  description: "Sign in or create a Kite Studio account to host and join P2P jam sessions.",
+  description:
+    "The world's first web-based P2P jamming session and 4-track loopstation.",
 };
 
 function SignInPageFallback() {

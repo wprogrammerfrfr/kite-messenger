@@ -43,7 +43,7 @@ export function KiteStudioLandingFooter({ privacyPage = false }: KiteStudioLandi
         <div>
           <BrandMark />
           <p style={{ fontFamily: displayFont, color: MUTE, fontSize: 13, marginTop: 8, maxWidth: 280 }}>
-            The browser-based loopstation and P2P jam platform. Fly with Kite Studio.
+            The world&apos;s first web-based P2P jamming session and 4-track loopstation.
           </p>
           <p style={{ fontFamily: monoFont, color: MUTE, fontSize: 12, marginTop: 12 }}>supportkite@gmail.com</p>
         </div>
