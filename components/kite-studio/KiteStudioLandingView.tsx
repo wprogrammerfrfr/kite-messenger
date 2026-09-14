@@ -4,10 +4,7 @@ import Link from "next/link";
 import { BrandMark, KiteStudioLandingFooter } from "@/components/kite-studio/KiteStudioLandingFooter";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  Music2,
-  Users,
   Radio,
-  Lock,
   Mic,
   Gauge,
   Video,
@@ -20,6 +17,7 @@ import {
   X,
   Waves,
   Share2,
+  Instagram,
   type LucideIcon,
 } from "lucide-react";
 
@@ -352,7 +350,6 @@ function Nav() {
     { label: "Studio", href: "#pillars" },
     { label: "Looper", href: "#looper" },
     { label: "Modes", href: "#modes" },
-    { label: "Privacy", href: "#privacy" },
   ];
 
   return (
@@ -599,68 +596,150 @@ function SectionHeading({
   );
 }
 
+const DEMO_YOUTUBE_URL = "https://youtu.be/BKSzTsNJ33o";
+const DEMO_YOUTUBE_EMBED = "https://www.youtube-nocookie.com/embed/BKSzTsNJ33o";
+const TUTORIAL_YOUTUBE_URL = "https://youtu.be/4pTQ3RoJbQA";
+const TUTORIAL_YOUTUBE_EMBED = "https://www.youtube-nocookie.com/embed/4pTQ3RoJbQA";
+const INSTAGRAM_URL = "https://www.instagram.com/kitestudiopro/";
+
+const videoFrameStyle = {
+  background: "rgba(255,255,255,0.03)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  boxShadow: `0 0 0 1px ${ORANGE}22, 0 0 48px ${ORANGE}33, 0 0 80px ${TEAL}28`,
+} as const;
+
 function Pillars() {
-  const pillars = [
-    {
-      icon: Music2,
-      color: ORANGE,
-      title: "Web-Based Loopstation",
-      desc: "A Boss-style 4-track loopstation that runs natively in the browser. Sample-accurate looping powered by an AudioWorklet engine, not JavaScript timers.",
-    },
-    {
-      icon: Users,
-      color: TEAL,
-      title: "P2P Jam Sessions",
-      desc: "WebRTC carries audio, video, and loop data directly between players. Nothing routes through Kite's servers unless a restrictive network forces a relay.",
-    },
-    {
-      icon: Radio,
-      color: ORANGE,
-      title: "Kite Sync",
-      desc: "A latency-aware sync engine that turns network delay into usable musical timing — count in, lock the grid, and play in time together.",
-    },
-  ];
   return (
-    <section id="pillars" className="px-6 py-28" style={{ background: INK }}>
-      <div className="max-w-7xl mx-auto">
-        <SectionHeading
-          eyebrow="THE STACK"
-          title="One studio. Three engines."
-          sub="Kite Studio isn't a video call with a record button pasted on. It's built engine-first, for musicians who need timing they can trust."
-        />
-        <div className="grid md:grid-cols-3 gap-6">
-          {pillars.map((p, i) => (
-            <Reveal key={p.title} delay={i * 120}>
-              <div
-                className="relative rounded-2xl p-7 h-full"
-                style={{
-                  background: "rgba(255,255,255,0.03)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  transition: "transform 0.35s ease, border-color 0.35s ease",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = "translateY(-6px)";
-                  e.currentTarget.style.borderColor = `${p.color}55`;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.transform = "translateY(0px)";
-                  e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)";
-                }}
+    <section
+      id="pillars"
+      className="relative px-6 py-32 overflow-hidden"
+      style={{
+        background: `radial-gradient(70% 55% at 20% 20%, ${ORANGE}1f 0%, transparent 55%), radial-gradient(65% 50% at 85% 70%, ${TEAL}1f 0%, transparent 55%), ${INK}`,
+      }}
+    >
+      <div className="max-w-7xl mx-auto relative z-10">
+        <Reveal>
+          <h2
+            className="text-center font-bold tracking-tight leading-[1.12] max-w-4xl mx-auto"
+            style={{
+              fontFamily: displayFont,
+              color: PAPER,
+              fontSize: "clamp(2.1rem, 5.5vw, 4rem)",
+            }}
+          >
+            Creating music should be for{" "}
+            <span style={gradientTextStyle}>anyone</span> from{" "}
+            <span style={gradientTextStyle}>anywhere</span>.
+          </h2>
+        </Reveal>
+
+        <Reveal delay={100}>
+          <p
+            className="text-center max-w-2xl mx-auto mt-6"
+            style={{
+              fontFamily: displayFont,
+              color: MUTE,
+              fontSize: "clamp(1.05rem, 2.2vw, 1.35rem)",
+              lineHeight: 1.5,
+            }}
+          >
+            Here&apos;s what{" "}
+            <span style={{ color: ORANGE, fontWeight: 600 }}>you</span> can do with Kite Studio
+            Looper.
+          </p>
+        </Reveal>
+
+        <Reveal delay={180}>
+          <div className="mt-14 max-w-6xl mx-auto rounded-3xl overflow-hidden" style={videoFrameStyle}>
+            <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
+              <iframe
+                src={DEMO_YOUTUBE_EMBED}
+                title="Kite Studio Looper demo"
+                loading="lazy"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                referrerPolicy="strict-origin-when-cross-origin"
+                className="absolute inset-0 w-full h-full border-0"
+              />
+            </div>
+          </div>
+        </Reveal>
+
+        <Reveal delay={260}>
+          <p
+            className="text-center max-w-2xl mx-auto mt-14"
+            style={{
+              fontFamily: displayFont,
+              color: PAPER,
+              fontSize: "clamp(1rem, 2vw, 1.25rem)",
+              lineHeight: 1.45,
+            }}
+          >
+            <span style={{ color: ORANGE_SOFT }}>First time?</span> Here is the tutorial!!
+          </p>
+        </Reveal>
+
+        <Reveal delay={320}>
+          <div className="mt-8 max-w-6xl mx-auto rounded-3xl overflow-hidden" style={videoFrameStyle}>
+            <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
+              <iframe
+                src={TUTORIAL_YOUTUBE_EMBED}
+                title="How to use Kite Studio"
+                loading="lazy"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                referrerPolicy="strict-origin-when-cross-origin"
+                className="absolute inset-0 w-full h-full border-0"
+              />
+            </div>
+          </div>
+        </Reveal>
+
+        <Reveal delay={380}>
+          <div className="mt-10 flex flex-col items-center gap-5">
+            <p
+              className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1"
+              style={{ fontFamily: monoFont, color: MUTE, fontSize: 12 }}
+            >
+              <a
+                href={DEMO_YOUTUBE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="transition-colors hover:text-[#FF7A45]"
+                style={{ color: "inherit", textDecoration: "none" }}
               >
-                <div
-                  className="w-11 h-11 rounded-xl flex items-center justify-center mb-6"
-                  style={{ background: `${p.color}18`, border: `1px solid ${p.color}44` }}
-                >
-                  <p.icon size={20} color={p.color} />
-                </div>
-                <h3 className="text-lg font-semibold mb-3" style={{ fontFamily: displayFont, color: PAPER }}>
-                  {p.title}
-                </h3>
-                <p style={{ fontFamily: displayFont, color: MUTE, fontSize: 14.5, lineHeight: 1.6 }}>{p.desc}</p>
-              </div>
-            </Reveal>
-          ))}
-        </div>
+                Watch demo
+              </a>
+              <span aria-hidden>·</span>
+              <a
+                href={TUTORIAL_YOUTUBE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="transition-colors hover:text-[#FF7A45]"
+                style={{ color: "inherit", textDecoration: "none" }}
+              >
+                Watch tutorial
+              </a>
+            </p>
+
+            <a
+              href={INSTAGRAM_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group inline-flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl font-semibold text-sm transition-transform duration-300 hover:scale-[1.02]"
+              style={{
+                fontFamily: displayFont,
+                color: INK,
+                background: `linear-gradient(100deg, ${ORANGE} 0%, ${ORANGE_SOFT} 45%, ${TEAL} 100%)`,
+                boxShadow: `0 8px 30px -8px ${ORANGE}88`,
+                textDecoration: "none",
+              }}
+            >
+              <Instagram size={18} />
+              Follow our Instagram for more content!
+            </a>
+          </div>
+        </Reveal>
       </div>
     </section>
   );
@@ -871,53 +950,6 @@ function SessionFlow() {
   );
 }
 
-function Privacy() {
-  const points = [
-    "Session audio, video, loops, and in-session text are P2P — not stored on Kite's servers",
-    "Supabase handles auth and an optional profile only",
-    "Room codes and connection signaling are transient, used only to establish the link",
-  ];
-  return (
-    <section id="privacy" className="px-6 py-24" style={{ background: INK }}>
-      <div
-        className="max-w-5xl mx-auto rounded-3xl p-10 md:p-14 relative overflow-hidden"
-        style={{
-          background: `linear-gradient(120deg, ${TEAL}14, transparent 60%)`,
-          border: "1px solid rgba(255,255,255,0.08)",
-        }}
-      >
-        <Reveal>
-          <div className="flex items-center gap-3 mb-6">
-            <div
-              className="w-10 h-10 rounded-xl flex items-center justify-center"
-              style={{ background: `${TEAL}22`, border: `1px solid ${TEAL}55` }}
-            >
-              <Lock size={18} color={TEAL_SOFT} />
-            </div>
-            <span style={{ fontFamily: monoFont, color: TEAL_SOFT, fontSize: 12 }}>PRIVACY BY ARCHITECTURE</span>
-          </div>
-          <h2
-            className="font-bold mb-8 max-w-xl"
-            style={{ fontFamily: displayFont, color: PAPER, fontSize: "clamp(1.6rem, 3.4vw, 2.2rem)" }}
-          >
-            Your jam stays between you and your bandmate — not on our servers.
-          </h2>
-        </Reveal>
-        <div className="grid md:grid-cols-3 gap-6">
-          {points.map((p, i) => (
-            <Reveal key={p} delay={i * 100}>
-              <div className="flex gap-3">
-                <Check size={16} color={TEAL_SOFT} className="mt-0.5 flex-shrink-0" />
-                <p style={{ fontFamily: displayFont, color: MUTE, fontSize: 14 }}>{p}</p>
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 export default function KiteStudioLandingView() {
   return (
     <div className="kite-studio-landing" style={{ minHeight: "100vh" }}>
@@ -928,7 +960,6 @@ export default function KiteStudioLandingView() {
       <LooperShowcase />
       <Modes />
       <SessionFlow />
-      <Privacy />
       <KiteStudioLandingFooter />
     </div>
   );
