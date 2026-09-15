@@ -227,6 +227,54 @@ const STUDIO_GLOW_FRAME_SHADOW =
 const STUDIO_GLOW_VIGNETTE_BG =
   "radial-gradient(ellipse 85% 70% at 50% 45%, transparent 0%, rgba(0, 0, 0, 0.35) 72%, rgba(0, 0, 0, 0.65) 100%)";
 const WEBCAM_FRAME_FALLBACK_ASPECT = 16 / 9;
+const WEBCAM_SOFT_WIDTH_THRESHOLD = 960;
+
+type StudioWebcamFacingRequest = {
+  facingMode: "user" | "environment";
+  exactFacing?: boolean;
+};
+
+type StudioWebcamDeviceRequest = {
+  deviceId: string;
+};
+
+function studioWebcamVideoConstraints(
+  facingOrDevice: StudioWebcamFacingRequest | StudioWebcamDeviceRequest
+): MediaTrackConstraints {
+  const base: MediaTrackConstraints = {
+    width: { ideal: 1280, max: 1920 },
+    height: { ideal: 720, max: 1080 },
+    frameRate: { ideal: 30, max: 30 },
+  };
+  if ("deviceId" in facingOrDevice) {
+    return {
+      ...base,
+      deviceId: { exact: facingOrDevice.deviceId },
+    };
+  }
+  return {
+    ...base,
+    facingMode: facingOrDevice.exactFacing
+      ? { exact: facingOrDevice.facingMode }
+      : { ideal: facingOrDevice.facingMode },
+  };
+}
+
+async function bumpWebcamTrackIfSoft(stream: MediaStream): Promise<void> {
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+  const width = track.getSettings().width ?? 0;
+  if (width >= WEBCAM_SOFT_WIDTH_THRESHOLD) return;
+  try {
+    await track.applyConstraints({
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30 },
+    });
+  } catch {
+    // Some stacks reject post-open bumps; keep the stream as-is.
+  }
+}
 
 function getWebcamFrameLayoutStyle(
   aspect: number,
@@ -2508,20 +2556,23 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
   const openCameraWithFacing = useCallback(
     async (facing: "user" | "environment"): Promise<MediaStream> => {
+      let stream: MediaStream;
       try {
-        return await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { exact: facing } },
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: studioWebcamVideoConstraints({ facingMode: facing, exactFacing: true }),
           audio: false,
         });
       } catch (err) {
         const overconstrained =
           err instanceof DOMException && err.name === "OverconstrainedError";
         if (!overconstrained) throw err;
-        return navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: facing } },
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: studioWebcamVideoConstraints({ facingMode: facing, exactFacing: false }),
           audio: false,
         });
       }
+      await bumpWebcamTrackIfSoft(stream);
+      return stream;
     },
     []
   );
@@ -2535,10 +2586,12 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
       if (!other?.deviceId) {
         throw new Error("No other camera found");
       }
-      return navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: other.deviceId } },
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: studioWebcamVideoConstraints({ deviceId: other.deviceId }),
         audio: false,
       });
+      await bumpWebcamTrackIfSoft(stream);
+      return stream;
     },
     []
   );
