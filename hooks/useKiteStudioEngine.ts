@@ -16,6 +16,7 @@ import { TrackRecorder } from "@/lib/track-recorder";
 import {
   canUseDisplayMedia,
   canUseMediaRecorder,
+  getSessionDisplayMediaStream,
   resolveSessionDownloadExtension,
   selectSessionAudioMediaRecorderOptions,
   selectSessionVideoMediaRecorderOptions,
@@ -588,10 +589,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     useState<SoloSessionRecorderCaptureModeType | null>(null);
   const [soloSessionRecorderError, setSoloSessionRecorderError] =
     useState<string | null>(null);
-  const soloSessionRecorderSupportsScreenCapture = useMemo(
-    () => canUseDisplayMedia(),
-    []
-  );
+  /** Hydrate after mount — SSR / first paint has no `navigator`, so empty-deps useMemo freezes false. */
+  const [soloSessionRecorderSupportsScreenCapture, setSoloSessionRecorderSupportsScreenCapture] =
+    useState(false);
+  useEffect(() => {
+    setSoloSessionRecorderSupportsScreenCapture(canUseDisplayMedia());
+  }, []);
   const [loopChunkSendError, setLoopChunkSendError] = useState<string | null>(null);
   const [loopChunkSendProgress, setLoopChunkSendProgress] = useState<KiteLoopChunkSendProgress>({
     status: "idle",
@@ -5061,10 +5064,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       if (screenCaptureAvailable) {
         let displayStream: MediaStream;
         try {
-          displayStream = await navigator.mediaDevices.getDisplayMedia({
-            video: { frameRate: { ideal: 30, max: 30 } },
-            audio: false,
-          });
+          displayStream = await getSessionDisplayMediaStream();
         } catch (err) {
           const denied = isMicPermissionDeniedError(err);
           throw new Error(

@@ -28,10 +28,12 @@ import {
   Video,
   VideoOff,
   Music2,
+  SwitchCamera,
 } from "lucide-react";
 
 import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
 import type { RunwayDisplayLabel } from "@/lib/looper-runway-scheduler";
+import { isMobileDevice } from "@/lib/studio-bridge-webrtc";
 
 import type { LooperRunwayPhase } from "@/components/kite-loop-v2/LooperCountdownRunway";
 import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
@@ -2383,6 +2385,11 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [videoReady, setVideoReady] = useState(false);
+  const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
+  const [canFlipCamera, setCanFlipCamera] = useState(false);
+  const [isFlippingCamera, setIsFlippingCamera] = useState(false);
+  /** Client-only; SSR-safe default false. */
+  const [isMobileUi, setIsMobileUi] = useState(false);
   /** Reactive snapshot of the studio AudioContext (ref alone does not re-render). */
   const [studioAudioContext, setStudioAudioContext] = useState<AudioContext | null>(
     () => studioAudioContextRef.current
@@ -2490,6 +2497,35 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     return () => window.removeEventListener("resize", onResize);
   }, [isCameraActive, applyWebcamFrameLayout]);
 
+  useEffect(() => {
+    setIsMobileUi(isMobileDevice());
+  }, []);
+
+  const refreshCanFlipCamera = useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+      setCanFlipCamera(false);
+      return;
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter((d) => d.kind === "videoinput");
+      setCanFlipCamera(videoInputs.length > 1);
+    } catch {
+      // Permission may still be pending; allow flip attempt on mobile.
+      setCanFlipCamera(true);
+    }
+  }, []);
+
+  const openCameraWithFacing = useCallback(
+    async (facing: "user" | "environment"): Promise<MediaStream> => {
+      return navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facing } },
+        audio: false,
+      });
+    },
+    []
+  );
+
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
       cameraStream?.getTracks().forEach((t) => t.stop());
@@ -2497,19 +2533,50 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
       setIsCameraActive(false);
       setCameraError(null);
       setVideoReady(false);
+      setCameraFacingMode("user");
+      setCanFlipCamera(false);
       return;
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      const stream = await openCameraWithFacing(cameraFacingMode);
       setCameraStream(stream);
       setIsCameraActive(true);
       setCameraError(null);
+      void refreshCanFlipCamera();
     } catch (err) {
       setCameraError(err instanceof Error ? err.message : "Camera access denied");
       setIsCameraActive(false);
     }
-  }, [cameraStream, isCameraActive]);
+  }, [cameraFacingMode, cameraStream, isCameraActive, openCameraWithFacing, refreshCanFlipCamera]);
+
+  const handleFlipCamera = useCallback(async () => {
+    if (!isCameraActive || isFlippingCamera || isAirSynthActive) return;
+    const nextFacing: "user" | "environment" =
+      cameraFacingMode === "user" ? "environment" : "user";
+    setIsFlippingCamera(true);
+    setCameraError(null);
+    try {
+      const nextStream = await openCameraWithFacing(nextFacing);
+      cameraStream?.getTracks().forEach((t) => t.stop());
+      setCameraStream(nextStream);
+      setCameraFacingMode(nextFacing);
+      setVideoReady(false);
+      void refreshCanFlipCamera();
+    } catch (err) {
+      setCameraError(err instanceof Error ? err.message : "Could not switch camera");
+    } finally {
+      setIsFlippingCamera(false);
+    }
+  }, [
+    cameraFacingMode,
+    cameraStream,
+    isAirSynthActive,
+    isCameraActive,
+    isFlippingCamera,
+    openCameraWithFacing,
+    refreshCanFlipCamera,
+  ]);
 
   useEffect(() => {
     const el = videoRef.current;
@@ -2706,7 +2773,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 position: "relative",
                 width: "100%",
                 height: "100%",
-                transform: "scaleX(-1)",
+                transform: cameraFacingMode === "user" ? "scaleX(-1)" : "none",
               }}
             >
               <video
@@ -2724,6 +2791,39 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 }}
               />
             </div>
+            {isMobileUi && isCameraActive && canFlipCamera ? (
+              <button
+                type="button"
+                onClick={() => void handleFlipCamera()}
+                disabled={isFlippingCamera || isAirSynthActive}
+                title={
+                  isAirSynthActive
+                    ? "Flip camera is unavailable while Air Synth is on"
+                    : "Flip camera"
+                }
+                aria-label="Flip camera"
+                style={{
+                  position: "absolute",
+                  right: 10,
+                  bottom: 10,
+                  zIndex: 5,
+                  pointerEvents: "auto",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 36,
+                  height: 36,
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.22)",
+                  background: "rgba(10,10,10,0.72)",
+                  color: "#fafafa",
+                  cursor: isFlippingCamera || isAirSynthActive ? "not-allowed" : "pointer",
+                  opacity: isFlippingCamera || isAirSynthActive ? 0.45 : 1,
+                }}
+              >
+                <SwitchCamera size={16} />
+              </button>
+            ) : null}
             <KiteAirSynthPanel
               visible={isAirSynthActive && isCameraActive}
               mode={airSynth?.mode ?? "two-hand"}
