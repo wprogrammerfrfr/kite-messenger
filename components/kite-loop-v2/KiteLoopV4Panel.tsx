@@ -2386,7 +2386,6 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [videoReady, setVideoReady] = useState(false);
   const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
-  const [canFlipCamera, setCanFlipCamera] = useState(false);
   const [isFlippingCamera, setIsFlippingCamera] = useState(false);
   /** Client-only; SSR-safe default false. */
   const [isMobileUi, setIsMobileUi] = useState(false);
@@ -2501,25 +2500,43 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     setIsMobileUi(isMobileDevice());
   }, []);
 
-  const refreshCanFlipCamera = useCallback(async () => {
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
-      setCanFlipCamera(false);
-      return;
-    }
-    try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoInputs = devices.filter((d) => d.kind === "videoinput");
-      setCanFlipCamera(videoInputs.length > 1);
-    } catch {
-      // Permission may still be pending; allow flip attempt on mobile.
-      setCanFlipCamera(true);
-    }
+  const releaseCameraHardware = useCallback((stream: MediaStream | null): void => {
+    const el = videoRef.current;
+    if (el) el.srcObject = null;
+    stream?.getTracks().forEach((t) => t.stop());
   }, []);
 
   const openCameraWithFacing = useCallback(
     async (facing: "user" | "environment"): Promise<MediaStream> => {
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: facing } },
+          audio: false,
+        });
+      } catch (err) {
+        const overconstrained =
+          err instanceof DOMException && err.name === "OverconstrainedError";
+        if (!overconstrained) throw err;
+        return navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facing } },
+          audio: false,
+        });
+      }
+    },
+    []
+  );
+
+  const openCameraWithOtherDeviceId = useCallback(
+    async (excludeDeviceId: string | null): Promise<MediaStream> => {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
+      const other =
+        videoInputs.find((d) => d.deviceId !== excludeDeviceId) ?? videoInputs[0];
+      if (!other?.deviceId) {
+        throw new Error("No other camera found");
+      }
       return navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facing } },
+        video: { deviceId: { exact: other.deviceId } },
         audio: false,
       });
     },
@@ -2528,13 +2545,12 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
-      cameraStream?.getTracks().forEach((t) => t.stop());
+      releaseCameraHardware(cameraStream);
       setCameraStream(null);
       setIsCameraActive(false);
       setCameraError(null);
       setVideoReady(false);
       setCameraFacingMode("user");
-      setCanFlipCamera(false);
       return;
     }
 
@@ -2543,27 +2559,77 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
       setCameraStream(stream);
       setIsCameraActive(true);
       setCameraError(null);
-      void refreshCanFlipCamera();
     } catch (err) {
       setCameraError(err instanceof Error ? err.message : "Camera access denied");
       setIsCameraActive(false);
     }
-  }, [cameraFacingMode, cameraStream, isCameraActive, openCameraWithFacing, refreshCanFlipCamera]);
+  }, [
+    cameraFacingMode,
+    cameraStream,
+    isCameraActive,
+    openCameraWithFacing,
+    releaseCameraHardware,
+  ]);
 
   const handleFlipCamera = useCallback(async () => {
     if (!isCameraActive || isFlippingCamera || isAirSynthActive) return;
     const nextFacing: "user" | "environment" =
       cameraFacingMode === "user" ? "environment" : "user";
+    const prevFacing = cameraFacingMode;
+    const prevDeviceId =
+      cameraStream?.getVideoTracks()[0]?.getSettings().deviceId ?? null;
+
     setIsFlippingCamera(true);
     setCameraError(null);
+    // Release hardware first — many phones keep the same camera if the old stream is live.
+    releaseCameraHardware(cameraStream);
+    setCameraStream(null);
+    setVideoReady(false);
+
     try {
-      const nextStream = await openCameraWithFacing(nextFacing);
-      cameraStream?.getTracks().forEach((t) => t.stop());
+      let nextStream: MediaStream;
+      try {
+        nextStream = await openCameraWithFacing(nextFacing);
+      } catch {
+        nextStream = await openCameraWithOtherDeviceId(prevDeviceId);
+      }
+
+      const nextDeviceId =
+        nextStream.getVideoTracks()[0]?.getSettings().deviceId ?? null;
+      const nextReportedFacing =
+        nextStream.getVideoTracks()[0]?.getSettings().facingMode ?? null;
+      const sameCamera =
+        prevDeviceId != null &&
+        nextDeviceId != null &&
+        prevDeviceId === nextDeviceId;
+      const facingUnchanged =
+        nextReportedFacing === "user" || nextReportedFacing === "environment"
+          ? nextReportedFacing === prevFacing
+          : false;
+
+      if (sameCamera || facingUnchanged) {
+        nextStream.getTracks().forEach((t) => t.stop());
+        nextStream = await openCameraWithOtherDeviceId(prevDeviceId);
+      }
+
+      const appliedFacing =
+        nextStream.getVideoTracks()[0]?.getSettings().facingMode === "environment" ||
+        nextStream.getVideoTracks()[0]?.getSettings().facingMode === "user"
+          ? (nextStream.getVideoTracks()[0]?.getSettings().facingMode as
+              | "user"
+              | "environment")
+          : nextFacing;
+
       setCameraStream(nextStream);
-      setCameraFacingMode(nextFacing);
-      setVideoReady(false);
-      void refreshCanFlipCamera();
+      setCameraFacingMode(appliedFacing);
     } catch (err) {
+      try {
+        const restored = await openCameraWithFacing(prevFacing);
+        setCameraStream(restored);
+        setCameraFacingMode(prevFacing);
+      } catch {
+        setIsCameraActive(false);
+      }
       setCameraError(err instanceof Error ? err.message : "Could not switch camera");
     } finally {
       setIsFlippingCamera(false);
@@ -2575,7 +2641,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     isCameraActive,
     isFlippingCamera,
     openCameraWithFacing,
-    refreshCanFlipCamera,
+    openCameraWithOtherDeviceId,
+    releaseCameraHardware,
   ]);
 
   useEffect(() => {
@@ -2791,39 +2858,6 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 }}
               />
             </div>
-            {isMobileUi && isCameraActive && canFlipCamera ? (
-              <button
-                type="button"
-                onClick={() => void handleFlipCamera()}
-                disabled={isFlippingCamera || isAirSynthActive}
-                title={
-                  isAirSynthActive
-                    ? "Flip camera is unavailable while Air Synth is on"
-                    : "Flip camera"
-                }
-                aria-label="Flip camera"
-                style={{
-                  position: "absolute",
-                  right: 10,
-                  bottom: 10,
-                  zIndex: 5,
-                  pointerEvents: "auto",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 36,
-                  height: 36,
-                  borderRadius: 999,
-                  border: "1px solid rgba(255,255,255,0.22)",
-                  background: "rgba(10,10,10,0.72)",
-                  color: "#fafafa",
-                  cursor: isFlippingCamera || isAirSynthActive ? "not-allowed" : "pointer",
-                  opacity: isFlippingCamera || isAirSynthActive ? 0.45 : 1,
-                }}
-              >
-                <SwitchCamera size={16} />
-              </button>
-            ) : null}
             <KiteAirSynthPanel
               visible={isAirSynthActive && isCameraActive}
               mode={airSynth?.mode ?? "two-hand"}
@@ -2918,6 +2952,36 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             {isCameraActive ? <Video size={12} /> : <VideoOff size={12} />}
             Camera
           </button>
+
+          {isMobileUi && isCameraActive ? (
+            <button
+              type="button"
+              onClick={() => void handleFlipCamera()}
+              disabled={isFlippingCamera || isAirSynthActive}
+              title={
+                isAirSynthActive
+                  ? "Flip camera is unavailable while Air Synth is on"
+                  : "Flip camera"
+              }
+              aria-label="Flip camera"
+              style={{
+                ...glassSharp,
+                padding: "7px 14px",
+                background: "rgba(10,10,10,0.75)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                color: "rgba(255,255,255,0.85)",
+                fontSize: 11,
+                cursor: isFlippingCamera || isAirSynthActive ? "not-allowed" : "pointer",
+                opacity: isFlippingCamera || isAirSynthActive ? 0.45 : 1,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <SwitchCamera size={12} />
+              Flip
+            </button>
+          ) : null}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
