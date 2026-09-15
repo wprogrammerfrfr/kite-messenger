@@ -107,7 +107,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeStartLatencyOffsetFrames = 0;
     /** Handsfree per-track frame targets [T1..T4]; survives slot reset on handoff. */
     this.handsfreeSequenceTargetFrames = null;
-    /** Deferred T(n)→T(n+1) arm: wait one master wrap before recording next track. */
+    /** Deferred T(n)→T(n+1) arm: wait one finished-track wrap before recording next. */
     this.handsfreeAdvanceArm = null;
     /** Latched at START_RECORDING: true = one-loop gap; false = immediate handoff. */
     this.handsfreeAssist = false;
@@ -1285,6 +1285,10 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       }
     }
 
+    const useMasterPhaseLock =
+      this.isOverdubTrackIndex(targetTrackIndex) &&
+      masterPhase !== null &&
+      !isGridLike;
     this.postFinalizeDiagnostic({
       trackIndex: targetTrackIndex,
       loopMode: slot.loopMode,
@@ -1293,10 +1297,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       extractedFrames: copyFrames,
       intervalFrames: n,
       latencyShiftFrames,
-      phaseSource:
-        this.isOverdubTrackIndex(targetTrackIndex) && masterPhase !== null
-          ? "phase_lock"
-          : "zero",
+      phaseSource: useMasterPhaseLock ? "phase_lock" : "zero",
     });
 
     slot.recordingBuffer = null;
@@ -1307,8 +1308,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     slot.latencyOffsetFrames = 0;
     slot.stopTargetFrames = null;
     slot.stopOptions = null;
-    if (this.isOverdubTrackIndex(targetTrackIndex) && masterPhase !== null) {
-      // Phase-lock: transportIntervalFrames must be beat-quantized per track.
+    if (useMasterPhaseLock) {
+      // Free-mode overdub: phase-lock to master. Grid/handsfree start at take origin
+      // so unequal bar counts do not seed mid-phrase (masterPhase % longerLen).
       slot.playbackCursor = masterPhase % transportIntervalFrames;
     } else {
       slot.playbackCursor = 0;
@@ -1411,6 +1413,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
           this.handsfreeAdvanceArm = {
             nextTrackIndex: capTrackIndex + 1,
             fromTrack: capTrackIndex,
+            listenTrackIndex: capTrackIndex,
             seenNonWrap: false,
           };
           this.postHandsfreeAdvanceArmed(capTrackIndex, capTrackIndex + 1);
@@ -1513,11 +1516,12 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       this.timingAssist = false;
       return;
     }
-    const rem = master.intervalFrames - master.playbackCursor;
+    // Use rem captured at finished-track wrap (not live master phase).
+    const rem = Math.max(0, Math.floor(Number(pending.rem) || 0));
     this.beginHandsfreeRecordingAtBoundary(
       pending.nextTrackIndex,
       pending.fromTrack,
-      Math.max(0, rem)
+      rem
     );
   }
 
@@ -2155,24 +2159,32 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       master.mode === "playing" &&
       master.intervalFrames > 0
     ) {
-      const rem = master.intervalFrames - master.playbackCursor;
-      if (rem > blockSize) {
-        this.handsfreeAdvanceArm.seenNonWrap = true;
-      } else if (this.handsfreeAdvanceArm.seenNonWrap) {
-        const arm = this.handsfreeAdvanceArm;
-        this.handsfreeAdvanceArm = null;
-        if (this.handsfreeAssist && this.timingAssist) {
-          this.handsfreeCountdownPending = {
-            nextTrackIndex: arm.nextTrackIndex,
-            fromTrack: arm.fromTrack,
-            rem: Math.max(0, rem),
-          };
-        } else {
-          this.beginHandsfreeRecordingAtBoundary(
-            arm.nextTrackIndex,
-            arm.fromTrack,
-            Math.max(0, rem)
-          );
+      const arm = this.handsfreeAdvanceArm;
+      const listenTrackIndex =
+        Number.isFinite(arm.listenTrackIndex) && arm.listenTrackIndex >= 1
+          ? Math.floor(arm.listenTrackIndex)
+          : arm.fromTrack;
+      const listen = this.getSlotForTrack(listenTrackIndex);
+      if (listen.mode === "playing" && listen.intervalFrames > 0) {
+        const rem = listen.intervalFrames - listen.playbackCursor;
+        if (rem > blockSize) {
+          this.handsfreeAdvanceArm.seenNonWrap = true;
+        } else if (this.handsfreeAdvanceArm.seenNonWrap) {
+          this.handsfreeAdvanceArm = null;
+          if (this.handsfreeAssist && this.timingAssist) {
+            this.handsfreeCountdownPending = {
+              nextTrackIndex: arm.nextTrackIndex,
+              fromTrack: arm.fromTrack,
+              rem: Math.max(0, rem),
+            };
+            this.postHandsfreeCountdownReady(arm.fromTrack, arm.nextTrackIndex);
+          } else {
+            this.beginHandsfreeRecordingAtBoundary(
+              arm.nextTrackIndex,
+              arm.fromTrack,
+              Math.max(0, rem)
+            );
+          }
         }
       }
     }

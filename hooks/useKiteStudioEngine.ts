@@ -4676,12 +4676,19 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           )
         ) {
           const ctx = studioAudioContextRef.current;
-          const masterFrames = masterLoopIntervalFramesRef.current;
+          const fromTrack = Math.max(1, Math.min(4, Math.round(event.fromTrack)));
+          const finishedSlot = soloTrackSlotUiLatestRef.current?.find(
+            (s) => s.trackIndex === fromTrack
+          );
+          const finishedFrames =
+            finishedSlot != null && finishedSlot.intervalFrames > 0
+              ? finishedSlot.intervalFrames
+              : handsfreeTrackTargetFramesRef.current?.[fromTrack - 1] ?? null;
           const toTrack = Math.max(2, Math.min(4, Math.round(event.toTrack))) as 2 | 3 | 4;
-          if (ctx && masterFrames != null && masterFrames > 0) {
+          if (ctx && finishedFrames != null && finishedFrames > 0) {
             const sampleRate =
               Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0 ? ctx.sampleRate : 44100;
-            const listenThroughSec = masterFrames / sampleRate;
+            const listenThroughSec = finishedFrames / sampleRate;
             const boundaryGoAt = ctx.currentTime + listenThroughSec;
             scheduleBoundaryAssistCountdown({
               trackIndex: toTrack,
@@ -4697,6 +4704,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
       if (event.type === "HANDSFREE_COUNTDOWN_READY") {
         if (!mountedRef.current) return;
+        // Late-align if Timing Assist GO raced ahead of the finished-track wrap pending.
         soloLooperEngineRef.current?.confirmHandsfreeCountdown();
         return;
       }
