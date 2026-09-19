@@ -338,6 +338,19 @@ function rampLinearAudioGain(
   gainParam.linearRampToValueAtTime(targetValue, end);
 }
 
+/** Dedicated monitor output context — keeps studio/looper buffers off the critical path. */
+function createLowLatencyMonitorAudioContext(): AudioContext {
+  try {
+    return new AudioContext({ latencyHint: 0 });
+  } catch {
+    try {
+      return new AudioContext({ latencyHint: "interactive" });
+    } catch {
+      return new AudioContext();
+    }
+  }
+}
+
 /** Single source of truth for session_id casing and shape (6-char A–Z / 0–9). */
 function normalizeStudioSessionId(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9]/g, "").slice(0, 6).toUpperCase();
@@ -661,6 +674,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const interfaceLiveMonitorEnabledFlagsRef = useRef<DeviceFlagMap>({});
   const interfaceLiveMonitorSourceNodesRef = useRef<Map<string, MediaStreamAudioSourceNode>>(new Map());
   const interfaceLiveMonitorGainNodesRef = useRef<Map<string, GainNode>>(new Map());
+  const interfaceLiveMonitorAudioContextsRef = useRef<Map<string, AudioContext>>(new Map());
+  const interfaceLiveMonitorCloneStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const buildInterfaceLiveMonitorGraphRef = useRef<(deviceId: string) => void>(() => {});
   const perChannelMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const masterLiveMeterElementRef = useRef<HTMLDivElement | null>(null);
@@ -1658,22 +1673,34 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const teardownInterfaceLiveMonitorGraph = useCallback((deviceId: string) => {
     const sourceNode = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
     const gainNode = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
-    // Targeted disconnect only — monitor may fan out from the shared mixer
-    // MediaStreamSource; a bare disconnect() would tear down mixer lanes.
-    if (sourceNode && gainNode) {
-      try {
-        sourceNode.disconnect(gainNode);
-      } catch {
-        /* ignore */
-      }
+    const monitorCtx = interfaceLiveMonitorAudioContextsRef.current.get(deviceId);
+    const cloneStream = interfaceLiveMonitorCloneStreamsRef.current.get(deviceId);
+    try {
+      sourceNode?.disconnect();
+    } catch {
+      /* ignore */
     }
     try {
       gainNode?.disconnect();
     } catch {
       /* ignore */
     }
+    if (cloneStream) {
+      for (const track of cloneStream.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    if (monitorCtx && monitorCtx.state !== "closed") {
+      void monitorCtx.close().catch(() => {});
+    }
     interfaceLiveMonitorSourceNodesRef.current.delete(deviceId);
     interfaceLiveMonitorGainNodesRef.current.delete(deviceId);
+    interfaceLiveMonitorAudioContextsRef.current.delete(deviceId);
+    interfaceLiveMonitorCloneStreamsRef.current.delete(deviceId);
   }, []);
 
   const teardownAllInterfaceLiveMonitorGraphs = useCallback(() => {
@@ -1686,12 +1713,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [teardownInterfaceLiveMonitorGraph]);
 
   const duckInterfaceLiveMonitorNodesForBroadcast = useCallback(() => {
-    const ctx = studioAudioContextRef.current;
-    if (!ctx || ctx.state === "closed") return;
-    for (const gainNode of Array.from(interfaceLiveMonitorGainNodesRef.current.values())) {
+    for (const [deviceId, gainNode] of Array.from(interfaceLiveMonitorGainNodesRef.current.entries())) {
+      const monCtx =
+        interfaceLiveMonitorAudioContextsRef.current.get(deviceId) ??
+        (gainNode.context as AudioContext);
+      if (!monCtx || monCtx.state === "closed") continue;
       try {
-        gainNode.gain.cancelScheduledValues(ctx.currentTime);
-        gainNode.gain.setValueAtTime(0, ctx.currentTime);
+        gainNode.gain.cancelScheduledValues(monCtx.currentTime);
+        gainNode.gain.setValueAtTime(0, monCtx.currentTime);
         gainNode.disconnect();
       } catch {
         /* ignore — node may already be disconnected */
@@ -1700,14 +1729,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, []);
 
   const restoreInterfaceLiveMonitorNodesFromSliders = useCallback(() => {
-    const ctx = studioAudioContextRef.current;
-    if (!ctx || ctx.state === "closed") return;
     for (const deviceId of Array.from(interfaceLiveMonitorGainNodesRef.current.keys())) {
       const gainNode = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
-      if (!gainNode) continue;
-      const sourceNode =
-        mixerSourceNodesRef.current.get(deviceId) ??
-        interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
+      const sourceNode = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
+      const monCtx = interfaceLiveMonitorAudioContextsRef.current.get(deviceId);
+      if (!gainNode || !monCtx || monCtx.state === "closed") continue;
       const vols = deviceVolumesRef.current;
       const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
       const v0 = vols[`${deviceId}:ch0`] ?? 100;
@@ -1716,7 +1742,6 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       const targetLinear = Math.pow(Math.min(100, Math.max(0, blended)) / 100, 2);
       try {
         if (sourceNode) {
-          interfaceLiveMonitorSourceNodesRef.current.set(deviceId, sourceNode);
           try {
             sourceNode.connect(gainNode);
           } catch {
@@ -1724,11 +1749,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           }
         }
         try {
-          gainNode.connect(ctx.destination);
+          gainNode.connect(monCtx.destination);
         } catch {
           /* ignore */
         }
-        rampLinearAudioGain(gainNode.gain, ctx, targetLinear, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+        rampLinearAudioGain(gainNode.gain, monCtx, targetLinear, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
       } catch {
         /* ignore */
       }
@@ -2167,9 +2192,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         }
       }
     } finally {
-      for (const deviceId of Array.from(interfaceLiveMonitorGainNodesRef.current.keys())) {
-        teardownInterfaceLiveMonitorGraph(deviceId);
-      }
+      // Monitor uses track clones + its own AudioContext — independent of mixer lanes.
       for (const deviceId of activeDeviceIdsRef.current) {
         buildInterfaceLiveMonitorGraphRef.current(deviceId);
       }
@@ -2182,7 +2205,6 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     getEstablishedAudioReplacementPeer,
     replacePeerAudioTrack,
     setDeviceInputChannelCount,
-    teardownInterfaceLiveMonitorGraph,
   ]);
 
   const toggleAudioDevice = useCallback(
@@ -2471,8 +2493,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
       const monitorGain = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
       if (monitorGain) {
-        if (kiteModeRef.current === "broadcast") {
-          rampLinearAudioGain(monitorGain.gain, ctx, 0, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+        const monCtx =
+          interfaceLiveMonitorAudioContextsRef.current.get(deviceId) ??
+          (monitorGain.context as AudioContext);
+        if (!monCtx || monCtx.state === "closed") {
+          /* skip */
+        } else if (kiteModeRef.current === "broadcast") {
+          rampLinearAudioGain(monitorGain.gain, monCtx, 0, BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
         } else {
           const vols = deviceVolumesRef.current;
           const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
@@ -2484,7 +2511,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           const monitorPerceptual = Math.pow(Math.min(100, Math.max(0, blended)) / 100, 2);
           rampLinearAudioGain(
             monitorGain.gain,
-            ctx,
+            monCtx,
             monitorPerceptual,
             BROADCAST_INTERFACE_MONITOR_RAMP_SEC
           );
@@ -2496,47 +2523,81 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, []);
 
   const buildInterfaceLiveMonitorGraph = useCallback((deviceId: string) => {
-    const ctx = studioAudioContextRef.current;
-    if (!ctx || ctx.state === "closed") return;
     if (interfaceInputDeviceFlagsRef.current[deviceId] !== true) return;
     if (interfaceLiveMonitorEnabledFlagsRef.current[deviceId] !== true) return;
 
-    // Fan out from the existing mixer lane source — a second
-    // createMediaStreamSource on the same MediaStream can starve earlier taps
-    // (meters / solo capture).
-    const tapSource = mixerSourceNodesRef.current.get(deviceId);
-    if (!tapSource) return;
+    const stream = activeStreamsMapRef.current.get(deviceId);
+    if (!stream) return;
+    const liveTracks = stream.getAudioTracks().filter((track) => track.readyState === "live");
+    if (liveTracks.length === 0) return;
 
-    const existingGain = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
-    const existingSource = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
-    if (existingGain && existingSource === tapSource) return;
-    if (existingGain || existingSource) {
+    // Already running on a dedicated monitor context — leave it alone.
+    const existingCtx = interfaceLiveMonitorAudioContextsRef.current.get(deviceId);
+    if (
+      existingCtx &&
+      existingCtx.state !== "closed" &&
+      interfaceLiveMonitorGainNodesRef.current.has(deviceId)
+    ) {
+      return;
+    }
+    if (
+      interfaceLiveMonitorGainNodesRef.current.has(deviceId) ||
+      interfaceLiveMonitorSourceNodesRef.current.has(deviceId) ||
+      interfaceLiveMonitorAudioContextsRef.current.has(deviceId)
+    ) {
       teardownInterfaceLiveMonitorGraph(deviceId);
     }
 
+    let monitorCtx: AudioContext | null = null;
+    let cloneStream: MediaStream | null = null;
     try {
-      const gainNode = ctx.createGain();
+      // Clone tracks so createMediaStreamSource does not starve mixer/solo taps
+      // on the original MediaStream.
+      cloneStream = new MediaStream(liveTracks.map((track) => track.clone()));
+      monitorCtx = createLowLatencyMonitorAudioContext();
+      void monitorCtx.resume().catch(() => {});
+
+      const sourceNode = monitorCtx.createMediaStreamSource(cloneStream);
+      const gainNode = monitorCtx.createGain();
       const vols = deviceVolumesRef.current;
       const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
       const v0 = vols[`${deviceId}:ch0`] ?? 100;
       const v1 = vols[`${deviceId}:ch1`] ?? 100;
       const volume = chCount >= 2 ? (v0 + v1) / 2 : v0;
       const targetLinear = Math.pow(Math.min(100, Math.max(0, volume)) / 100, 2);
-      const t0 = ctx.currentTime;
+      const t0 = monitorCtx.currentTime;
       if (kiteModeRef.current === "broadcast") {
         gainNode.gain.setValueAtTime(0, t0);
       } else {
-        gainNode.gain.setValueAtTime(0, t0);
-        gainNode.gain.linearRampToValueAtTime(targetLinear, t0 + BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
+        // Instant enable — no fade-in on the monitor critical path.
+        gainNode.gain.setValueAtTime(targetLinear, t0);
       }
-      tapSource.connect(gainNode);
+      sourceNode.connect(gainNode);
       if (kiteModeRef.current !== "broadcast") {
-        gainNode.connect(ctx.destination);
+        gainNode.connect(monitorCtx.destination);
       }
-      interfaceLiveMonitorSourceNodesRef.current.set(deviceId, tapSource);
+      interfaceLiveMonitorSourceNodesRef.current.set(deviceId, sourceNode);
       interfaceLiveMonitorGainNodesRef.current.set(deviceId, gainNode);
+      interfaceLiveMonitorAudioContextsRef.current.set(deviceId, monitorCtx);
+      interfaceLiveMonitorCloneStreamsRef.current.set(deviceId, cloneStream);
     } catch (error) {
       console.warn("[Kite] Could not start interface live monitor:", error);
+      if (cloneStream) {
+        for (const track of cloneStream.getTracks()) {
+          try {
+            track.stop();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      if (monitorCtx && monitorCtx.state !== "closed") {
+        void monitorCtx.close().catch(() => {});
+      }
+      interfaceLiveMonitorSourceNodesRef.current.delete(deviceId);
+      interfaceLiveMonitorGainNodesRef.current.delete(deviceId);
+      interfaceLiveMonitorAudioContextsRef.current.delete(deviceId);
+      interfaceLiveMonitorCloneStreamsRef.current.delete(deviceId);
     }
   }, [teardownInterfaceLiveMonitorGraph]);
 
@@ -4251,6 +4312,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       } else {
         clearSoloRunwayDisplay();
       }
+      // Count-in uses runway overlay only — keep four-dot visual metro off until recording starts.
+      soloMetronomeLastBeatRef.current = null;
+      setVisualActiveBeatInBar(null);
 
       soloCountInPumpGenerationRef.current += 1;
       const gen = soloCountInPumpGenerationRef.current;
@@ -4270,15 +4334,6 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             }
 
             setSoloRunwayDisplay(payload.displayLabel);
-            if (payload.displayLabel === "3") {
-              setVisualActiveBeatInBar(0);
-            } else if (payload.displayLabel === "2") {
-              setVisualActiveBeatInBar(1);
-            } else if (payload.displayLabel === "1") {
-              setVisualActiveBeatInBar(2);
-            } else if (payload.displayLabel === "GO") {
-              setVisualActiveBeatInBar(3);
-            }
 
             if (payload.playClick) {
               playSoloMetronomeClick(payload.isGoBeat, payload.contextTime, true);
@@ -4306,6 +4361,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             }, 400);
 
             const beatDurationSeconds = 60 / Math.max(1, params.timing.bpm);
+            // Record + loop origin = downbeat after GO (not the GO click itself).
             const recordAnchorContextSec = payload.contextTime + beatDurationSeconds;
             soloCountInBeatSecRef.current = beatDurationSeconds;
             soloCountInEndAtContextSecRef.current = recordAnchorContextSec;
@@ -7216,38 +7272,75 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       return;
     }
     let rafId = 0;
+    const clearVisualBeat = (): void => {
+      if (soloMetronomeLastBeatRef.current !== null) {
+        soloMetronomeLastBeatRef.current = null;
+        setVisualActiveBeatInBar(null);
+      }
+    };
     const tick = (): void => {
       const mode = kiteModeRef.current;
       const phase = studioUiPhaseRef.current;
       const paused = isMasterPausedRef.current;
       const looperState = soloLooperStateRef.current;
       const runwayActive = isRecordingArmedRef.current;
+      const slots = soloTrackSlotUiLatestRef.current;
+      const recordingSlot =
+        slots?.find((s) => s.mode === "recording") ?? null;
+      const anySlotRecording = recordingSlot != null;
 
-      const shouldPulse =
-        mode === "solo" && phase === "studio" && !paused && looperState === "recording";
-
-      if (!shouldPulse && !runwayActive && mode === "solo") {
-        if (soloMetronomeLastBeatRef.current !== null) {
-          soloMetronomeLastBeatRef.current = null;
-          setVisualActiveBeatInBar(null);
-        }
-      } else if (shouldPulse && !runwayActive) {
-        const ctx = studioAudioContextRef.current;
-        if (ctx && ctx.state === "running") {
-          const timing = kiteIntervalTimingRef.current;
-          const bpm = Math.max(1, timing?.bpm ?? kiteSetupTempoRef.current);
-          const beatSec = 60 / bpm;
-          const anchor = soloMetronomeAnchorContextSecRef.current ?? ctx.currentTime;
-          soloMetronomeAnchorContextSecRef.current = anchor;
-          const elapsedBeats = Math.floor(Math.max(0, ctx.currentTime - anchor) / beatSec);
-          if (soloMetronomeLastBeatRef.current !== elapsedBeats) {
-            soloMetronomeLastBeatRef.current = elapsedBeats;
-            setVisualActiveBeatInBar(
-              (Math.floor(elapsedBeats) % (timing?.beatsPerBar || 4)) as 0 | 1 | 2 | 3
-            );
-          }
-        }
+      // Four-dot visual metro is recording-only (incl. overdub / handsfree handoffs).
+      // Count-in runway uses soloRunwayDisplay — keep dots off while armed.
+      if (
+        mode !== "solo" ||
+        phase !== "studio" ||
+        paused ||
+        runwayActive ||
+        !anySlotRecording
+      ) {
+        clearVisualBeat();
+        rafId = requestAnimationFrame(tick);
+        return;
       }
+
+      const timing = kiteIntervalTimingRef.current;
+      const bpm = Math.max(1, timing?.bpm ?? kiteSetupTempoRef.current);
+      const beatsPerBar = Math.max(1, Math.min(16, Math.round(timing?.beatsPerBar || 4)));
+      const ctx = studioAudioContextRef.current;
+      const sampleRate =
+        ctx && ctx.state === "running" && Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0
+          ? ctx.sampleRate
+          : 48000;
+      const framesPerBeat = Math.max(1, (60 / bpm) * sampleRate);
+
+      let absoluteBeat: number | null = null;
+
+      // Align visual with compensated record phase (RTL latency / worklet pre-roll).
+      const latencyFrames = Math.max(
+        0,
+        Math.round((soloLooperLatencyMsRef.current / 1000) * sampleRate)
+      );
+      const preRollFrames = Math.floor(sampleRate * 0.035);
+      const trimFrames = Math.max(latencyFrames, preRollFrames);
+      const phaseCursor = Math.max(0, recordingSlot.recordCursor - trimFrames);
+      if (Number.isFinite(phaseCursor)) {
+        absoluteBeat = Math.floor(phaseCursor / framesPerBeat);
+      } else if (looperState === "recording" && ctx && ctx.state === "running") {
+        // Fallback: wall clock lagged by measured RTL so UI matches heard audio.
+        const latencySec = Math.max(0, soloLooperLatencyMsRef.current / 1000);
+        const beatSec = 60 / bpm;
+        const anchor = soloMetronomeAnchorContextSecRef.current ?? ctx.currentTime;
+        soloMetronomeAnchorContextSecRef.current = anchor;
+        absoluteBeat = Math.floor(Math.max(0, ctx.currentTime - anchor - latencySec) / beatSec);
+      }
+
+      if (absoluteBeat === null) {
+        clearVisualBeat();
+      } else if (soloMetronomeLastBeatRef.current !== absoluteBeat) {
+        soloMetronomeLastBeatRef.current = absoluteBeat;
+        setVisualActiveBeatInBar((absoluteBeat % beatsPerBar) as 0 | 1 | 2 | 3);
+      }
+
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
