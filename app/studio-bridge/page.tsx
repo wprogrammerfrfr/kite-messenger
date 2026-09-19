@@ -947,6 +947,8 @@ export default function StudioBridgePage() {
     registerMixerMeterElement,
     registerMasterLiveMeterElement,
     mobileSingleInputOnly,
+    soloInputGain,
+    setSoloInputGain,
   ]);
 
     const renderVisualMetronomeControls = () => (

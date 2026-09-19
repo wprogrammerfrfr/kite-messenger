@@ -661,6 +661,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const interfaceLiveMonitorEnabledFlagsRef = useRef<DeviceFlagMap>({});
   const interfaceLiveMonitorSourceNodesRef = useRef<Map<string, MediaStreamAudioSourceNode>>(new Map());
   const interfaceLiveMonitorGainNodesRef = useRef<Map<string, GainNode>>(new Map());
+  const buildInterfaceLiveMonitorGraphRef = useRef<(deviceId: string) => void>(() => {});
   const perChannelMeterRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const masterLiveMeterElementRef = useRef<HTMLDivElement | null>(null);
   const soloMeterElementRef = useRef<HTMLDivElement | null>(null);
@@ -1657,10 +1658,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const teardownInterfaceLiveMonitorGraph = useCallback((deviceId: string) => {
     const sourceNode = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
     const gainNode = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
-    try {
-      sourceNode?.disconnect();
-    } catch {
-      /* ignore */
+    // Targeted disconnect only — monitor may fan out from the shared mixer
+    // MediaStreamSource; a bare disconnect() would tear down mixer lanes.
+    if (sourceNode && gainNode) {
+      try {
+        sourceNode.disconnect(gainNode);
+      } catch {
+        /* ignore */
+      }
     }
     try {
       gainNode?.disconnect();
@@ -1699,8 +1704,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     if (!ctx || ctx.state === "closed") return;
     for (const deviceId of Array.from(interfaceLiveMonitorGainNodesRef.current.keys())) {
       const gainNode = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
-      const sourceNode = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
       if (!gainNode) continue;
+      const sourceNode =
+        mixerSourceNodesRef.current.get(deviceId) ??
+        interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
       const vols = deviceVolumesRef.current;
       const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
       const v0 = vols[`${deviceId}:ch0`] ?? 100;
@@ -1709,6 +1716,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       const targetLinear = Math.pow(Math.min(100, Math.max(0, blended)) / 100, 2);
       try {
         if (sourceNode) {
+          interfaceLiveMonitorSourceNodesRef.current.set(deviceId, sourceNode);
           try {
             sourceNode.connect(gainNode);
           } catch {
@@ -2159,6 +2167,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         }
       }
     } finally {
+      for (const deviceId of Array.from(interfaceLiveMonitorGainNodesRef.current.keys())) {
+        teardownInterfaceLiveMonitorGraph(deviceId);
+      }
+      for (const deviceId of activeDeviceIdsRef.current) {
+        buildInterfaceLiveMonitorGraphRef.current(deviceId);
+      }
       mixerRebuildInFlightRef.current = false;
     }
   }, [
@@ -2168,6 +2182,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     getEstablishedAudioReplacementPeer,
     replacePeerAudioTrack,
     setDeviceInputChannelCount,
+    teardownInterfaceLiveMonitorGraph,
   ]);
 
   const toggleAudioDevice = useCallback(
@@ -2483,15 +2498,23 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const buildInterfaceLiveMonitorGraph = useCallback((deviceId: string) => {
     const ctx = studioAudioContextRef.current;
     if (!ctx || ctx.state === "closed") return;
-    if (interfaceLiveMonitorSourceNodesRef.current.has(deviceId)) return;
     if (interfaceInputDeviceFlagsRef.current[deviceId] !== true) return;
     if (interfaceLiveMonitorEnabledFlagsRef.current[deviceId] !== true) return;
 
-    const stream = activeStreamsMapRef.current.get(deviceId);
-    if (!stream || stream.getAudioTracks().length === 0) return;
+    // Fan out from the existing mixer lane source — a second
+    // createMediaStreamSource on the same MediaStream can starve earlier taps
+    // (meters / solo capture).
+    const tapSource = mixerSourceNodesRef.current.get(deviceId);
+    if (!tapSource) return;
+
+    const existingGain = interfaceLiveMonitorGainNodesRef.current.get(deviceId);
+    const existingSource = interfaceLiveMonitorSourceNodesRef.current.get(deviceId);
+    if (existingGain && existingSource === tapSource) return;
+    if (existingGain || existingSource) {
+      teardownInterfaceLiveMonitorGraph(deviceId);
+    }
 
     try {
-      const sourceNode = ctx.createMediaStreamSource(stream);
       const gainNode = ctx.createGain();
       const vols = deviceVolumesRef.current;
       const chCount = deviceInputChannelCountRef.current[deviceId] ?? 1;
@@ -2506,16 +2529,18 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         gainNode.gain.setValueAtTime(0, t0);
         gainNode.gain.linearRampToValueAtTime(targetLinear, t0 + BROADCAST_INTERFACE_MONITOR_RAMP_SEC);
       }
-      sourceNode.connect(gainNode);
+      tapSource.connect(gainNode);
       if (kiteModeRef.current !== "broadcast") {
         gainNode.connect(ctx.destination);
       }
-      interfaceLiveMonitorSourceNodesRef.current.set(deviceId, sourceNode);
+      interfaceLiveMonitorSourceNodesRef.current.set(deviceId, tapSource);
       interfaceLiveMonitorGainNodesRef.current.set(deviceId, gainNode);
     } catch (error) {
       console.warn("[Kite] Could not start interface live monitor:", error);
     }
-  }, []);
+  }, [teardownInterfaceLiveMonitorGraph]);
+
+  buildInterfaceLiveMonitorGraphRef.current = buildInterfaceLiveMonitorGraph;
 
   useEffect(() => {
     for (const deviceId of activeDeviceIds) {

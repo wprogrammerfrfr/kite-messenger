@@ -3115,8 +3115,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               onClick={() => looperHandlers.onToggleSessionRecording()}
               style={{
                 ...glassSharp,
-                padding: "10px 14px",
-                minHeight: 44,
+                padding: "7px 14px",
                 cursor:
                   sessionTapeState === "saving" || sessionTapeState === "requesting"
                     ? "wait"
