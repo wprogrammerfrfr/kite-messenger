@@ -24,7 +24,14 @@ export type KiteSetupStep = 1 | 2 | 3 | 4 | 5;
 export type BroadcastStatus = "idle" | "connecting" | "syncing" | "live";
 export type SoloLooperState = "idle" | "recording" | "captured" | "playing";
 export type SoloSessionRecorderState = "idle" | "requesting" | "recording" | "saving";
-export type SoloSessionRecorderCaptureMode = "screen-video" | "audio-only";
+export type SoloSessionRecorderCaptureMode = "screen-video" | "camera-video" | "audio-only";
+
+export type SoloSessionRecordingToggleOptions = {
+  audioOnly?: boolean;
+  /** Live camera preview stream to reuse (its video track is cloned, never stopped). */
+  cameraStream?: MediaStream | null;
+  cameraFacingMode?: "user" | "environment";
+};
 export type JamSetupLock = { ownerId: string; ownerName: string; expiresAt: number } | null;
 export type KiteSetupOrigin = "lobby" | "connected";
 
@@ -332,7 +339,7 @@ export type KiteEngineActions = {
   handleTrackTransportTap: (trackIndex: 1 | 2 | 3 | 4) => void;
   handleSoloTrackVolumeChange: (trackIndex: 1 | 2 | 3 | 4, linear: number) => void;
   setMasterLoopVolume: (linear: number) => void;
-  handleToggleSoloSessionRecording: (opts?: { audioOnly?: boolean }) => void;
+  handleToggleSoloSessionRecording: (opts?: SoloSessionRecordingToggleOptions) => void;
   downloadSoloSessionBlob: (blob: Blob, ext: string) => void;
   handleStartKiteSetup: (origin: KiteSetupOrigin, mode?: KiteMode) => void;
   handleCancelKiteSetup: () => void;
@@ -400,6 +407,8 @@ export type KitePresenterState = {
   connectionLostCountdown: number | null;
   user: User | null;
   authReady: boolean;
+  /** Auth came from the cached offline identity; only solo mode is usable. */
+  isOfflineMode: boolean;
   kiteSetupStep: KiteSetupStep;
   kiteSetupUsesCustomChords: boolean;
   kiteSetupOrigin: KiteSetupOrigin;

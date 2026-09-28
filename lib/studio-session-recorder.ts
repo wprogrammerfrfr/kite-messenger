@@ -4,7 +4,10 @@ import {
   type TrackRecorderMimeSelection,
 } from "@/lib/track-recorder";
 
-export type SoloSessionRecorderCaptureMode = "screen-video" | "audio-only";
+export type SoloSessionRecorderCaptureMode = "screen-video" | "camera-video" | "audio-only";
+
+/** Where session video comes from on this device. */
+export type SessionVideoSource = "screen" | "camera" | "none";
 
 const SESSION_VIDEO_MIME_CANDIDATES = [
   "video/webm;codecs=vp9,opus",
@@ -39,6 +42,50 @@ export function canUseDisplayMedia(): boolean {
 
 export function canUseMediaRecorder(): boolean {
   return typeof MediaRecorder !== "undefined";
+}
+
+function isLikelyAndroidUa(): boolean {
+  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+}
+
+export function canUseCameraCapture(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.mediaDevices?.getUserMedia === "function"
+  );
+}
+
+/**
+ * Android Chrome/Brave: camera (no tab capture). iOS/iPadOS Safari: screen only if WebKit ever
+ * ships getDisplayMedia, otherwise camera. Desktop keeps screen capture.
+ */
+export function resolveSessionVideoSource(): SessionVideoSource {
+  if (isLikelyAndroidUa()) {
+    return canUseCameraCapture() ? "camera" : "none";
+  }
+  if (canUseDisplayMedia()) return "screen";
+  return canUseCameraCapture() ? "camera" : "none";
+}
+
+/**
+ * Video-only camera stream for session recording. `audio: false` keeps the mic path untouched;
+ * 720p30 caps encoder load so the audio thread keeps its headroom.
+ */
+export async function getSessionCameraStream(
+  facingMode: "user" | "environment" = "user"
+): Promise<MediaStream> {
+  if (!canUseCameraCapture()) {
+    throw new Error("Camera is unavailable in this browser.");
+  }
+  return navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: facingMode },
+      width: { ideal: 1280, max: 1280 },
+      height: { ideal: 720, max: 720 },
+      frameRate: { ideal: 30, max: 30 },
+    },
+    audio: false,
+  });
 }
 
 /**

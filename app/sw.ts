@@ -5,6 +5,7 @@ import {
   Serwist,
   NetworkFirst,
   CacheFirst,
+  CacheableResponsePlugin,
   ExpirationPlugin,
   NetworkOnly,
 } from "serwist";
@@ -27,6 +28,28 @@ const staticCache = new CacheFirst({
   ],
 });
 
+// Loopstation document shell: online first, cached copy for offline solo mode.
+// Only 200s are stored so an auth redirect to /signin is never replayed offline.
+const studioShellCache = new NetworkFirst({
+  cacheName: "kite-studio-shell",
+  networkTimeoutSeconds: 3,
+  plugins: [
+    new CacheableResponsePlugin({ statuses: [200] }),
+    {
+      cacheKeyWillBeUsed: async ({ request }) => {
+        const url = new URL(request.url);
+        url.search = "";
+        url.hash = "";
+        return url.href;
+      },
+    },
+    new ExpirationPlugin({
+      maxEntries: 4,
+      maxAgeSeconds: 60 * 60 * 24 * 30,
+    }),
+  ],
+});
+
 const serwist = new Serwist({
   precacheEntries: self.__SW_MANIFEST,
   skipWaiting: true,
@@ -42,6 +65,12 @@ const serwist = new Serwist({
       handler: new NetworkOnly(),
     },
     {
+      matcher: ({ url, request }) =>
+        url.pathname.startsWith("/studio-bridge") && request.mode === "navigate",
+      handler: studioShellCache,
+    },
+    {
+      // RSC fetches fail offline and Next falls back to a hard navigation (served above).
       matcher: ({ url }) => url.pathname.includes("/studio-bridge"),
       handler: new NetworkOnly(),
     },
@@ -88,8 +117,8 @@ self.addEventListener("push", (event: PushEvent) => {
     actions?: ReadonlyArray<{ action: string; title: string }>;
   } = {
     body,
-    icon: "/kite-mobile-icon.svg",
-    badge: "/icons/icon-192x192.png",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/badge-96.png",
     tag: "kite-message",
     renotify: true,
     requireInteraction: true,

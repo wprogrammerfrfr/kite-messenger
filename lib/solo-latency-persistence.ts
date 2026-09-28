@@ -31,6 +31,21 @@ export function clampSoloLatencyMs(value: number): number {
 }
 
 /**
+ * Calibrated RTL plus any output-latency growth the HAL reported since the drift baseline.
+ * Uncalibrated (≤ 0) stays 0 so compensation is never invented without a user calibration.
+ */
+export function computeEffectiveSoloLatencyMs(
+  calibratedMs: number,
+  outputLatencyDeltaMs: number
+): number {
+  if (!isSoloLatencyCalibrated(calibratedMs)) {
+    return SOLO_LATENCY_APPLIED_MIN_MS;
+  }
+  const delta = Number.isFinite(outputLatencyDeltaMs) ? Math.max(0, outputLatencyDeltaMs) : 0;
+  return clampSoloLatencyMs(calibratedMs + delta);
+}
+
+/**
  * Uncalibrated = null, non-finite, or non-positive.
  * Calibrated = any finite applied ms > 0 (within 0–400 clamp after write).
  */

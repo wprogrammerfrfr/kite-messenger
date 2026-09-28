@@ -28,6 +28,7 @@ import {
   VideoOff,
   Music2,
   SwitchCamera,
+  FolderOpen,
 } from "lucide-react";
 
 import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
@@ -43,9 +44,16 @@ import type {
   SoloLooperMode,
   SoloLooperState,
   SoloSessionRecorderCaptureMode,
+  SoloSessionRecordingToggleOptions,
 } from "@/hooks/useKiteStudioEngine.types";
+import {
+  resolveSessionVideoSource,
+  type SessionVideoSource,
+} from "@/lib/studio-session-recorder";
 import { getBarCountOptionsForTimeSignature } from "@/lib/looper-math";
 import KiteTunerPanel from "@/components/studio-bridge/KiteTunerPanel";
+import LocalRecordingsDrawer from "@/components/kite-loop-v2/LocalRecordingsDrawer";
+import { listLocalRecordings } from "@/lib/local-recordings-store";
 import KiteAirSynthPanel from "@/components/studio-bridge/KiteAirSynthPanel";
 import { DEFAULT_INSTRUMENT_ID, type KiteTunerInstrumentId } from "@/hooks/useKiteTunerEngine";
 import { useKiteAirSynthEngine } from "@/hooks/useKiteAirSynthEngine";
@@ -136,7 +144,7 @@ export type KiteLoopV4LooperConfig = {
 export type KiteLoopV4LooperHandlers = {
   onRecordFirstLoop: () => void;
   onToggleMasterPause: () => void;
-  onToggleSessionRecording: (opts?: { audioOnly?: boolean }) => void;
+  onToggleSessionRecording: (opts?: SoloSessionRecordingToggleOptions) => void;
   onStopAndResetSoloLooper: () => void;
   onEndSession: () => void;
   onLoopModeChange: (value: SoloLooperMode) => void;
@@ -2461,6 +2469,9 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inputsOpen, setInputsOpen] = useState(false);
   const [sessionCaptureMenuOpen, setSessionCaptureMenuOpen] = useState(false);
+  const [recordingsOpen, setRecordingsOpen] = useState(false);
+  const [savedNoticeVisible, setSavedNoticeVisible] = useState(false);
+  const prevSessionTapeStateRef = useRef<KiteLoopV4SessionRecorderState>("idle");
   const [isTunerOpen, setIsTunerOpen] = useState(false);
   const [tunerInstrumentId, setTunerInstrumentId] =
     useState<KiteTunerInstrumentId>(DEFAULT_INSTRUMENT_ID);
@@ -2479,6 +2490,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [isFlippingCamera, setIsFlippingCamera] = useState(false);
   /** Client-only; SSR-safe default false. */
   const [isMobileUi, setIsMobileUi] = useState(false);
+  /** Client-only capability snapshot: screen (desktop), camera (Android / iOS), or none. */
+  const [sessionVideoSource, setSessionVideoSource] = useState<SessionVideoSource>("none");
   /** Reactive snapshot of the studio AudioContext (ref alone does not re-render). */
   const [studioAudioContext, setStudioAudioContext] = useState<AudioContext | null>(
     () => studioAudioContextRef.current
@@ -2588,6 +2601,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
   useEffect(() => {
     setIsMobileUi(isMobileDevice());
+    setSessionVideoSource(resolveSessionVideoSource());
   }, []);
 
   const releaseCameraHardware = useCallback((stream: MediaStream | null): void => {
@@ -2668,6 +2682,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
   const handleFlipCamera = useCallback(async () => {
     if (!isCameraActive || isFlippingCamera || isAirSynthActive) return;
+    // Swapping the camera mid-take ends the recorder's cloned track on some browsers.
+    if (looperState.sessionRecorderState !== "idle") return;
     const nextFacing: "user" | "environment" =
       cameraFacingMode === "user" ? "environment" : "user";
     const prevFacing = cameraFacingMode;
@@ -2735,9 +2751,42 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     isAirSynthActive,
     isCameraActive,
     isFlippingCamera,
+    looperState.sessionRecorderState,
     openCameraWithFacing,
     openCameraWithOtherDeviceId,
     releaseCameraHardware,
+  ]);
+
+  /** Camera source: open the preview first so the take is visible while recording. */
+  const startSessionVideoRecording = useCallback(async () => {
+    if (sessionVideoSource !== "camera") {
+      looperHandlers.onToggleSessionRecording({ audioOnly: false });
+      return;
+    }
+    let stream: MediaStream | null = isCameraActive ? cameraStream : null;
+    if (!stream) {
+      try {
+        stream = await openCameraWithFacing(cameraFacingMode);
+        setCameraStream(stream);
+        setIsCameraActive(true);
+        setCameraError(null);
+      } catch (err) {
+        setCameraError(err instanceof Error ? err.message : "Camera access denied");
+        stream = null;
+      }
+    }
+    looperHandlers.onToggleSessionRecording({
+      audioOnly: false,
+      cameraStream: stream,
+      cameraFacingMode,
+    });
+  }, [
+    cameraFacingMode,
+    cameraStream,
+    isCameraActive,
+    looperHandlers,
+    openCameraWithFacing,
+    sessionVideoSource,
   ]);
 
   useEffect(() => {
@@ -2805,8 +2854,40 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const sessionTapeState = looperState.sessionRecorderState;
   const sessionCaptureMode = looperState.sessionRecorderCaptureMode;
   const sessionRecorderError = looperState.sessionRecorderError;
-  const sessionSupportsScreen = looperState.sessionRecorderSupportsScreenCapture;
-  const sessionIdleLabel = sessionSupportsScreen ? "Record Session" : "Record Audio";
+  const sessionSupportsScreen =
+    looperState.sessionRecorderSupportsScreenCapture && sessionVideoSource === "screen";
+  const sessionHasVideo = sessionSupportsScreen || sessionVideoSource === "camera";
+  const sessionIdleLabel = sessionHasVideo ? "Record Session" : "Record Audio";
+  const sessionVideoMenuLabel =
+    sessionVideoSource === "camera" ? "Video (Camera) + Audio" : "Video + Audio";
+  const flipLockedByRecording = sessionTapeState !== "idle";
+  const sessionTapeUncalibrated =
+    (sessionTapeState === "recording" || sessionTapeState === "requesting") &&
+    !(looperConfig.latencyMs > 0);
+
+  useEffect(() => {
+    const prev = prevSessionTapeStateRef.current;
+    prevSessionTapeStateRef.current = sessionTapeState;
+    if (sessionTapeState !== "idle") setSavedNoticeVisible(false);
+    if (prev !== "saving" || sessionTapeState !== "idle") return;
+    let cancelled = false;
+    let hideTimer: number | null = null;
+    void listLocalRecordings()
+      .then((rows) => {
+        const newest = rows[0];
+        if (cancelled || !newest || newest.status !== "complete") return;
+        if (Date.now() - newest.updatedAt > 15_000) return;
+        setSavedNoticeVisible(true);
+        hideTimer = window.setTimeout(() => setSavedNoticeVisible(false), 5000);
+      })
+      .catch(() => {
+        /* store unavailable — hook already fell back to download */
+      });
+    return () => {
+      cancelled = true;
+      if (hideTimer !== null) window.clearTimeout(hideTimer);
+    };
+  }, [sessionTapeState]);
 
   const masterTransportLive =
     !masterPaused &&
@@ -3052,11 +3133,13 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             <button
               type="button"
               onClick={() => void handleFlipCamera()}
-              disabled={isFlippingCamera || isAirSynthActive}
+              disabled={isFlippingCamera || isAirSynthActive || flipLockedByRecording}
               title={
                 isAirSynthActive
                   ? "Flip camera is unavailable while Air Synth is on"
-                  : "Flip camera"
+                  : flipLockedByRecording
+                    ? "Flip camera is unavailable while recording"
+                    : "Flip camera"
               }
               aria-label="Flip camera"
               style={{
@@ -3066,8 +3149,11 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 border: "1px solid rgba(255,255,255,0.08)",
                 color: "rgba(255,255,255,0.85)",
                 fontSize: 11,
-                cursor: isFlippingCamera || isAirSynthActive ? "not-allowed" : "pointer",
-                opacity: isFlippingCamera || isAirSynthActive ? 0.45 : 1,
+                cursor:
+                  isFlippingCamera || isAirSynthActive || flipLockedByRecording
+                    ? "not-allowed"
+                    : "pointer",
+                opacity: isFlippingCamera || isAirSynthActive || flipLockedByRecording ? 0.45 : 1,
                 display: "flex",
                 alignItems: "center",
                 gap: 6,
@@ -3155,10 +3241,10 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             <button
               type="button"
               disabled={sessionTapeState === "saving" || sessionTapeState === "requesting"}
-              aria-haspopup={sessionTapeState === "idle" && sessionSupportsScreen ? "menu" : undefined}
-              aria-expanded={sessionTapeState === "idle" && sessionSupportsScreen ? sessionCaptureMenuOpen : undefined}
+              aria-haspopup={sessionTapeState === "idle" && sessionHasVideo ? "menu" : undefined}
+              aria-expanded={sessionTapeState === "idle" && sessionHasVideo ? sessionCaptureMenuOpen : undefined}
               onClick={() => {
-                if (sessionTapeState === "idle" && sessionSupportsScreen) {
+                if (sessionTapeState === "idle" && sessionHasVideo) {
                   setSessionCaptureMenuOpen((v) => !v);
                   return;
                 }
@@ -3195,7 +3281,9 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                   : sessionTapeState === "recording"
                     ? sessionCaptureMode === "audio-only"
                       ? "Recording audio…"
-                      : "Recording…"
+                      : sessionCaptureMode === "camera-video"
+                        ? "Recording video…"
+                        : "Recording…"
                     : "Saving…"}
             </button>
 
@@ -3232,7 +3320,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                   >
                     {(
                       [
-                        { label: "Video + Audio", audioOnly: false, Icon: Video },
+                        { label: sessionVideoMenuLabel, audioOnly: false, Icon: Video },
                         { label: "Audio Only", audioOnly: true, Icon: Mic },
                       ] as const
                     ).map(({ label, audioOnly, Icon }) => (
@@ -3242,7 +3330,11 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                         role="menuitem"
                         onClick={() => {
                           setSessionCaptureMenuOpen(false);
-                          looperHandlers.onToggleSessionRecording({ audioOnly });
+                          if (audioOnly) {
+                            looperHandlers.onToggleSessionRecording({ audioOnly: true });
+                            return;
+                          }
+                          void startSessionVideoRecording();
                         }}
                         style={{
                           display: "flex",
@@ -3280,6 +3372,87 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 {sessionRecorderError}
               </p>
             ) : null}
+            {sessionTapeUncalibrated ? (
+              <button
+                type="button"
+                onClick={launchGuidedCalibration}
+                disabled={looperConfig.isTimingLocked}
+                style={{
+                  margin: 0,
+                  padding: 0,
+                  maxWidth: 180,
+                  background: "transparent",
+                  border: "none",
+                  textAlign: "left",
+                  fontSize: 10,
+                  lineHeight: 1.4,
+                  color: "rgba(251,191,36,0.95)",
+                  cursor: looperConfig.isTimingLocked ? "default" : "pointer",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 4,
+                }}
+              >
+                <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>
+                  Calibrate latency first: live playing will sound late on this recording.
+                </span>
+              </button>
+            ) : null}
+            <AnimatePresence>
+              {savedNoticeVisible ? (
+                <motion.button
+                  key="saved-notice"
+                  type="button"
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 420, damping: 32 }}
+                  onClick={() => {
+                    setSavedNoticeVisible(false);
+                    setRecordingsOpen(true);
+                  }}
+                  style={{
+                    margin: 0,
+                    padding: 0,
+                    background: "transparent",
+                    border: "none",
+                    textAlign: "left",
+                    fontSize: 10,
+                    lineHeight: 1.4,
+                    color: "rgba(134,239,172,0.95)",
+                    cursor: "pointer",
+                  }}
+                >
+                  Saved to My Recordings. Tap to open.
+                </motion.button>
+              ) : null}
+            </AnimatePresence>
+            <button
+              type="button"
+              onClick={() => {
+                setSessionCaptureMenuOpen(false);
+                setRecordingsOpen(true);
+              }}
+              style={{
+                ...glassSharp,
+                padding: "7px 14px",
+                cursor: "pointer",
+                border: "1px solid rgba(255,255,255,0.08)",
+                background: "rgba(10,10,10,0.75)",
+                color: "rgba(255,255,255,0.75)",
+                fontSize: 11,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <FolderOpen size={12} /> My Recordings
+            </button>
+            <LocalRecordingsDrawer
+              open={recordingsOpen}
+              onClose={() => setRecordingsOpen(false)}
+            />
           </div>
 
           {(solo === "recording" || solo === "captured") && (

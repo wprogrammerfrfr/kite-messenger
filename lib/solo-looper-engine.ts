@@ -308,8 +308,11 @@ export type SoloLooperEngine = {
    * Returns true if the source was replaced.
    */
   replaceCaptureStream(nextStream: MediaStream): boolean;
-  /** Delay loop playback on the session recording bus only (aligns with finalize-shifted buffers). */
-  setRecordingLatencyCompensation(latencyMs: number): void;
+  /**
+   * Delay loop playback on the session recording bus only (aligns with finalize-shifted buffers).
+   * `glideSec` > 0 ramps linearly so mid-tape drift updates don't click or warble audibly.
+   */
+  setRecordingLatencyCompensation(latencyMs: number, options?: { glideSec?: number }): void;
   teardown(): void;
 };
 
@@ -863,14 +866,31 @@ export async function buildSoloLooperEngine(
       nextSource.connect(recordingMicGainNode);
       return true;
     },
-    setRecordingLatencyCompensation(latencyMs: number): void {
+    setRecordingLatencyCompensation(latencyMs: number, options?: { glideSec?: number }): void {
       if (tornDown || ctx.state === "closed") return;
       const nextSec = clampRecordingLatencyDelaySec(latencyMs);
+      const glideSec =
+        options?.glideSec !== undefined && Number.isFinite(options.glideSec)
+          ? Math.max(0, options.glideSec)
+          : 0;
+      const param = recordingPlaybackDelayNode.delayTime;
+      const now = ctx.currentTime;
       try {
-        recordingPlaybackDelayNode.delayTime.cancelScheduledValues(ctx.currentTime);
-        recordingPlaybackDelayNode.delayTime.setTargetAtTime(nextSec, ctx.currentTime, 0.01);
+        if (glideSec > 0) {
+          if (typeof param.cancelAndHoldAtTime === "function") {
+            param.cancelAndHoldAtTime(now);
+          } else {
+            const held = param.value;
+            param.cancelScheduledValues(now);
+            param.setValueAtTime(held, now);
+          }
+          param.linearRampToValueAtTime(nextSec, now + glideSec);
+          return;
+        }
+        param.cancelScheduledValues(now);
+        param.setTargetAtTime(nextSec, now, 0.01);
       } catch {
-        recordingPlaybackDelayNode.delayTime.value = nextSec;
+        param.value = nextSec;
       }
     },
     teardown(): void {

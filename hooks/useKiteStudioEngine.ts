@@ -16,13 +16,24 @@ import { TrackRecorder } from "@/lib/track-recorder";
 import {
   canUseDisplayMedia,
   canUseMediaRecorder,
+  getSessionCameraStream,
   getSessionDisplayMediaStream,
   resolveSessionDownloadExtension,
+  resolveSessionVideoSource,
   selectSessionAudioMediaRecorderOptions,
   selectSessionVideoMediaRecorderOptions,
   type SoloSessionRecorderCaptureMode,
 } from "@/lib/studio-session-recorder";
 import { shareOrDownloadBlob } from "@/lib/studio-mobile-share";
+import {
+  appendLocalRecordingChunk,
+  createLocalRecording,
+  deleteLocalRecording,
+  finalizeLocalRecording,
+  isLocalRecordingsStoreSupported,
+  recoverUnfinishedLocalRecordings,
+  requestPersistentLocalStorage,
+} from "@/lib/local-recordings-store";
 import { micPermissionRecoveryHint } from "@/lib/studio-mic-permission-copy";
 import { isStudioSafariWebKitEngine } from "@/lib/studio-webkit-detect";
 import {
@@ -36,6 +47,7 @@ import {
 import { buildKiteIntervalGraph, type KiteIntervalGraph } from "@/lib/kite-interval-graph";
 import {
   clampSoloLatencyMs,
+  computeEffectiveSoloLatencyMs,
   readSoloLatencyMs,
   readSoloLatencyHwFingerprint,
   writeSoloLatencyMs,
@@ -47,6 +59,10 @@ import {
   isSoloLatencyHwStale,
   resolvePrimaryInputDeviceId,
 } from "@/lib/solo-latency-hardware";
+import {
+  createSoloLatencyDriftMonitor,
+  type SoloLatencyDriftMonitor,
+} from "@/lib/solo-latency-drift-monitor";
 import {
   computeTrackTargetLengthFrames,
   getBarCountOptionsForTimeSignature,
@@ -119,6 +135,7 @@ import type {
   SoloLooperState,
   SoloSessionRecorderState,
   SoloSessionRecorderCaptureMode as SoloSessionRecorderCaptureModeType,
+  SoloSessionRecordingToggleOptions,
   JamSetupLock,
   KiteSetupOrigin,
   DeviceFlagMap,
@@ -304,6 +321,60 @@ const REMOTE_COMPRESSOR_ATTACK    = 0.003;
 const REMOTE_COMPRESSOR_RELEASE   = 0.1;
 const SOLO_LATENCY_STALE_MESSAGE =
   "Audio hardware or path latency changed — re-calibrate RTL.";
+/** Last verified signed-in user; lets solo mode open offline after the 1 h token expires. */
+const OFFLINE_IDENTITY_KEY = "kite_offline_identity";
+
+function writeOfflineIdentity(user: User): void {
+  try {
+    const snapshot: Pick<
+      User,
+      "id" | "email" | "aud" | "app_metadata" | "user_metadata" | "created_at"
+    > = {
+      id: user.id,
+      email: user.email,
+      aud: user.aud,
+      app_metadata: {},
+      user_metadata: user.user_metadata ?? {},
+      created_at: user.created_at,
+    };
+    window.localStorage.setItem(OFFLINE_IDENTITY_KEY, JSON.stringify(snapshot));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function readOfflineIdentity(): User | null {
+  try {
+    const raw = window.localStorage.getItem(OFFLINE_IDENTITY_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<User>;
+    if (typeof parsed.id !== "string" || !parsed.id) return null;
+    return parsed as User;
+  } catch {
+    return null;
+  }
+}
+
+function clearOfflineIdentity(): void {
+  try {
+    window.localStorage.removeItem(OFFLINE_IDENTITY_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function isBrowserOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+function isAuthNetworkError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { name, status } = error as { name?: string; status?: number };
+  return name === "AuthRetryableFetchError" || status === 0 || name === "TypeError";
+}
+
+/** Mid-tape drift updates ramp over this window (~0.5% pitch for a 10 ms shift). */
+const SOLO_TAPE_DRIFT_GLIDE_SEC = 2;
 const GUIDED_RTL_CLOCK_STALL_MS = 2000;
 const GUIDED_RTL_CLOCK_STALL_MESSAGE =
   "Audio clock stalled — tap Resume Audio if needed, then Retry.";
@@ -497,6 +568,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [retryInitTick, setRetryInitTick] = useState(0);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  /** True when auth is served from the cached offline identity (solo only, no network). */
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+  const isOfflineModeRef = useRef(false);
   const [audioContextReady, setAudioContextReady] = useState(false);
   const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
   const [activeDeviceIds, setActiveDeviceIds] = useState<string[]>([]);
@@ -784,6 +858,12 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloSessionChunksRef = useRef<BlobPart[]>([]);
   const soloSessionDisplayStreamRef = useRef<MediaStream | null>(null);
   const soloSessionCaptureModeRef = useRef<SoloSessionRecorderCaptureMode | null>(null);
+  /** On-device copy of the active take (IndexedDB); in-memory chunks stay as fallback. */
+  const soloSessionLocalIdRef = useRef<Promise<string | null> | null>(null);
+  const soloSessionLocalWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const soloSessionLocalSeqRef = useRef(0);
+  const soloSessionLocalFailedRef = useRef(false);
+  const soloSessionStartedAtMsRef = useRef(0);
   const studioReadyStateHandlerRef = useRef<(() => void) | null>(null);
   const soloMetronomeLastBeatRef = useRef<number | null>(null);
   const soloMetronomeAnchorContextSecRef = useRef<number | null>(null);
@@ -1244,15 +1324,73 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     writeSoloLatencyMs(soloLooperLatencyMs);
   }, [soloLooperLatencyMs]);
 
+  const soloLatencyDriftMonitorRef = useRef<SoloLatencyDriftMonitor | null>(null);
+  const soloLatencyDriftContextRef = useRef<AudioContext | null>(null);
+  const soloOutputLatencyDeltaMsRef = useRef(0);
+
+  /** Calibrated RTL + HAL output-latency growth since the drift baseline. Read at take boundaries only. */
+  const getEffectiveSoloLatencyMs = useCallback(
+    (): number =>
+      computeEffectiveSoloLatencyMs(
+        soloLooperLatencyMsRef.current,
+        soloOutputLatencyDeltaMsRef.current
+      ),
+    []
+  );
+
   const applySoloRecordingLatencyCompensation = useCallback(() => {
-    soloLooperEngineRef.current?.setRecordingLatencyCompensation(
-      soloLooperLatencyMsRef.current
-    );
+    soloLooperEngineRef.current?.setRecordingLatencyCompensation(getEffectiveSoloLatencyMs());
+  }, [getEffectiveSoloLatencyMs]);
+
+  /** New calibration already includes today's HAL latency, so re-anchor the drift baseline. */
+  const resetSoloLatencyDriftBaseline = useCallback(() => {
+    soloOutputLatencyDeltaMsRef.current = 0;
+    soloLatencyDriftMonitorRef.current?.resetBaseline();
   }, []);
 
   useEffect(() => {
     applySoloRecordingLatencyCompensation();
   }, [soloLooperLatencyMs, applySoloRecordingLatencyCompensation]);
+
+  useEffect(() => {
+    if (kiteMode !== "solo" || studioUiPhase !== "studio" || !audioContextReady) {
+      soloLatencyDriftMonitorRef.current?.stop();
+      return;
+    }
+    const ctx = studioAudioContextRef.current;
+    if (!ctx || ctx.state === "closed") return;
+
+    if (!soloLatencyDriftMonitorRef.current) {
+      soloLatencyDriftMonitorRef.current = createSoloLatencyDriftMonitor({
+        getContext: () => {
+          const active = studioAudioContextRef.current;
+          return active && active.state !== "closed" ? active : null;
+        },
+        getInputTrack: () =>
+          soloLooperEngineRef.current?.getCaptureStream().getAudioTracks()[0] ??
+          localMicStreamRef.current?.getAudioTracks()[0] ??
+          null,
+        onDeltaChange: (deltaMs) => {
+          soloOutputLatencyDeltaMsRef.current = deltaMs;
+          const taping = soloSessionMediaRecorderRef.current !== null;
+          soloLooperEngineRef.current?.setRecordingLatencyCompensation(
+            getEffectiveSoloLatencyMs(),
+            taping ? { glideSec: SOLO_TAPE_DRIFT_GLIDE_SEC } : undefined
+          );
+        },
+      });
+    }
+    const monitor = soloLatencyDriftMonitorRef.current;
+    if (soloLatencyDriftContextRef.current !== ctx) {
+      soloLatencyDriftContextRef.current = ctx;
+      soloOutputLatencyDeltaMsRef.current = 0;
+      monitor.resetBaseline();
+    }
+    monitor.start();
+    return () => {
+      monitor.stop();
+    };
+  }, [kiteMode, studioUiPhase, audioContextReady, getEffectiveSoloLatencyMs]);
 
   useEffect(() => {
     soloLooperModeRef.current = soloLooperMode;
@@ -3833,16 +3971,108 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setSoloSessionRecorderState("idle");
   }, []);
 
+  const beginSoloSessionLocalCopy = useCallback(
+    (meta: { mimeType: string; ext: string; captureMode: string }): void => {
+      soloSessionLocalSeqRef.current = 0;
+      soloSessionLocalFailedRef.current = false;
+      soloSessionStartedAtMsRef.current = Date.now();
+      if (!isLocalRecordingsStoreSupported()) {
+        soloSessionLocalFailedRef.current = true;
+        soloSessionLocalIdRef.current = Promise.resolve(null);
+        soloSessionLocalWriteQueueRef.current = Promise.resolve();
+        return;
+      }
+      void requestPersistentLocalStorage();
+      const idPromise = createLocalRecording(meta)
+        .then((row) => row.id)
+        .catch((err: unknown) => {
+          console.warn("[Solo session recorder] On-device save unavailable:", err);
+          soloSessionLocalFailedRef.current = true;
+          return null;
+        });
+      soloSessionLocalIdRef.current = idPromise;
+      soloSessionLocalWriteQueueRef.current = idPromise.then(() => undefined);
+    },
+    []
+  );
+
+  /** Serialized so chunk seq order on disk always matches MediaRecorder order. */
+  const enqueueSoloSessionLocalChunk = useCallback((blob: Blob): void => {
+    const idPromise = soloSessionLocalIdRef.current;
+    if (!idPromise || soloSessionLocalFailedRef.current) return;
+    const seq = soloSessionLocalSeqRef.current;
+    soloSessionLocalSeqRef.current = seq + 1;
+    soloSessionLocalWriteQueueRef.current = soloSessionLocalWriteQueueRef.current
+      .then(async () => {
+        const id = await idPromise;
+        if (!id || soloSessionLocalFailedRef.current) return;
+        await appendLocalRecordingChunk(id, seq, blob);
+      })
+      .catch((err: unknown) => {
+        console.warn("[Solo session recorder] On-device chunk write failed:", err);
+        soloSessionLocalFailedRef.current = true;
+      });
+  }, []);
+
+  /** Returns true when the full take is safely on the device. Partial copies are removed. */
+  const finalizeSoloSessionLocalCopy = useCallback(async (hasAudio: boolean): Promise<boolean> => {
+    const idPromise = soloSessionLocalIdRef.current;
+    if (!idPromise) return false;
+    await soloSessionLocalWriteQueueRef.current;
+    const id = await idPromise;
+    if (!id) return false;
+    try {
+      if (!hasAudio || soloSessionLocalFailedRef.current) {
+        await deleteLocalRecording(id);
+        return false;
+      }
+      await finalizeLocalRecording(id, {
+        durationMs: Math.max(0, Date.now() - soloSessionStartedAtMsRef.current),
+      });
+      return true;
+    } catch (err) {
+      console.warn("[Solo session recorder] On-device finalize failed:", err);
+      return false;
+    }
+  }, []);
+
   const failSoloSessionRecorder = useCallback(
     (message: string) => {
       stopSoloSessionDisplayTracks(soloSessionDisplayStreamRef);
       soloSessionMediaRecorderRef.current = null;
       soloSessionChunksRef.current = [];
+      if (soloSessionLocalIdRef.current) {
+        soloSessionLocalFailedRef.current = true;
+        void finalizeSoloSessionLocalCopy(false);
+        soloSessionLocalIdRef.current = null;
+      }
       resetSoloSessionRecorderUi();
       setSoloSessionRecorderError(message);
     },
-    [resetSoloSessionRecorderUi]
+    [finalizeSoloSessionLocalCopy, resetSoloSessionRecorderUi]
   );
+
+  useEffect(() => {
+    void recoverUnfinishedLocalRecordings(Date.now()).catch(() => {
+      /* store unavailable (private mode) */
+    });
+  }, []);
+
+  useEffect(() => {
+    const flush = (): void => {
+      if (document.visibilityState !== "hidden") return;
+      const recorder = soloSessionMediaRecorderRef.current;
+      if (recorder?.state === "recording") {
+        try {
+          recorder.requestData();
+        } catch {
+          /* recorder already stopping */
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", flush);
+    return () => document.removeEventListener("visibilitychange", flush);
+  }, []);
 
   const stopSoloSessionRecording = useCallback(async () => {
     const recorder = soloSessionMediaRecorderRef.current;
@@ -3872,7 +4102,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         }
         recorder.stop();
       });
-      if (blob.size > 0) {
+      const savedOnDevice = await finalizeSoloSessionLocalCopy(blob.size > 0);
+      if (blob.size > 0 && !savedOnDevice) {
         const ext = resolveSessionDownloadExtension(blob.type || recorder.mimeType || "");
         downloadSoloSessionBlob(blob, ext);
       }
@@ -3884,9 +4115,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     } finally {
       stopSoloSessionDisplayTracks(soloSessionDisplayStreamRef);
       soloSessionChunksRef.current = [];
+      soloSessionLocalIdRef.current = null;
       resetSoloSessionRecorderUi();
     }
-  }, [downloadSoloSessionBlob, resetSoloSessionRecorderUi]);
+  }, [downloadSoloSessionBlob, finalizeSoloSessionLocalCopy, resetSoloSessionRecorderUi]);
 
   const clearJamSetupLockTimer = useCallback(() => {
     if (jamSetupLockTimerRef.current !== null) {
@@ -5125,7 +5357,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     sessionId,
   ]);
 
-  const startSoloSessionRecording = useCallback(async (audioOnly = false) => {
+  const startSoloSessionRecording = useCallback(async (
+    opts: SoloSessionRecordingToggleOptions = {}
+  ) => {
     if (soloSessionMediaRecorderRef.current) return;
 
     if (!canUseMediaRecorder()) {
@@ -5136,10 +5370,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setSoloSessionRecorderError(null);
     setSoloSessionRecorderState("requesting");
 
-    const screenCaptureAvailable = !audioOnly && canUseDisplayMedia();
+    const videoSource = opts.audioOnly === true ? "none" : resolveSessionVideoSource();
+    const screenCaptureAvailable = videoSource === "screen";
     let captureMode: SoloSessionRecorderCaptureMode = screenCaptureAvailable
       ? "screen-video"
-      : "audio-only";
+      : videoSource === "camera"
+        ? "camera-video"
+        : "audio-only";
+    let fallbackNotice: string | null = null;
 
     try {
       const engine = await ensureSoloLooperEngineBootstrapped();
@@ -5168,6 +5406,29 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           ...recordingStream.getAudioTracks(),
         ]);
         captureMode = "screen-video";
+      } else if (videoSource === "camera") {
+        let cameraTrack: MediaStreamTrack | null = null;
+        const previewTrack =
+          opts.cameraStream?.getVideoTracks().find((t) => t.readyState === "live") ?? null;
+        try {
+          // Clone so the recorder owns its track; the panel preview track is never stopped here.
+          cameraTrack = previewTrack
+            ? previewTrack.clone()
+            : ((await getSessionCameraStream(opts.cameraFacingMode ?? "user")).getVideoTracks()[0] ??
+              null);
+        } catch (err) {
+          console.warn("[Solo session recorder] Camera unavailable, recording audio only:", err);
+          cameraTrack = null;
+        }
+        if (cameraTrack) {
+          soloSessionDisplayStreamRef.current = new MediaStream([cameraTrack]);
+          streamForRecorder = new MediaStream([cameraTrack, ...recordingStream.getAudioTracks()]);
+          captureMode = "camera-video";
+        } else {
+          streamForRecorder = recordingStream;
+          captureMode = "audio-only";
+          fallbackNotice = "Camera unavailable. Recording audio only.";
+        }
       } else {
         streamForRecorder = recordingStream;
         captureMode = "audio-only";
@@ -5178,9 +5439,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
       soloSessionChunksRef.current = [];
       const recorderOptions =
-        captureMode === "screen-video"
-          ? selectSessionVideoMediaRecorderOptions()
-          : selectSessionAudioMediaRecorderOptions().mediaRecorderOptions;
+        captureMode === "audio-only"
+          ? selectSessionAudioMediaRecorderOptions().mediaRecorderOptions
+          : selectSessionVideoMediaRecorderOptions();
 
       let recorder: MediaRecorder;
       try {
@@ -5204,30 +5465,56 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       recorder.ondataavailable = (event: BlobEvent): void => {
         if (event.data.size > 0) {
           soloSessionChunksRef.current.push(event.data);
+          enqueueSoloSessionLocalChunk(event.data);
         }
       };
 
       soloSessionMediaRecorderRef.current = recorder;
       recorder.start(1000);
+      const recorderMime = recorder.mimeType?.trim() || recorderOptions.mimeType || "";
+      beginSoloSessionLocalCopy({
+        mimeType: recorderMime,
+        ext: resolveSessionDownloadExtension(recorderMime),
+        captureMode,
+      });
       setSoloSessionRecorderState("recording");
+      if (fallbackNotice) setSoloSessionRecorderError(fallbackNotice);
     } catch (err) {
       console.error("[Solo session recorder] Failed to start:", err);
       failSoloSessionRecorder(
         err instanceof Error ? err.message : "Could not start session recording."
       );
     }
-  }, [ensureSoloLooperEngineBootstrapped, failSoloSessionRecorder]);
+  }, [
+    beginSoloSessionLocalCopy,
+    enqueueSoloSessionLocalChunk,
+    ensureSoloLooperEngineBootstrapped,
+    failSoloSessionRecorder,
+  ]);
 
   const handleToggleSoloSessionRecording = useCallback(
-    (opts?: { audioOnly?: boolean }) => {
+    (opts?: SoloSessionRecordingToggleOptions) => {
       if (soloSessionMediaRecorderRef.current) {
         void stopSoloSessionRecording();
         return;
       }
-      void startSoloSessionRecording(opts?.audioOnly === true);
+      void startSoloSessionRecording(opts ?? {});
     },
     [startSoloSessionRecording, stopSoloSessionRecording]
   );
+
+  // Android pauses the camera when the PWA is backgrounded; finalize the take instead of
+  // writing frozen video (everything up to this point is already on the device).
+  useEffect(() => {
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "hidden") return;
+      if (soloSessionCaptureModeRef.current !== "camera-video") return;
+      if (!soloSessionMediaRecorderRef.current) return;
+      void stopSoloSessionRecording();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [stopSoloSessionRecording]);
 
   const startSoloLooper = useCallback(
     async (
@@ -5321,7 +5608,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           : 44100;
         const latencyOffsetFrames = Math.max(
           0,
-          Math.round((soloLooperLatencyMsRef.current / 1000) * startSampleRate)
+          Math.round((getEffectiveSoloLatencyMs() / 1000) * startSampleRate)
         );
         let targetLengthFrames: number | undefined;
         let handsfreeTrackTargets: [number, number, number, number] | undefined;
@@ -6568,6 +6855,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     (value: number) => {
       const clamped = clampSoloLatencyMs(value);
       soloLooperLatencyMsRef.current = clamped;
+      resetSoloLatencyDriftBaseline();
       setSoloLooperLatencyMs(clamped);
       setSoloLatencyLastRawMeasuredMs(clamped);
       setSoloLatencyFloorApplied(false);
@@ -6587,7 +6875,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         }
       })();
     },
-    [buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale]
+    [buildCurrentSoloLatencyHwFingerprint, clearSoloLatencyStale, resetSoloLatencyDriftBaseline]
   );
 
   const clearGuidedRtlTransitionTimer = useCallback(() => {
@@ -6754,6 +7042,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     clearGuidedRtlTransitionTimer();
     const clamped = clampSoloLatencyMs(guidedRtlWizard.draftLatencyMs);
     soloLooperLatencyMsRef.current = clamped;
+    resetSoloLatencyDriftBaseline();
     setSoloLooperLatencyMs(clamped);
     setSoloLatencyLastRawMeasuredMs(clamped);
     setSoloLatencyFloorApplied(false);
@@ -6786,6 +7075,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     clearGuidedRtlTransitionTimer,
     clearSoloLatencyStale,
     guidedRtlWizard.draftLatencyMs,
+    resetSoloLatencyDriftBaseline,
     stopGuidedRtlAudio,
   ]);
 
@@ -7060,7 +7350,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         const maxProvisionFrames = Math.max(1, Math.floor(localSr * MAX_SOLO_TRACK_RAM_SECONDS));
         const latencyOffsetFrames = Math.max(
           0,
-          Math.round((soloLooperLatencyMsRef.current / 1000) * localSr)
+          Math.round((getEffectiveSoloLatencyMs() / 1000) * localSr)
         );
         const timingSnapshot = kiteIntervalTimingRef.current;
         const bpm = Math.max(
@@ -7184,7 +7474,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       : 44100;
     const latencyOffsetFrames = Math.max(
       0,
-      Math.round((soloLooperLatencyMsRef.current / 1000) * sampleRate)
+      Math.round((getEffectiveSoloLatencyMs() / 1000) * sampleRate)
     );
     const commitContextSec = ctx.currentTime;
     const freePedalStopRefSec = freePedalStopContextSecRef.current;
@@ -7279,9 +7569,15 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     if (kiteMode !== "solo" || studioUiPhase !== "studio") {
       return;
     }
+    // High-refresh tablets fire rAF at 120 Hz; each poll allocates a snapshot on the audio thread.
+    const minPollIntervalMs = 1000 / 30;
     let rafId = 0;
-    const tick = (): void => {
-      soloLooperEngineRef.current?.requestPlaybackUiState();
+    let lastPollAt = 0;
+    const tick = (now: number): void => {
+      if (now - lastPollAt >= minPollIntervalMs && document.visibilityState === "visible") {
+        lastPollAt = now;
+        soloLooperEngineRef.current?.requestPlaybackUiState();
+      }
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
@@ -7549,31 +7845,89 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
   useEffect(() => {
     let cancelled = false;
-    void supabase.auth.getUser().then(({ data: { user: next } }) => {
-      if (cancelled) return;
+
+    const commitAuthUser = (next: User | null, offline: boolean): void => {
       lastAuthUserIdRef.current = next?.id ?? null;
-      setUser(next ?? null);
-      onAuthUserChange?.(next ?? null);
+      isOfflineModeRef.current = offline;
+      setIsOfflineMode(offline);
+      setUser(next);
+      onAuthUserChange?.(next);
       setAuthReady(true);
       onAuthReadyChange?.(true);
-    });
+    };
+
+    /** Offline: reuse the last verified identity (solo only). Returns false when none is cached. */
+    const tryOfflineIdentity = (): boolean => {
+      const cached = readOfflineIdentity();
+      if (!cached) return false;
+      commitAuthUser(cached, true);
+      return true;
+    };
+
+    const verifyUser = (): void => {
+      void supabase.auth
+        .getUser()
+        .then(({ data: { user: next }, error }) => {
+          if (cancelled) return;
+          if (next) {
+            writeOfflineIdentity(next);
+            commitAuthUser(next, false);
+            return;
+          }
+          if ((isBrowserOffline() || isAuthNetworkError(error)) && tryOfflineIdentity()) {
+            return;
+          }
+          if (!isBrowserOffline() && !isAuthNetworkError(error)) {
+            clearOfflineIdentity();
+          }
+          commitAuthUser(null, false);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          if (tryOfflineIdentity()) return;
+          console.warn("[Auth] getUser failed:", err);
+          commitAuthUser(null, false);
+        });
+    };
+
+    // getUser() can stall on a dead network; open offline solo mode immediately.
+    if (isBrowserOffline()) {
+      tryOfflineIdentity();
+    }
+    verifyUser();
+
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
       if (cancelled) return;
-      const nextUserId = session?.user?.id ?? null;
-      if (event === "TOKEN_REFRESHED" && nextUserId === lastAuthUserIdRef.current) {
+      const nextUser = session?.user ?? null;
+      if (event === "SIGNED_OUT") {
+        clearOfflineIdentity();
+        commitAuthUser(null, false);
         return;
       }
-      lastAuthUserIdRef.current = nextUserId;
-      setUser(session?.user ?? null);
-      onAuthUserChange?.(session?.user ?? null);
-      setAuthReady(true);
-      onAuthReadyChange?.(true);
+      // Offline refresh failures surface as a null session — keep the cached identity.
+      if (!nextUser && isOfflineModeRef.current) {
+        return;
+      }
+      if (event === "TOKEN_REFRESHED" && nextUser?.id === lastAuthUserIdRef.current) {
+        return;
+      }
+      if (nextUser) {
+        writeOfflineIdentity(nextUser);
+      }
+      commitAuthUser(nextUser, false);
     });
+
+    const onOnline = (): void => {
+      if (isOfflineModeRef.current) verifyUser();
+    };
+    window.addEventListener("online", onOnline);
+
     return () => {
       cancelled = true;
       subscription.unsubscribe();
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 
@@ -9748,6 +10102,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     connectionLostCountdown,
     user,
     authReady,
+    isOfflineMode,
     kiteSetupStep,
     kiteSetupUsesCustomChords,
     kiteSetupOrigin,
@@ -9792,6 +10147,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       connectionLostCountdown,
       user,
       authReady,
+      isOfflineMode,
       kiteSetupStep,
       kiteSetupUsesCustomChords,
       kiteSetupOrigin,

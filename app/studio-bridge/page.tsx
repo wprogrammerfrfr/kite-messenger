@@ -386,6 +386,7 @@ export default function StudioBridgePage() {
   const connectionLostCountdown = presenterState.connectionLostCountdown;
   const user = presenterState.user;
   const authReady = presenterState.authReady;
+  const isOfflineMode = presenterState.isOfflineMode;
   const kiteSetupStep = presenterState.kiteSetupStep;
   const kiteSetupUsesCustomChords = presenterState.kiteSetupUsesCustomChords;
   const kiteSetupOrigin = presenterState.kiteSetupOrigin;
@@ -1157,6 +1158,19 @@ export default function StudioBridgePage() {
             </div>
           ) : null}
 
+          {isOfflineMode && showLobbyControls ? (
+            <div
+              className="mx-auto mt-4 flex max-w-lg items-center gap-2 rounded-xl border border-white/10 bg-zinc-950/80 px-4 py-2.5 text-[12px] font-medium text-stone-300"
+              role="status"
+            >
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-hidden />
+              <span>
+                <span className="font-semibold text-stone-100">Offline: Solo mode.</span> The
+                loopstation and recordings work on this device. Jam sessions need internet.
+              </span>
+            </div>
+          ) : null}
+
           {showLobbyControls ? (
             <StudioPreflightLobby
               returnToLobby={returnToLobby}
@@ -1176,7 +1190,7 @@ export default function StudioBridgePage() {
               copyRoomCode={copyRoomCode}
               sessionId={sessionId}
               roomCopyNote={roomCopyNote}
-              canEnterStudio={canEnterStudio}
+              canEnterStudio={canEnterStudio && !isOfflineMode}
               handleEnterStudio={handleEnterStudio}
               canPracticeAlone={canPracticeAlone}
               handleEnterSoloStudio={handleEnterSoloStudio}
@@ -2190,6 +2204,12 @@ export default function StudioBridgePage() {
               <p className="mt-3 text-center text-sm font-medium leading-relaxed text-stone-300">
                 Log in to host or join a session.
               </p>
+              {typeof navigator !== "undefined" && navigator.onLine === false ? (
+                <p className="mt-2 text-center text-[12px] font-medium leading-relaxed text-amber-300/90">
+                  You&apos;re offline. Sign in once while online to use the loopstation offline on
+                  this device.
+                </p>
+              ) : null}
               <motion.button
                 type="button"
                 onClick={() => router.push("/")}
