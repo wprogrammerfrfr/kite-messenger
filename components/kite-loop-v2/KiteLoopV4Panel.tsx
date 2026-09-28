@@ -21,7 +21,6 @@ import {
   Trash2,
   Volume2,
   Zap,
-  ChevronRight,
   ChevronDown,
   Check,
   AlertTriangle,
@@ -40,6 +39,7 @@ import type { SoloLooperPlaybackUiStateEvent } from "@/lib/solo-looper-engine";
 import { SoloLatencyCalibrationPanel } from "@/components/studio-bridge/SoloLatencyCalibrationPanel";
 import type {
   GuidedRtlWizardState,
+  HandsfreeTrackCount,
   SoloLooperMode,
   SoloLooperState,
   SoloSessionRecorderCaptureMode,
@@ -119,6 +119,8 @@ export type KiteLoopV4LooperConfig = {
   handsfreeAssist: boolean;
   /** True when Assist toggle must not change (timing locked, sequence active, or Handsfree off). */
   handsfreeAssistDisabled: boolean;
+  /** Handsfree Mode: number of tracks auto-recorded (T1..Tn). */
+  handsfreeTrackCount: HandsfreeTrackCount;
   timingAssist: boolean;
   /** True when Timing Assist toggle must not change (timing locked or sequence active). */
   timingAssistDisabled: boolean;
@@ -134,11 +136,12 @@ export type KiteLoopV4LooperConfig = {
 export type KiteLoopV4LooperHandlers = {
   onRecordFirstLoop: () => void;
   onToggleMasterPause: () => void;
-  onToggleSessionRecording: () => void;
+  onToggleSessionRecording: (opts?: { audioOnly?: boolean }) => void;
   onStopAndResetSoloLooper: () => void;
   onEndSession: () => void;
   onLoopModeChange: (value: SoloLooperMode) => void;
   onHandsfreeAssistChange: (on: boolean) => void;
+  onHandsfreeTrackCountChange: (count: HandsfreeTrackCount) => void;
   onTimingAssistChange: (on: boolean) => void;
   guidedRtlWizard: GuidedRtlWizardState;
   onBeginGuidedRtlWizard: () => void;
@@ -1673,6 +1676,44 @@ function SettingsModal({
                   sublabel="Wait one full loop between takes"
                   disabled={cfg.handsfreeAssistDisabled}
                 />
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                    opacity: cfg.handsfreeAssistDisabled ? 0.45 : 1,
+                  }}
+                >
+                  <span style={INLINE_LABEL}>Handsfree Tracks</span>
+                  <div role="radiogroup" aria-label="Handsfree Tracks" style={{ display: "flex", gap: 6 }}>
+                    {([1, 2, 3, 4] as const).map((count) => {
+                      const sel = cfg.handsfreeTrackCount === count;
+                      return (
+                        <button
+                          key={count}
+                          type="button"
+                          role="radio"
+                          aria-checked={sel}
+                          disabled={cfg.handsfreeAssistDisabled}
+                          onClick={() => handlers.onHandsfreeTrackCountChange(count)}
+                          style={{
+                            flex: 1,
+                            borderRadius: 9,
+                            padding: "6px 0",
+                            border: `1px solid ${sel ? "rgba(255,69,0,0.55)" : "rgba(255,255,255,0.09)"}`,
+                            background: sel ? "rgba(255,69,0,0.1)" : "transparent",
+                            color: sel ? ORANGE : "rgba(255,255,255,0.38)",
+                            fontSize: 11,
+                            fontVariantNumeric: "tabular-nums",
+                            cursor: cfg.handsfreeAssistDisabled ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          {count}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2419,6 +2460,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inputsOpen, setInputsOpen] = useState(false);
+  const [sessionCaptureMenuOpen, setSessionCaptureMenuOpen] = useState(false);
   const [isTunerOpen, setIsTunerOpen] = useState(false);
   const [tunerInstrumentId, setTunerInstrumentId] =
     useState<KiteTunerInstrumentId>(DEFAULT_INSTRUMENT_ID);
@@ -3109,10 +3151,20 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               gap: 6,
             }}
           >
+            <div style={{ position: "relative", display: "flex", flexDirection: "column" }}>
             <button
               type="button"
               disabled={sessionTapeState === "saving" || sessionTapeState === "requesting"}
-              onClick={() => looperHandlers.onToggleSessionRecording()}
+              aria-haspopup={sessionTapeState === "idle" && sessionSupportsScreen ? "menu" : undefined}
+              aria-expanded={sessionTapeState === "idle" && sessionSupportsScreen ? sessionCaptureMenuOpen : undefined}
+              onClick={() => {
+                if (sessionTapeState === "idle" && sessionSupportsScreen) {
+                  setSessionCaptureMenuOpen((v) => !v);
+                  return;
+                }
+                setSessionCaptureMenuOpen(false);
+                looperHandlers.onToggleSessionRecording();
+              }}
               style={{
                 ...glassSharp,
                 padding: "7px 14px",
@@ -3147,6 +3199,75 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                     : "Saving…"}
             </button>
 
+            {sessionCaptureMenuOpen && sessionTapeState === "idle" ? (
+              <div
+                aria-hidden
+                onClick={() => setSessionCaptureMenuOpen(false)}
+                style={{ position: "fixed", inset: 0, zIndex: 40 }}
+              />
+            ) : null}
+            <AnimatePresence>
+              {sessionCaptureMenuOpen && sessionTapeState === "idle" ? (
+                  <motion.div
+                    key="session-capture-menu"
+                    role="menu"
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    transition={{ type: "spring", stiffness: 420, damping: 32 }}
+                    style={{
+                      ...glassSharp,
+                      position: "absolute",
+                      top: "calc(100% + 6px)",
+                      right: 0,
+                      zIndex: 41,
+                      minWidth: "100%",
+                      display: "flex",
+                      flexDirection: "column",
+                      padding: 4,
+                      gap: 2,
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: "rgba(10,10,10,0.92)",
+                    }}
+                  >
+                    {(
+                      [
+                        { label: "Video + Audio", audioOnly: false, Icon: Video },
+                        { label: "Audio Only", audioOnly: true, Icon: Mic },
+                      ] as const
+                    ).map(({ label, audioOnly, Icon }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setSessionCaptureMenuOpen(false);
+                          looperHandlers.onToggleSessionRecording({ audioOnly });
+                        }}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "7px 10px",
+                          background: "transparent",
+                          border: "none",
+                          borderRadius: 6,
+                          color: "rgba(255,255,255,0.8)",
+                          fontSize: 11,
+                          whiteSpace: "nowrap",
+                          cursor: "pointer",
+                          textAlign: "left",
+                        }}
+                      >
+                        <Icon size={12} color="rgba(255,255,255,0.55)" />
+                        {label}
+                      </button>
+                    ))}
+                  </motion.div>
+              ) : null}
+            </AnimatePresence>
+            </div>
+
             {sessionRecorderError ? (
               <p
                 style={{
@@ -3159,42 +3280,6 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 {sessionRecorderError}
               </p>
             ) : null}
-
-            <AnimatePresence>
-              {!inputsOpen ? (
-                <motion.button
-                  type="button"
-                  initial={{ opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  onClick={() => {
-                    setInputsOpen(true);
-                    setSettingsOpen(false);
-                    setIsTunerOpen(false);
-                  }}
-                  style={{
-                    ...glassSharp,
-                    padding: "6px 10px",
-                    cursor: "pointer",
-                    display: "flex",
-                    flexDirection: "row",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    background: "rgba(10,10,10,0.75)",
-                    color: "rgba(255,255,255,0.5)",
-                    fontSize: 10,
-                    letterSpacing: "0.08em",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  <Mic size={12} color={EMERALD} />
-                  Input Device
-                  <ChevronRight size={10} color="rgba(255,255,255,0.2)" />
-                </motion.button>
-              ) : null}
-            </AnimatePresence>
           </div>
 
           {(solo === "recording" || solo === "captured") && (
@@ -3227,10 +3312,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "flex-end",
-          padding: isAirSynthActive
-            ? "0 clamp(8px, 4vw, 60px) calc(10px + env(safe-area-inset-bottom, 0px))"
-            : "0 clamp(8px, 4vw, 60px) calc(18px + env(safe-area-inset-bottom, 0px))",
-          gap: isAirSynthActive ? 8 : 12,
+          padding: "0 clamp(8px, 4vw, 60px) calc(10px + env(safe-area-inset-bottom, 0px))",
+          gap: 8,
         }}
       >
         <AnimatePresence>
@@ -3374,7 +3457,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 lane={lane}
                 registerTrackFillEl={registerTrackFillEl}
                 gridLikeMode={gridLikeMode}
-                compact={isAirSynthActive}
+                compact
                 assistBoundaryCountdown={
                   looperState.assistBoundaryTrackIndex === lane.trackIndex
                     ? looperState.assistBoundaryCountdown
@@ -3460,8 +3543,53 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           top: "50%",
           transform: "translateY(-50%)",
           zIndex: 10,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 12,
         }}
       >
+        <button
+          type="button"
+          aria-label={inputsOpen ? "Close input device" : "Open input device"}
+          aria-pressed={inputsOpen}
+          onClick={() => {
+            setInputsOpen((v) => !v);
+            setSettingsOpen(false);
+            setIsTunerOpen(false);
+          }}
+          style={{
+            ...glassSharp,
+            minWidth: 42,
+            padding: "10px 8px",
+            borderRadius: 14,
+            background: inputsOpen ? "rgba(34,197,94,0.1)" : "rgba(10,10,10,0.75)",
+            border: `1px solid ${inputsOpen ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
+            cursor: "pointer",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "flex-start",
+            gap: 6,
+            flexShrink: 0,
+          }}
+        >
+          <Mic size={14} color={EMERALD} />
+          <span
+            style={{
+              writingMode: "vertical-rl",
+              color: inputsOpen ? EMERALD : "rgba(255,255,255,0.5)",
+              fontSize: 8,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              fontWeight: 600,
+              lineHeight: 1,
+            }}
+          >
+            Input Device
+          </span>
+        </button>
+
         <SideRailMeterPill
           icon={<Volume2 size={11} color="rgba(34,197,94,0.35)" />}
           label="LOOPS"

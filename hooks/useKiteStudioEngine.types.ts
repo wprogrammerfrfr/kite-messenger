@@ -14,6 +14,8 @@ import type {
 import type { KiteMode } from "@/hooks/useKiteSyncEngine";
 
 export type SoloLooperMode = "free" | "grid" | "handsfree";
+/** Handsfree Mode: how many tracks (T1..Tn) the auto-record sequence captures. */
+export type HandsfreeTrackCount = 1 | 2 | 3 | 4;
 
 /** Studio bridge UI phase — stays in page presenter; engine reads via config. */
 export type StudioUiPhase = "lobby" | "connecting" | "studio" | "kite-setup";
@@ -187,6 +189,7 @@ export type KiteEngineState = {
   soloLooperMode: SoloLooperMode;
   /** Handsfree Assist: one full loop between takes when true; immediate handoff when false. */
   handsfreeAssist: boolean;
+  handsfreeTrackCount: HandsfreeTrackCount;
   /** Timing Assist: 3-2-1-GO before each track records when true. */
   timingAssist: boolean;
   /** True while worklet is auto-advancing T1→T4; used for UI disabled states. */
@@ -329,7 +332,7 @@ export type KiteEngineActions = {
   handleTrackTransportTap: (trackIndex: 1 | 2 | 3 | 4) => void;
   handleSoloTrackVolumeChange: (trackIndex: 1 | 2 | 3 | 4, linear: number) => void;
   setMasterLoopVolume: (linear: number) => void;
-  handleToggleSoloSessionRecording: () => void;
+  handleToggleSoloSessionRecording: (opts?: { audioOnly?: boolean }) => void;
   downloadSoloSessionBlob: (blob: Blob, ext: string) => void;
   handleStartKiteSetup: (origin: KiteSetupOrigin, mode?: KiteMode) => void;
   handleCancelKiteSetup: () => void;
@@ -341,6 +344,7 @@ export type KiteEngineActions = {
   setSoloInputGain: (gain: number) => void;
   setSoloLooperMode: (mode: SoloLooperMode) => void;
   setHandsfreeAssist: (on: boolean) => void;
+  setHandsfreeTrackCount: (count: HandsfreeTrackCount) => void;
   setTimingAssist: (on: boolean) => void;
   setSoloTrackBarCount: (trackIndex: 1 | 2 | 3 | 4, bars: number) => void;
   setKiteSetupTempo: (bpm: number) => void;

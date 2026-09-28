@@ -140,7 +140,7 @@ export type SoloLooperHandsfreeCountdownReadyEvent = {
 
 export type SoloLooperHandsfreeSequenceCompleteEvent = {
   type: "HANDSFREE_SEQUENCE_COMPLETE";
-  trackIndex: 4;
+  trackIndex: 1 | 2 | 3 | 4;
   loopId: string | null;
 };
 
@@ -209,6 +209,8 @@ export type SoloLooperStartRecordingParams = {
   handsfreeAssist?: boolean;
   /** Handsfree: true = 3-2-1-GO before each next-track handoff when Handsfree Assist is on. */
   timingAssist?: boolean;
+  /** Handsfree: number of tracks (1–4) the sequence records before completing. */
+  handsfreeTrackCount?: number;
 };
 
 export type SoloLooperSetTrackTargetLengthParams = {
@@ -219,6 +221,8 @@ export type SoloLooperSetTrackTargetLengthParams = {
 export type SoloLooperStopRecordingParams = {
   trackIndex?: number;
   bpm?: number;
+  /** Time-signature numerator; Free Mode overdubs snap to Track 1's bar grid. */
+  beatsPerBar?: number;
   channelCount?: 1 | 2;
   loopId?: string | null;
   latencyOffsetFrames?: number;
@@ -662,6 +666,7 @@ export async function buildSoloLooperEngine(
         type: "STOP_RECORDING",
         ...(params.trackIndex !== undefined ? { trackIndex: params.trackIndex } : {}),
         ...(params.bpm !== undefined ? { bpm: params.bpm } : {}),
+        ...(params.beatsPerBar !== undefined ? { beatsPerBar: params.beatsPerBar } : {}),
         ...(params.channelCount !== undefined ? { channelCount: params.channelCount } : {}),
         ...(params.loopId !== undefined ? { loopId: params.loopId } : {}),
         ...(params.latencyOffsetFrames !== undefined
@@ -737,8 +742,7 @@ export async function buildSoloLooperEngine(
         ...(params.loopId !== undefined ? { loopId: params.loopId } : {}),
         ...(params.latencyOffsetFrames !== undefined
           ? { latencyOffsetFrames: params.latencyOffsetFrames }
-          : {}),
-      });
+          : {}),      });
     },
     disarmOverdub(trackIndex?: 2 | 3 | 4): void {
       if (tornDown) return;
@@ -814,6 +818,9 @@ export async function buildSoloLooperEngine(
           : {}),
         ...(params?.timingAssist !== undefined
           ? { timingAssist: params.timingAssist }
+          : {}),
+        ...(params?.handsfreeTrackCount !== undefined
+          ? { handsfreeTrackCount: params.handsfreeTrackCount }
           : {}),
       });
     },

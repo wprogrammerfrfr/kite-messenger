@@ -124,6 +124,7 @@ import type {
   DeviceFlagMap,
   KiteLoopChunkSendProgress,
   SoloLooperMode,
+  HandsfreeTrackCount,
   GuidedRtlWizardState,
   KiteSyncReadinessPhaseState,
   KiteSyncReadinessHotSnapshot,
@@ -573,6 +574,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloLooperModeRef = useRef(soloLooperMode);
   const [handsfreeAssist, setHandsfreeAssistState] = useState(true);
   const handsfreeAssistRef = useRef(true);
+  const [handsfreeTrackCount, setHandsfreeTrackCountState] = useState<HandsfreeTrackCount>(4);
+  const handsfreeTrackCountRef = useRef<HandsfreeTrackCount>(4);
   const [timingAssist, setTimingAssistState] = useState(false);
   const timingAssistRef = useRef(false);
   const [handsfreeSequenceActive, setHandsfreeSequenceActive] = useState(false);
@@ -1266,6 +1269,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const setHandsfreeAssist = useCallback((on: boolean) => {
     handsfreeAssistRef.current = on;
     setHandsfreeAssistState(on);
+  }, []);
+
+  const setHandsfreeTrackCount = useCallback((count: HandsfreeTrackCount) => {
+    handsfreeTrackCountRef.current = count;
+    setHandsfreeTrackCountState(count);
   }, []);
 
   const setTimingAssist = useCallback((on: boolean) => {
@@ -5117,7 +5125,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     sessionId,
   ]);
 
-  const startSoloSessionRecording = useCallback(async () => {
+  const startSoloSessionRecording = useCallback(async (audioOnly = false) => {
     if (soloSessionMediaRecorderRef.current) return;
 
     if (!canUseMediaRecorder()) {
@@ -5128,7 +5136,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setSoloSessionRecorderError(null);
     setSoloSessionRecorderState("requesting");
 
-    const screenCaptureAvailable = canUseDisplayMedia();
+    const screenCaptureAvailable = !audioOnly && canUseDisplayMedia();
     let captureMode: SoloSessionRecorderCaptureMode = screenCaptureAvailable
       ? "screen-video"
       : "audio-only";
@@ -5210,13 +5218,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     }
   }, [ensureSoloLooperEngineBootstrapped, failSoloSessionRecorder]);
 
-  const handleToggleSoloSessionRecording = useCallback(() => {
-    if (soloSessionMediaRecorderRef.current) {
-      void stopSoloSessionRecording();
-      return;
-    }
-    void startSoloSessionRecording();
-  }, [startSoloSessionRecording, stopSoloSessionRecording]);
+  const handleToggleSoloSessionRecording = useCallback(
+    (opts?: { audioOnly?: boolean }) => {
+      if (soloSessionMediaRecorderRef.current) {
+        void stopSoloSessionRecording();
+        return;
+      }
+      void startSoloSessionRecording(opts?.audioOnly === true);
+    },
+    [startSoloSessionRecording, stopSoloSessionRecording]
+  );
 
   const startSoloLooper = useCallback(
     async (
@@ -5387,6 +5398,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             ? {
                 handsfreeAssist: handsfreeAssistRef.current,
                 timingAssist: timingAssistRef.current,
+                handsfreeTrackCount: handsfreeTrackCountRef.current,
               }
             : {}),
         };
@@ -7143,6 +7155,16 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       activeTrackIndex = Math.floor(rawActive);
     }
     const currentBpm = recordingStartBpmRef.current || 120;
+    const commitTiming = kiteIntervalTimingRef.current;
+    const beatsPerBar = Math.max(
+      1,
+      Math.round(
+        commitTiming?.beatsPerBar ??
+          commitTiming?.timeSignatureTop ??
+          kiteSetupTimeSignatureTopRef.current ??
+          4
+      )
+    );
 
     syncActiveRecordTrackIndex(null);
 
@@ -7189,10 +7211,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     engine.stopRecording({
       trackIndex: activeTrackIndex,
       bpm: currentBpm,
+      beatsPerBar,
       channelCount: 2,
       latencyOffsetFrames,
       loopMode: soloLooperModeRef.current,
-      ...(isFreeT1 ? { stopAtContextSec } : {}),
+      ...(soloLooperModeRef.current === "free" ? { stopAtContextSec } : {}),
       ...(loopId !== null ? { loopId } : {}),
     });
     freePedalStopContextSecRef.current = null;
@@ -9433,6 +9456,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     guidedRtlWizard,
     soloLooperMode,
     handsfreeAssist,
+    handsfreeTrackCount,
     timingAssist,
     handsfreeSequenceActive,
     soloTrackBarCounts,
@@ -9508,6 +9532,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       guidedRtlWizard,
       soloLooperMode,
       handsfreeAssist,
+      handsfreeTrackCount,
       timingAssist,
       handsfreeSequenceActive,
       soloTrackBarCounts,
@@ -9573,6 +9598,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     setSoloInputGain,
     setSoloLooperMode,
     setHandsfreeAssist,
+    setHandsfreeTrackCount,
     setTimingAssist,
     setSoloTrackBarCount,
     setKiteSetupTempo,
@@ -9643,6 +9669,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       setSoloInputGain,
       setSoloLooperMode,
       setHandsfreeAssist,
+      setHandsfreeTrackCount,
       setTimingAssist,
       setSoloTrackBarCount,
       setKiteSetupTempo,

@@ -343,6 +343,7 @@ export default function StudioBridgePage() {
   const guidedRtlWizard = engineState.guidedRtlWizard;
   const soloLooperMode = engineState.soloLooperMode;
   const handsfreeAssist = engineState.handsfreeAssist;
+  const handsfreeTrackCount = engineState.handsfreeTrackCount;
   const timingAssist = engineState.timingAssist;
   const soloTrackBarCounts = engineState.soloTrackBarCounts;
   const soloTrackBarCountsLocked = engineState.soloTrackBarCountsLocked;
@@ -447,6 +448,7 @@ export default function StudioBridgePage() {
   const setSoloInputGain = engineActions.setSoloInputGain;
   const setSoloLooperMode = engineActions.setSoloLooperMode;
   const setHandsfreeAssist = engineActions.setHandsfreeAssist;
+  const setHandsfreeTrackCount = engineActions.setHandsfreeTrackCount;
   const setTimingAssist = engineActions.setTimingAssist;
   const setSoloTrackBarCount = engineActions.setSoloTrackBarCount;
   const setKiteSetupTempo = engineActions.setKiteSetupTempo;
@@ -2252,6 +2254,7 @@ export default function StudioBridgePage() {
               soloLooperState !== "idle" ||
               handsfreeSequenceActive ||
               soloLooperMode !== "handsfree",
+            handsfreeTrackCount,
             timingAssist,
             timingAssistDisabled:
               isRecordingArmed ||
@@ -2273,6 +2276,7 @@ export default function StudioBridgePage() {
             onEndSession: returnToLobby,
             onLoopModeChange: setSoloLooperMode,
             onHandsfreeAssistChange: setHandsfreeAssist,
+            onHandsfreeTrackCountChange: setHandsfreeTrackCount,
             onTimingAssistChange: setTimingAssist,
             guidedRtlWizard,
             onBeginGuidedRtlWizard: beginGuidedRtlWizard,

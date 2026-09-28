@@ -4,6 +4,10 @@ const MIN_TRACK_INDEX = 1;
 const MAX_RECORDING_SECONDS = 60;
 
 const LOOP_CROSSFADE_SAMPLES = Math.max(2, Math.floor(sampleRate * 0.005));
+/** Extra margin before the pedal stamp: key-travel noise precedes keydown, currentTime is block-quantized. */
+const FREE_OVERDUB_PRESS_GUARD_FRAMES = Math.floor(sampleRate * 0.01);
+/** Sub-bar Free Mode overdub lengths, in beats of the current meter. */
+const FREE_OVERDUB_SUB_BAR_BEATS = [1, 2];
 const DEFAULT_BPM = 120;
 /** Guided wizard: max preview RTL (frames) — matches 400 ms applied cap. */
 const GUIDED_CAL_MAX_OFFSET_FRAMES = Math.max(1, Math.floor(sampleRate * 0.4));
@@ -100,6 +104,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
 
     /** BPM for provision-cap self-finalize when bridge has not sent STOP_RECORDING yet. */
     this.lastKnownBpm = DEFAULT_BPM;
+    this.lastKnownBeatsPerBar = 4;
     this.isPaused = false;
     /** True during T1→T4 handsfree auto-advance sequence. */
     this.handsfreeSequenceActive = false;
@@ -113,6 +118,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.handsfreeAssist = false;
     /** Latched at START_RECORDING: true = 3-2-1-GO before next-track handoff when Assist is on. */
     this.timingAssist = false;
+    /** Latched at START_RECORDING: last track (1–4) the handsfree sequence records. */
+    this.handsfreeTrackCount = MAX_TRACK_INDEX;
     /** Deferred handoff after main-thread countdown completes. */
     this.handsfreeCountdownPending = null;
 
@@ -391,6 +398,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     this.overdubArm = null;
     this.activeTrackIndex = 1;
     this.lastKnownBpm = DEFAULT_BPM;
+    this.lastKnownBeatsPerBar = 4;
     this.isPaused = false;
     this.handsfreeSequenceActive = false;
     this.handsfreeStartLatencyOffsetFrames = 0;
@@ -785,6 +793,16 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     return this.lastKnownBpm;
   }
 
+  /** @returns {number} Effective beats per bar (updates lastKnownBeatsPerBar when valid). */
+  resolveBeatsPerBar(beatsPerBar) {
+    const n = Math.round(Number(beatsPerBar));
+    if (Number.isFinite(n) && n > 0) {
+      this.lastKnownBeatsPerBar = n;
+      return n;
+    }
+    return this.lastKnownBeatsPerBar;
+  }
+
   snapshotMasterPhase() {
     const master = this.trackSlots[0];
     if (master.mode === "playing" && master.intervalFrames > 0) {
@@ -800,6 +818,54 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     }
     const raw = slot.recordCursor - epoch;
     return Math.max(1, raw);
+  }
+
+  /**
+   * Free overdub length on the grid derived from the master loop
+   * (bar = master / round(master / nominal bar), beat = bar / beatsPerBar):
+   * nearest of 1 beat, 2 beats (when shorter than a bar), or whole bars reduced to fit capFrames.
+   * Ties go to the shorter length. Falls back to the raw length when no master exists or nothing fits.
+   */
+  snapFreeOverdubFrames(rawFrames, capFrames) {
+    const cap = Math.max(1, Math.min(Math.floor(capFrames), this.maxRecordingFrames));
+    const raw = Math.max(1, Math.min(Math.floor(rawFrames), cap));
+    const masterFrames = this.trackSlots[0].intervalFrames;
+    if (!Number.isFinite(masterFrames) || masterFrames <= 0) {
+      return raw;
+    }
+    const nominalBarFrames =
+      sampleRate * (60 / this.lastKnownBpm) * this.lastKnownBeatsPerBar;
+    const masterBars =
+      Number.isFinite(nominalBarFrames) && nominalBarFrames > 0
+        ? Math.max(1, Math.round(masterFrames / nominalBarFrames))
+        : 1;
+    const barFrames = masterFrames / masterBars;
+    const beatFrames = barFrames / Math.max(1, this.lastKnownBeatsPerBar);
+
+    let best = null;
+    let bestDistance = Infinity;
+    const consider = (frames) => {
+      if (frames > cap) return;
+      const distance = Math.abs(rawFrames - frames);
+      if (distance < bestDistance) {
+        best = frames;
+        bestDistance = distance;
+      }
+    };
+
+    for (let i = 0; i < FREE_OVERDUB_SUB_BAR_BEATS.length; i += 1) {
+      const frames = FREE_OVERDUB_SUB_BAR_BEATS[i] * beatFrames;
+      if (frames < barFrames) consider(frames);
+    }
+    const maxBars = Math.floor(cap / barFrames);
+    if (maxBars >= 1) {
+      consider(Math.min(Math.max(1, Math.round(rawFrames / barFrames)), maxBars) * barFrames);
+    }
+
+    if (best === null) {
+      return raw;
+    }
+    return Math.max(1, Math.min(Math.round(best), cap));
   }
 
   /**
@@ -824,6 +890,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     const masterFrames = this.trackSlots[0].intervalFrames;
     if (!Number.isFinite(masterFrames) || masterFrames <= 0) {
       return null;
+    }
+    if (slot.loopMode === "free") {
+      return this.snapFreeOverdubFrames(rawTargetFrames, rawTargetFrames);
     }
     if (
       (slot.loopMode === "grid" || slot.loopMode === "handsfree") &&
@@ -1142,9 +1211,27 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     return targetIndex;
   }
 
+  /** Fade out and zero a free overdub from the pedal-press point so the trigger sound never loops. */
+  applyFreeOverdubPressSilence(playback, channels, n, silenceFromFrames) {
+    const silenceFrom = Math.max(0, Math.floor(silenceFromFrames));
+    if (silenceFrom >= n) {
+      return;
+    }
+    const fadeStart = Math.max(0, silenceFrom - LOOP_CROSSFADE_SAMPLES);
+    const fadeLen = silenceFrom - fadeStart;
+    for (let i = 0; i < fadeLen; i += 1) {
+      const gain = Math.cos(((i + 1) / fadeLen) * (Math.PI / 2));
+      const base = (fadeStart + i) * channels;
+      for (let c = 0; c < channels; c += 1) {
+        playback[base + c] *= gain;
+      }
+    }
+    playback.fill(0, silenceFrom * channels, n * channels);
+  }
+
   /**
    * Trim recording, apply seam crossfade, phase-lock overdubs, emit LOOP_READY.
-   * @param {{ masterPhase: number | null, channelCount: number, loopId: string | null, requestedIntervalFrames?: number, postProvisionClamp?: boolean, latencyOffsetFrames?: number }} options
+   * @param {{ masterPhase: number | null, channelCount: number, loopId: string | null, requestedIntervalFrames?: number, postProvisionClamp?: boolean, latencyOffsetFrames?: number, silenceFromFrames?: number }} options
    */
   finalizeRecordingSlot(targetTrackIndex, nextIntervalFrames, options) {
     const slot = this.getSlotForTrack(targetTrackIndex);
@@ -1154,7 +1241,13 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       Math.min(Math.floor(Number(nextIntervalFrames) || 1), this.maxRecordingFrames)
     );
     const isFreeMaster = targetTrackIndex === 1 && slot.loopMode === "free";
+    const isFreeOverdub =
+      this.isOverdubTrackIndex(targetTrackIndex) && slot.loopMode === "free";
     const isGridLike = this.isGridLikeLoopMode(slot.loopMode);
+    const framesSinceTakeStart = Math.max(
+      0,
+      Math.floor(Number(slot.recordCursor) || 0) - (slot.recordingEpochFrames || 0)
+    );
     let extractionEndFrames = transportIntervalFrames;
     let startOffset = 0;
     if (targetTrackIndex === 1 && !isGridLike) {
@@ -1227,7 +1320,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       0,
       Math.min(Math.floor(Number(slot.recordCursor) || 0), bufferFrames)
     );
-    const readStartFrame = isGridLike
+    const readStartFrame = isGridLike || isFreeOverdub
       ? Math.max(
           0,
           Math.min(
@@ -1255,6 +1348,10 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     const startOffsetIndex = readStartFrame * channels;
     const endOffsetIndex = (readStartFrame + copyFrames) * channels;
     playback.set(slot.recordingBuffer.subarray(startOffsetIndex, endOffsetIndex));
+
+    if (isFreeOverdub && Number.isFinite(options.silenceFromFrames)) {
+      this.applyFreeOverdubPressSilence(playback, channels, n, options.silenceFromFrames);
+    }
 
     if (isGridLike && slot.recordingBuffer) {
       this.applyGridLikeSeamCrossfade(
@@ -1288,7 +1385,8 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     const useMasterPhaseLock =
       this.isOverdubTrackIndex(targetTrackIndex) &&
       masterPhase !== null &&
-      !isGridLike;
+      !isGridLike &&
+      !isFreeOverdub;
     this.postFinalizeDiagnostic({
       trackIndex: targetTrackIndex,
       loopMode: slot.loopMode,
@@ -1297,7 +1395,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       extractedFrames: copyFrames,
       intervalFrames: n,
       latencyShiftFrames,
-      phaseSource: useMasterPhaseLock ? "phase_lock" : "zero",
+      phaseSource: useMasterPhaseLock ? "phase_lock" : isFreeOverdub ? "take_phase" : "zero",
     });
 
     slot.recordingBuffer = null;
@@ -1312,6 +1410,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       // Free-mode overdub: phase-lock to master. Grid/handsfree start at take origin
       // so unequal bar counts do not seed mid-phrase (masterPhase % longerLen).
       slot.playbackCursor = masterPhase % transportIntervalFrames;
+    } else if (isFreeOverdub) {
+      // Free overdub: continue the take's own timeline from its bar-line start (includes RTL post-roll).
+      slot.playbackCursor = framesSinceTakeStart % n;
     } else {
       slot.playbackCursor = 0;
     }
@@ -1391,12 +1492,12 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     }
   }
 
-  postHandsfreeSequenceComplete() {
-    const slot = this.getSlotForTrack(4);
+  postHandsfreeSequenceComplete(trackIndex) {
+    const slot = this.getSlotForTrack(trackIndex);
     try {
       this.port.postMessage({
         type: "HANDSFREE_SEQUENCE_COMPLETE",
-        trackIndex: 4,
+        trackIndex,
         loopId: slot.loopId,
       });
     } catch {
@@ -1408,7 +1509,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
   handleGridRecordingComplete(capTrackIndex, monoSample) {
     const finishedSlot = this.getSlotForTrack(capTrackIndex);
     if (this.handsfreeSequenceActive) {
-      if (capTrackIndex < MAX_TRACK_INDEX) {
+      if (capTrackIndex < this.handsfreeTrackCount) {
         if (this.handsfreeAssist) {
           this.handsfreeAdvanceArm = {
             nextTrackIndex: capTrackIndex + 1,
@@ -1431,7 +1532,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
         this.handsfreeCountdownPending = null;
         this.handsfreeAssist = false;
         this.timingAssist = false;
-        this.postHandsfreeSequenceComplete();
+        this.postHandsfreeSequenceComplete(capTrackIndex);
         this.postAutoStopCompleted(capTrackIndex);
       }
     } else {
@@ -1547,6 +1648,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       slot.loopMode = this.normalizeLoopMode(data.loopMode);
     }
     this.resolveBpm(data.bpm);
+    this.resolveBeatsPerBar(data.beatsPerBar);
     const masterPhase = this.snapshotMasterPhase();
 
     if (this.isOverdubTrackIndex(targetTrackIndex) && masterPhase === null) {
@@ -1570,7 +1672,11 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       Number.isFinite(stopAtContextSec) &&
       stopAtContextSec > 0;
 
+    const isFreeOverdub =
+      slot.loopMode === "free" && this.isOverdubTrackIndex(targetTrackIndex);
+
     let nextIntervalFrames = null;
+    let freeOverdubSilenceFromFrames = null;
     if (hasFreeDeferredStop) {
       const stopAbsoluteFrame = Math.max(0, Math.round(stopAtContextSec * sampleRate));
       const epochFrames = slot.recordingEpochFrames || 0;
@@ -1579,6 +1685,33 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
         Math.min(stopAbsoluteFrame - epochFrames, this.maxRecordingFrames)
       );
       slot.pendingStopAbsoluteFrame = stopAbsoluteFrame;
+    } else if (isFreeOverdub) {
+      // recordCursor only advances while unpaused, so convert the pedal stamp into cursor frames.
+      const epochFrames = slot.recordingEpochFrames || 0;
+      let stopCursor = slot.recordCursor;
+      if (Number.isFinite(stopAtContextSec) && stopAtContextSec > 0) {
+        stopCursor += Math.round(stopAtContextSec * sampleRate) - currentFrame;
+      }
+      const bufferFrames = Math.floor(
+        slot.recordingBuffer.length / Math.max(1, slot.channelCount)
+      );
+      const postRollCapFrames =
+        bufferFrames -
+        epochFrames -
+        this.resolveLatencyShiftFrames(slot, data.latencyOffsetFrames);
+      nextIntervalFrames = this.snapFreeOverdubFrames(
+        stopCursor - epochFrames,
+        postRollCapFrames
+      );
+      // The trigger's own sound is recorded ~outputLatency before the stamp in extracted frames;
+      // subtracting the full round-trip offset covers any input/output split.
+      freeOverdubSilenceFromFrames = Math.max(
+        0,
+        stopCursor -
+          epochFrames -
+          this.normalizeLatencyOffsetFrames(data.latencyOffsetFrames) -
+          FREE_OVERDUB_PRESS_GUARD_FRAMES
+      );
     } else {
       nextIntervalFrames = this.computeFinalIntervalFrames(
         targetTrackIndex,
@@ -1596,23 +1729,26 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     const isGridOnly = slot.loopMode === "grid";
     const latencyShift = this.resolveLatencyShiftFrames(slot, data.latencyOffsetFrames);
     const postRollRelative =
-      isGridOnly && targetTrackIndex === 1
+      (isGridOnly && targetTrackIndex === 1) || isFreeOverdub
         ? latencyShift + nextIntervalFrames
         : nextIntervalFrames;
 
     if (slot.recordCursor < epochFrames + postRollRelative) {
-      // Post-roll: mic stays hot until quantized boundary (+ latency tail for grid T1 only).
+      // Post-roll: mic stays hot until quantized boundary (+ latency tail for grid T1 / free overdubs).
       slot.stopTargetFrames = postRollRelative;
       slot.stopOptions = {
         masterPhase,
         channelCount: nextChannelCount,
         loopId: nextLoopId,
-        requestedIntervalFrames: hasFreeDeferredStop
+        requestedIntervalFrames: hasFreeDeferredStop || isFreeOverdub
           ? nextIntervalFrames
           : this.computeRawTargetFrames(slot),
         latencyOffsetFrames: data.latencyOffsetFrames,
-        ...(isGridOnly && targetTrackIndex === 1
+        ...((isGridOnly && targetTrackIndex === 1) || isFreeOverdub
           ? { transportIntervalFrames: nextIntervalFrames }
+          : {}),
+        ...(freeOverdubSilenceFromFrames !== null
+          ? { silenceFromFrames: freeOverdubSilenceFromFrames }
           : {}),
       };
       slot.intervalFrames = this.clampRecordProvisionFrames(
@@ -1627,10 +1763,13 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       masterPhase,
       channelCount: nextChannelCount,
       loopId: nextLoopId,
-      requestedIntervalFrames: hasFreeDeferredStop
+      requestedIntervalFrames: hasFreeDeferredStop || isFreeOverdub
         ? nextIntervalFrames
         : this.computeRawTargetFrames(slot),
       latencyOffsetFrames: data.latencyOffsetFrames,
+      ...(freeOverdubSilenceFromFrames !== null
+        ? { silenceFromFrames: freeOverdubSilenceFromFrames }
+        : {}),
     });
   }
 
@@ -1928,6 +2067,11 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       this.handsfreeCountdownPending = null;
       this.handsfreeAssist = data.handsfreeAssist === true;
       this.timingAssist = data.timingAssist === true;
+      const rawTrackCount = Math.floor(Number(data.handsfreeTrackCount));
+      this.handsfreeTrackCount =
+        Number.isFinite(rawTrackCount) && rawTrackCount >= MIN_TRACK_INDEX
+          ? Math.min(MAX_TRACK_INDEX, rawTrackCount)
+          : MAX_TRACK_INDEX;
       this.handsfreeStartLatencyOffsetFrames = slot.latencyOffsetFrames;
       if (Array.isArray(data.handsfreeTrackTargets)) {
         this.handsfreeSequenceTargetFrames = [];
@@ -2377,7 +2521,6 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < MAX_TRACK_INDEX; i += 1) {
       this.trackSlots[i].recordWriteOffsetInBlock = 0;
     }
-
     return true;
   }
 }
