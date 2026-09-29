@@ -154,7 +154,7 @@ export function SoloLatencyCalibrationPanel({
     : undefined;
 
   const overlayClass = isWizardOverlay
-    ? "fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
+    ? "fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-black/70 p-4"
     : undefined;
 
   const warnStyle: React.CSSProperties | undefined = isLobby
@@ -188,12 +188,20 @@ export function SoloLatencyCalibrationPanel({
           style={
             isLobby
               ? undefined
-              : {
-                  color: "rgba(255,255,255,0.22)",
-                  fontSize: 8,
-                  letterSpacing: "0.22em",
-                  textTransform: "uppercase",
-                }
+              : isWizardOverlay
+                ? {
+                    color: "rgba(255,255,255,0.22)",
+                    fontSize: 8,
+                    letterSpacing: "0.22em",
+                    textTransform: "uppercase",
+                  }
+                : {
+                    color: "#fff",
+                    fontWeight: 700,
+                    fontSize: 8,
+                    letterSpacing: "0.22em",
+                    textTransform: "uppercase",
+                  }
           }
         >
           {wizard.open ? phaseTitle(wizard.phase) : "Latency calibration"}
@@ -693,6 +701,8 @@ export function SoloLatencyCalibrationPanel({
           style={{
             width: "100%",
             maxWidth: 420,
+            maxHeight: "calc(100dvh - 32px)",
+            overflowY: "auto",
             borderRadius: 16,
             border: "1px solid rgba(255,255,255,0.1)",
             background: "rgba(12,12,12,0.96)",

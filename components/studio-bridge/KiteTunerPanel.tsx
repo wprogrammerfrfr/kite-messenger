@@ -68,13 +68,16 @@ export default function KiteTunerPanel({
           transition={{ type: "spring", stiffness: 340, damping: 32 }}
           style={{
             position: "absolute",
-            left: 24,
-            bottom: 112,
+            left: 12,
+            bottom: "calc(var(--kite-tracks-h, 12px) + 8px)",
             zIndex: 60,
-            width: "min(280px, calc(100vw - 48px))",
+            width: "min(280px, calc(100vw - 24px))",
+            maxHeight:
+              "max(160px, calc(100dvh - var(--kite-nav-h, 72px) - var(--kite-tracks-h, 12px) - 16px))",
+            overflowY: "auto",
           }}
         >
-          <div className="min-h-[240px]" style={{ ...glass, padding: "14px 16px 16px" }}>
+          <div style={{ ...glass, padding: "14px 16px 16px" }}>
             <div
               style={{
                 display: "flex",

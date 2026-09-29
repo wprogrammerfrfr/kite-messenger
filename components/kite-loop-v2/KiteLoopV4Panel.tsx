@@ -20,6 +20,7 @@ import {
   Circle,
   Trash2,
   Volume2,
+  VolumeX,
   Zap,
   ChevronDown,
   Check,
@@ -29,6 +30,8 @@ import {
   Music2,
   SwitchCamera,
   FolderOpen,
+  LogOut,
+  RotateCcw,
 } from "lucide-react";
 
 import type { KiteIntervalTiming } from "@/lib/kite-interval-math";
@@ -77,6 +80,8 @@ export type SoloTrackLaneView = {
   armLabel: string;
   onResetTrack: () => void;
   resetDisabled: boolean;
+  isMuted: boolean;
+  onToggleMute: () => void;
   isFocused: boolean;
   onRequestFocus: () => void;
   /** Tracks 2–4: quantized overdub armed, waiting for Track 1 downbeat. */
@@ -337,6 +342,40 @@ const CALIBRATION_DISMISSED_STORAGE_KEY = "kite_calibration_dismissed";
 const TUTORIAL_WATCHED_STORAGE_KEY = "kite-loop-tutorial-watched-v1";
 const TUTORIAL_LATER_STORAGE_KEY = "kite-loop-tutorial-later-v1";
 const TUTORIAL_VIDEO_URL = "https://youtu.be/4pTQ3RoJbQA";
+const LOOPER_UI_SCALE_STORAGE_KEY = "kite-loop-ui-scale-v1";
+const LOOPER_UI_SCALE_PRESETS = {
+  small: 1,
+  medium: 1.2,
+  large: 1.4,
+  xl: 1.65,
+} as const;
+type LooperUiScalePreset = keyof typeof LOOPER_UI_SCALE_PRESETS;
+const LOOPER_UI_SCALE_LABELS: Record<LooperUiScalePreset, string> = {
+  small: "Small",
+  medium: "Medium",
+  large: "Large",
+  xl: "XL",
+};
+
+function scaledPx(base: number, uiScale: number): number {
+  return Math.round(base * uiScale);
+}
+
+/** Smallest scale the fitter may apply. Keeps the compact record button near a 48px target. */
+const LOOPER_UI_SCALE_MIN = 0.85;
+const LOOPER_UI_SCALE_STEP = 0.05;
+/** Column width at scale 1 that keeps the compact record button inside the column. */
+const LOOPER_TRACK_COL_BASE_PX = 72;
+const LOOPER_TRACK_ROW_GAP_PX = 8;
+const LOOPER_TRACK_COUNT = 4;
+/** Pixels held back so borders and the calibration banner margin are not clipped. */
+const LOOPER_TRACK_FIT_SLACK_PX = 8;
+
+function quantizeUiScaleCap(cap: number): number {
+  const clamped = Math.min(LOOPER_UI_SCALE_PRESETS.xl, Math.max(LOOPER_UI_SCALE_MIN, cap));
+  const stepped = Math.floor(clamped / LOOPER_UI_SCALE_STEP + 1e-9) * LOOPER_UI_SCALE_STEP;
+  return Math.round(stepped * 100) / 100;
+}
 
 const glass: React.CSSProperties = {
   background: "rgba(10,10,10,0.75)",
@@ -346,6 +385,13 @@ const glass: React.CSSProperties = {
   borderRadius: 18,
 };
 const glassSharp: React.CSSProperties = { ...glass, borderRadius: 12 };
+const NAV_BTN_CLASS = "px-2 py-[7px] sm:px-3.5";
+const NAV_LABEL_CLASS = "hidden sm:inline";
+/** Phones: rails live in the band between nav and tracks. Tablet/desktop: viewport-centred. */
+const SIDE_RAIL_CLASS =
+  "top-[var(--kite-nav-h,72px)] bottom-[var(--kite-tracks-h,240px)] gap-2 " +
+  "md:[@media(min-height:560px)]:top-1/2 md:[@media(min-height:560px)]:bottom-auto " +
+  "md:[@media(min-height:560px)]:-translate-y-1/2 md:[@media(min-height:560px)]:gap-3";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-primitives
@@ -651,20 +697,38 @@ function LiveSoundBar({
     return () => registerMasterLiveMeterElement(null);
   }, [registerMasterLiveMeterElement]);
 
+  const segmentStyle = (color: string, opacity: number): CSSProperties => ({
+    width: 10,
+    flex: "1 1 0",
+    minHeight: 0,
+    borderRadius: 3,
+    background: color,
+    opacity,
+  });
+
   return (
-    <div style={{ position: "relative", width: 10, height: 231, opacity: active ? 1 : 0.35, transition: "opacity 0.15s" }}>
-      <div style={{ display: "flex", flexDirection: "column-reverse", gap: 3 }}>
+    <div
+      style={{
+        position: "relative",
+        width: 10,
+        height: "100%",
+        maxHeight: 231,
+        containerType: "size",
+        opacity: active ? 1 : 0.35,
+        transition: "opacity 0.15s",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column-reverse",
+          gap: 3,
+        }}
+      >
       {segmentIndices.map((i) => (
-        <div
-          key={i}
-          style={{
-            width: 10,
-            height: 10,
-            borderRadius: 3,
-            background: getSegmentColor(i),
-            opacity: 0.15,
-          }}
-        />
+        <div key={i} style={segmentStyle(getSegmentColor(i), 0.15)} />
       ))}
       </div>
       <div
@@ -680,18 +744,20 @@ function LiveSoundBar({
           pointerEvents: "none",
         }}
       >
-        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, display: "flex", flexDirection: "column-reverse", gap: 3 }}>
+        <div
+          style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            height: "100cqh",
+            display: "flex",
+            flexDirection: "column-reverse",
+            gap: 3,
+          }}
+        >
           {segmentIndices.map((i) => (
-            <div
-              key={`fg-${i}`}
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: 3,
-                background: getSegmentColor(i),
-                opacity: 1,
-              }}
-            />
+            <div key={`fg-${i}`} style={segmentStyle(getSegmentColor(i), 1)} />
           ))}
         </div>
       </div>
@@ -699,11 +765,22 @@ function LiveSoundBar({
   );
 }
 
-type VertSliderProps = { value: number; onChange: (v: number) => void; compact?: boolean };
+type VertSliderProps = {
+  value: number;
+  onChange: (v: number) => void;
+  compact?: boolean;
+  uiScale?: number;
+};
 
-function VertSlider({ value, onChange, compact = false }: VertSliderProps): React.JSX.Element {
-  const trackHeight = compact ? 42 : 60;
-  const wrapHeight = compact ? 46 : 64;
+function VertSlider({
+  value,
+  onChange,
+  compact = false,
+  uiScale = 1,
+}: VertSliderProps): React.JSX.Element {
+  const trackHeight = scaledPx(compact ? 42 : 60, uiScale);
+  const wrapHeight = scaledPx(compact ? 46 : 64, uiScale);
+  const trackWidth = scaledPx(5, uiScale);
   return (
     <div
       style={{
@@ -726,7 +803,7 @@ function VertSlider({ value, onChange, compact = false }: VertSliderProps): Reac
           cursor: "pointer",
           writingMode: "vertical-lr",
           direction: "rtl",
-          width: 5,
+          width: trackWidth,
           height: trackHeight,
           borderRadius: 9999,
           outline: "none",
@@ -758,14 +835,22 @@ function SideRailMeterPill({
         flexDirection: "column",
         alignItems: "center",
         gap: 6,
+        flex: "0 1 auto",
+        minHeight: 0,
+        maxHeight: "100%",
+        overflow: "hidden",
       }}
     >
       {icon}
       <div
         style={{
+          flex: "1 1 auto",
+          minHeight: 0,
           height: 231,
+          maxHeight: 231,
+          width: "100%",
           display: "flex",
-          alignItems: "center",
+          alignItems: "stretch",
           justifyContent: "center",
         }}
       >
@@ -802,7 +887,8 @@ function MasterLoopVolumeSlider({
       style={{
         position: "relative",
         width: 10,
-        height: 231,
+        height: "100%",
+        maxHeight: 231,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -847,7 +933,7 @@ function MasterLoopVolumeSlider({
           writingMode: "vertical-lr",
           direction: "rtl",
           width: 10,
-          height: 231,
+          height: "100%",
           borderRadius: 9999,
           outline: "none",
           background: "transparent",
@@ -960,6 +1046,7 @@ type TrackColumnProps = {
   gridLikeMode: boolean;
   compact?: boolean;
   assistBoundaryCountdown?: RunwayDisplayLabel | null;
+  uiScale?: number;
 };
 
 type BarCountStripProps = {
@@ -968,6 +1055,7 @@ type BarCountStripProps = {
   disabled: boolean;
   locked: boolean;
   onChange: (bars: number) => void;
+  uiScale?: number;
 };
 
 function BarCountStrip({
@@ -976,6 +1064,7 @@ function BarCountStrip({
   disabled,
   locked,
   onChange,
+  uiScale = 1,
 }: BarCountStripProps): React.JSX.Element | null {
   if (locked) {
     return (
@@ -986,14 +1075,16 @@ function BarCountStrip({
           justifyContent: "center",
           gap: 4,
           width: "100%",
-          padding: "3px 0",
+          padding: `${scaledPx(6, uiScale)}px 0`,
           borderRadius: 7,
-          border: "1px solid rgba(255,255,255,0.08)",
+          border: "1px solid rgba(255,255,255,0.16)",
           background: "rgba(0,0,0,0.22)",
-          color: "rgba(255,255,255,0.32)",
-          fontSize: 9,
+          color: "rgba(255,255,255,0.92)",
+          fontSize: scaledPx(13, uiScale),
+          fontWeight: 700,
           fontFamily: "monospace",
-          letterSpacing: "0.08em",
+          fontVariantNumeric: "tabular-nums",
+          letterSpacing: "0.06em",
           textTransform: "uppercase",
         }}
       >
@@ -1007,7 +1098,7 @@ function BarCountStrip({
       style={{
         display: "flex",
         flexWrap: "wrap",
-        gap: 3,
+        gap: scaledPx(3, uiScale),
         width: "100%",
         justifyContent: "center",
         opacity: disabled ? 0.4 : 1,
@@ -1023,14 +1114,19 @@ function BarCountStrip({
           onClick={() => onChange(b)}
           style={{
             flex: options.length > 4 ? "1 1 26%" : 1,
-            minWidth: options.length > 4 ? 22 : undefined,
+            minWidth: options.length > 4 ? scaledPx(22, uiScale) : undefined,
             borderRadius: 6,
-            padding: options.length > 4 ? "3px 0" : "4px 0",
+            padding:
+              options.length > 4
+                ? `${scaledPx(3, uiScale)}px 0`
+                : `${scaledPx(4, uiScale)}px 0`,
             border: `1px solid ${value === b ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.09)"}`,
             background: value === b ? "rgba(34,197,94,0.1)" : "transparent",
-            color: value === b ? EMERALD : "rgba(255,255,255,0.32)",
-            fontSize: options.length > 4 ? 9 : 10,
+            color: value === b ? EMERALD : "rgba(255,255,255,0.78)",
+            fontSize: scaledPx(options.length > 4 ? 9 : 10, uiScale),
+            fontWeight: value === b ? 700 : 600,
             fontFamily: "monospace",
+            fontVariantNumeric: "tabular-nums",
             cursor: disabled ? "default" : "pointer",
             transition: "all 0.18s",
           }}
@@ -1048,6 +1144,7 @@ function TrackColumn({
   gridLikeMode,
   compact = false,
   assistBoundaryCountdown = null,
+  uiScale = 1,
 }: TrackColumnProps): React.JSX.Element {
   const visual = mapLaneToRecVisual(lane);
   const cfg = REC_CFG[visual];
@@ -1091,6 +1188,34 @@ function TrackColumn({
     if (!lane.resetDisabled) lane.onResetTrack();
   };
 
+  const muteDisabled =
+    lane.workletMode === "idle" && !lane.isEngineRecording && !lane.isOverdubArmedWaiting;
+
+  const handleMute = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    if (!muteDisabled) lane.onToggleMute();
+  };
+
+  const pad = scaledPx(compact ? 6 : 12, uiScale);
+  const iconSize = scaledPx(11, uiScale);
+  const recSize = scaledPx(compact ? 56 : 80, uiScale);
+  const columnRef = useRef<HTMLDivElement>(null);
+  const [useShortTrackName, setUseShortTrackName] = useState(false);
+  const fullNameMinWidth = (iconSize + scaledPx(12, uiScale)) * 2 + scaledPx(52, uiScale);
+
+  useEffect(() => {
+    const el = columnRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const apply = (): void => {
+      const narrow = el.clientWidth < fullNameMinWidth;
+      setUseShortTrackName((prev) => (prev === narrow ? prev : narrow));
+    };
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fullNameMinWidth]);
+
   const recLabel =
     isMaster && visual === "idle" && !lane.isEngineRecording
       ? "START"
@@ -1100,8 +1225,13 @@ function TrackColumn({
           : String(assistBoundaryCountdown)
         : cfg.lbl;
 
+  const trackName = useShortTrackName
+    ? `T${lane.trackIndex}`
+    : trackDisplayName(lane.trackIndex);
+
   return (
     <div
+      ref={columnRef}
       role="presentation"
       onClick={(e) => {
         if (e.target === e.currentTarget) lane.onRequestFocus();
@@ -1113,13 +1243,13 @@ function TrackColumn({
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        padding: compact ? "6px 6px" : "12px 8px",
-        gap: compact ? 4 : 8,
+        padding: pad,
+        gap: scaledPx(compact ? 4 : 8, uiScale),
         position: "relative",
         overflow: "hidden",
         cursor: "pointer",
         borderColor: lane.isFocused ? "rgba(255,69,0,0.45)" : "rgba(255,255,255,0.08)",
-        transition: "border-color 0.2s, padding 0.18s, gap 0.18s",
+        transition: "border-color 0.2s",
       }}
     >
       <div
@@ -1131,6 +1261,7 @@ function TrackColumn({
           pointerEvents: "none",
           zIndex: 0,
           background: ambient.baseBackground,
+          opacity: lane.isMuted ? 0.28 : 1,
         }}
       />
       <div
@@ -1142,26 +1273,127 @@ function TrackColumn({
           borderRadius: "inherit",
           pointerEvents: "none",
           zIndex: 0,
+          opacity: lane.isMuted ? 0.28 : 1,
           background: ambient.fillBackground,
           transformOrigin: "bottom",
           transform: "scaleY(0)",
           willChange: "transform",
         }}
       />
-      <span
+      <div
         style={{
           position: "relative",
           zIndex: 1,
-          color: EMERALD,
-          fontSize: compact ? 8 : 9,
-          letterSpacing: "0.14em",
-          textTransform: "uppercase",
-          fontWeight: 600,
-          opacity: 0.85,
+          width: `calc(100% + ${pad * 2}px)`,
+          marginLeft: -pad,
+          marginRight: -pad,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minWidth: 0,
+          overflow: "hidden",
+          minHeight: iconSize + scaledPx(6, uiScale),
         }}
       >
-        {trackDisplayName(lane.trackIndex)}
-      </span>
+        <button
+          type="button"
+          onClick={handleMute}
+          disabled={muteDisabled}
+          title={muteDisabled ? "Nothing to mute" : lane.isMuted ? "Unmute track" : "Mute track"}
+          aria-label={lane.isMuted ? `Unmute ${trackDisplayName(lane.trackIndex)}` : `Mute ${trackDisplayName(lane.trackIndex)}`}
+          aria-pressed={lane.isMuted}
+          style={{
+            position: "absolute",
+            left: scaledPx(2, uiScale),
+            top: "50%",
+            transform: "translateY(-50%)",
+            zIndex: 2,
+            background: "none",
+            border: "none",
+            cursor: muteDisabled ? "not-allowed" : "pointer",
+            color: lane.isMuted ? "#ef4444" : EMERALD,
+            padding: scaledPx(3, uiScale),
+            lineHeight: 0,
+            opacity: muteDisabled ? 0.25 : lane.isMuted ? 1 : 0.6,
+            transition: "opacity 0.15s",
+          }}
+          onMouseEnter={(ev) => {
+            if (!muteDisabled) ev.currentTarget.style.opacity = "1";
+          }}
+          onMouseLeave={(ev) => {
+            if (!muteDisabled) ev.currentTarget.style.opacity = lane.isMuted ? "1" : "0.6";
+          }}
+        >
+          {lane.isMuted ? <VolumeX size={iconSize} /> : <Volume2 size={iconSize} />}
+        </button>
+
+        <span
+          style={{
+            color: EMERALD,
+            fontSize: scaledPx(compact ? 8 : 9, uiScale),
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            fontWeight: 600,
+            opacity: 0.85,
+            lineHeight: 1,
+            minWidth: 0,
+            maxWidth: "100%",
+            overflow: "hidden",
+            whiteSpace: "nowrap",
+            textOverflow: "ellipsis",
+            padding: `0 ${iconSize + scaledPx(10, uiScale)}px`,
+            textAlign: "center",
+          }}
+        >
+          {trackName}
+        </span>
+
+        <button
+          type="button"
+          onClick={handleClear}
+          disabled={lane.resetDisabled}
+          title="Clear track"
+          aria-label={`Clear ${trackDisplayName(lane.trackIndex)}`}
+          style={{
+            position: "absolute",
+            right: scaledPx(2, uiScale),
+            top: "50%",
+            transform: "translateY(-50%)",
+            zIndex: 2,
+            background: "none",
+            border: "none",
+            cursor: lane.resetDisabled ? "not-allowed" : "pointer",
+            color: EMERALD,
+            padding: scaledPx(3, uiScale),
+            lineHeight: 0,
+            opacity: lane.resetDisabled ? 0.25 : 0.6,
+            transition: "opacity 0.15s",
+          }}
+          onMouseEnter={(ev) => {
+            if (!lane.resetDisabled) ev.currentTarget.style.opacity = "1";
+          }}
+          onMouseLeave={(ev) => {
+            if (!lane.resetDisabled) ev.currentTarget.style.opacity = "0.6";
+          }}
+        >
+          <Trash2 size={iconSize} />
+        </button>
+      </div>
+      {lane.isMuted ? (
+        <span
+          style={{
+            position: "relative",
+            zIndex: 1,
+            color: "rgba(255,255,255,0.9)",
+            fontSize: scaledPx(compact ? 8 : 9, uiScale),
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            fontWeight: 700,
+          }}
+        >
+          MUTED
+        </span>
+      ) : null}
 
       {gridLikeMode ? (
         <div style={{ position: "relative", zIndex: 1, width: "100%" }}>
@@ -1171,40 +1403,18 @@ function TrackColumn({
             disabled={lane.barCountDisabled}
             locked={lane.barCountLocked}
             onChange={lane.onBarCountChange}
+            uiScale={uiScale}
           />
         </div>
       ) : null}
 
-      <button
-        type="button"
-        onClick={handleClear}
-        disabled={lane.resetDisabled}
-        title="Clear track"
-        style={{
-          position: "absolute",
-          top: 10,
-          right: 8,
-          zIndex: 2,
-          background: "none",
-          border: "none",
-          cursor: lane.resetDisabled ? "not-allowed" : "pointer",
-          color: EMERALD,
-          padding: 3,
-          opacity: lane.resetDisabled ? 0.25 : 0.6,
-          transition: "opacity 0.15s",
-        }}
-        onMouseEnter={(ev) => {
-          if (!lane.resetDisabled) ev.currentTarget.style.opacity = "1";
-        }}
-        onMouseLeave={(ev) => {
-          if (!lane.resetDisabled) ev.currentTarget.style.opacity = "0.6";
-        }}
-      >
-        <Trash2 size={11} />
-      </button>
-
       <div style={{ position: "relative", zIndex: 1 }}>
-        <VertSlider value={faderPct} onChange={(v) => lane.onVolumeChange(v / 100)} compact={compact} />
+        <VertSlider
+          value={faderPct}
+          onChange={(v) => lane.onVolumeChange(v / 100)}
+          compact={compact}
+          uiScale={uiScale}
+        />
       </div>
 
       <motion.button
@@ -1220,8 +1430,11 @@ function TrackColumn({
         style={{
           position: "relative",
           zIndex: 1,
-          width: compact ? 56 : "clamp(48px, 14vw, 80px)",
-          height: compact ? 56 : "clamp(48px, 14vw, 80px)",
+          width: compact ? recSize : `clamp(48px, 14vw, ${recSize}px)`,
+          maxWidth: "100%",
+          height: "auto",
+          aspectRatio: "1",
+          boxSizing: "border-box",
           minWidth: 48,
           minHeight: 48,
           borderRadius: "50%",
@@ -1233,7 +1446,7 @@ function TrackColumn({
           border: `2px solid ${cfg.bord}`,
           boxShadow: cfg.glow,
           cursor: recInteractive ? "pointer" : "not-allowed",
-          gap: 4,
+          gap: scaledPx(4, uiScale),
           padding: 0,
           touchAction: "manipulation",
           WebkitTapHighlightColor: "transparent",
@@ -1242,22 +1455,33 @@ function TrackColumn({
       >
         <div
           style={{
-            width: compact ? 14 : 18,
-            height: compact ? 14 : 18,
+            width: scaledPx(compact ? 14 : 18, uiScale),
+            height: scaledPx(compact ? 14 : 18, uiScale),
             borderRadius: "50%",
             background: cfg.col,
             opacity: visual === "idle" && !lane.isEngineRecording ? 0.25 : 1,
             transition: "all 0.15s",
           }}
         />
-        <span style={{ fontSize: 7, letterSpacing: "0.12em", color: cfg.col, textTransform: "uppercase" }}>
+        <span style={{ fontSize: scaledPx(7, uiScale), letterSpacing: "0.12em", color: cfg.col, textTransform: "uppercase" }}>
           {recLabel}
         </span>
       </motion.button>
 
       <div style={{ flex: 1, position: "relative", zIndex: 1 }} />
 
-      <div
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          lane.onRequestFocus();
+        }}
+        aria-pressed={lane.isFocused}
+        aria-label={
+          lane.isFocused
+            ? `${trackDisplayName(lane.trackIndex)} selected`
+            : `Select ${trackDisplayName(lane.trackIndex)}`
+        }
         style={{
           position: "relative",
           zIndex: 1,
@@ -1268,14 +1492,19 @@ function TrackColumn({
           border: `1px solid ${lane.isFocused ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.07)"}`,
           background: lane.isFocused ? "rgba(34,197,94,0.08)" : "transparent",
           color: lane.isFocused ? EMERALD : "rgba(255,255,255,0.2)",
-          fontSize: compact ? 6 : 7,
+          fontSize: scaledPx(compact ? 6 : 7, uiScale),
+          fontFamily: "inherit",
           letterSpacing: "0.16em",
           textTransform: "uppercase",
+          cursor: "pointer",
+          overflow: "hidden",
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
           transition: "all 0.18s",
         }}
       >
         {lane.isFocused ? "✦ SELECTED" : "SELECT"}
-      </div>
+      </button>
     </div>
   );
 }
@@ -1298,6 +1527,8 @@ type SettingsModalProps = {
   onAirSynthVolumeChange: (level: number) => void;
   airSynthWaveform: OscillatorType;
   onAirSynthWaveformChange: (type: OscillatorType) => void;
+  uiScalePreset: LooperUiScalePreset;
+  onUiScalePresetChange: (preset: LooperUiScalePreset) => void;
 };
 
 const AIR_SYNTH_WAVEFORM_OPTIONS: { value: OscillatorType; label: string }[] = [
@@ -1335,6 +1566,8 @@ function SettingsModal({
   onAirSynthVolumeChange,
   airSynthWaveform,
   onAirSynthWaveformChange,
+  uiScalePreset,
+  onUiScalePresetChange,
 }: SettingsModalProps): React.JSX.Element {
   const [airSynthKeyMenuOpen, setAirSynthKeyMenuOpen] = useState(false);
   const [airSynthWaveformMenuOpen, setAirSynthWaveformMenuOpen] = useState(false);
@@ -1397,7 +1630,8 @@ function SettingsModal({
   const sLabel = (t: string): React.JSX.Element => (
     <span
       style={{
-        color: "rgba(255,255,255,0.22)",
+        color: "#fff",
+        fontWeight: 700,
         fontSize: 8,
         letterSpacing: "0.22em",
         textTransform: "uppercase",
@@ -1415,11 +1649,11 @@ function SettingsModal({
       transition={{ type: "spring", stiffness: 340, damping: 32 }}
       style={{
         position: "absolute",
-        top: 64,
+        top: "calc(var(--kite-nav-h, 64px) + 8px)",
         left: 12,
         zIndex: 60,
         width: "min(700px, calc(100vw - 24px))",
-        maxHeight: "calc(100dvh - 80px)",
+        maxHeight: "calc(100dvh - var(--kite-nav-h, 64px) - 16px)",
         display: "flex",
         flexDirection: "column",
       }}
@@ -1574,6 +1808,35 @@ function SettingsModal({
               onCancel={handlers.onCancelGuidedRtlWizard}
               onRetryCapture={handlers.onRetryGuidedRtlCapture}
             />
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {sLabel("Display")}
+              <span style={{ color: "rgba(255,255,255,0.65)", fontSize: 11 }}>Track size</span>
+              <div style={{ display: "flex", gap: 5 }}>
+                {(Object.keys(LOOPER_UI_SCALE_PRESETS) as LooperUiScalePreset[]).map((preset) => {
+                  const selected = uiScalePreset === preset;
+                  return (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => onUiScalePresetChange(preset)}
+                      style={{
+                        flex: 1,
+                        borderRadius: 9,
+                        padding: "8px 0",
+                        border: `1px solid ${selected ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.09)"}`,
+                        background: selected ? "rgba(34,197,94,0.1)" : "transparent",
+                        color: selected ? EMERALD : "rgba(255,255,255,0.78)",
+                        fontSize: 11,
+                        fontWeight: selected ? 700 : 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {LOOPER_UI_SCALE_LABELS[preset]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           <div style={colDivider} />
@@ -2204,11 +2467,12 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
       transition={{ type: "spring", stiffness: 340, damping: 32 }}
       style={{
         position: "absolute",
-        right: 24,
-        top: 80,
+        right: 12,
+        top: "calc(var(--kite-nav-h, 72px) + 8px)",
         zIndex: 60,
-        width: "min(600px, calc(100vw - 32px))",
-        height: "min(80dvh, 550px)",
+        width: "min(600px, calc(100vw - 24px))",
+        height: "min(550px, calc(100dvh - var(--kite-nav-h, 72px) - 16px))",
+        maxHeight: "calc(100dvh - var(--kite-nav-h, 72px) - 16px)",
       }}
     >
       <div
@@ -2261,10 +2525,11 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
           </button>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "row", paddingTop: 14, flex: 1, minHeight: 0, overflow: "hidden" }}>
+        <div style={{ display: "flex", flexDirection: "row", flexWrap: "wrap", paddingTop: 14, flex: 1, minHeight: 0, overflow: "auto" }}>
           <div
             style={{
-              flex: 1,
+              flex: "1 1 200px",
+              minWidth: 0,
               height: "100%",
               display: "flex",
               flexDirection: "column",
@@ -2363,7 +2628,7 @@ function InputModal({ onClose, inputDevices }: InputModalProps): React.JSX.Eleme
 
           <div style={colDivider} />
 
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 14, padding: "0 18px 0 16px", overflowY: "auto", minHeight: 0 }}>
+          <div style={{ flex: "1 1 200px", minWidth: 0, display: "flex", flexDirection: "column", gap: 14, padding: "0 18px 0 16px", overflowY: "auto", minHeight: 0 }}>
             <div>
               <span
                 style={{
@@ -2476,6 +2741,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [tunerInstrumentId, setTunerInstrumentId] =
     useState<KiteTunerInstrumentId>(DEFAULT_INSTRUMENT_ID);
   const [calibrationDismissed, setCalibrationDismissed] = useState(false);
+  const [uiScalePreset, setUiScalePreset] = useState<LooperUiScalePreset>("small");
   const [showTutorialModal, setShowTutorialModal] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -2826,7 +3092,106 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     } catch {
       setCalibrationDismissed(false);
     }
+    try {
+      const storedScale = window.localStorage.getItem(LOOPER_UI_SCALE_STORAGE_KEY);
+      if (
+        storedScale === "small" ||
+        storedScale === "medium" ||
+        storedScale === "large" ||
+        storedScale === "xl"
+      ) {
+        setUiScalePreset(storedScale);
+      }
+    } catch {
+      /* ignore storage read errors */
+    }
   }, []);
+
+  const uiScale = isAirSynthActive
+    ? LOOPER_UI_SCALE_PRESETS.small
+    : LOOPER_UI_SCALE_PRESETS[uiScalePreset];
+  const [uiScaleFitCap, setUiScaleFitCap] = useState<number>(LOOPER_UI_SCALE_PRESETS.xl);
+  const effectiveUiScale = Math.min(uiScale, uiScaleFitCap);
+  const appliedUiScaleRef = useRef(effectiveUiScale);
+  appliedUiScaleRef.current = effectiveUiScale;
+  const mainArenaRef = useRef<HTMLElement>(null);
+  const trackStackRef = useRef<HTMLDivElement>(null);
+  const trackColumnsRef = useRef<HTMLDivElement>(null);
+  const looperRootRef = useRef<HTMLDivElement>(null);
+  const navRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const main = mainArenaRef.current;
+    const stack = trackStackRef.current;
+    const columns = trackColumnsRef.current;
+    if (!main || !stack || !columns || typeof ResizeObserver === "undefined") return;
+
+    const measure = (): void => {
+      const applied = appliedUiScaleRef.current;
+      if (!(applied > 0) || columns.offsetHeight <= 0 || main.clientHeight <= 0) return;
+
+      const mainStyle = window.getComputedStyle(main);
+      const padX =
+        (parseFloat(mainStyle.paddingLeft) || 0) + (parseFloat(mainStyle.paddingRight) || 0);
+      const padY =
+        (parseFloat(mainStyle.paddingTop) || 0) + (parseFloat(mainStyle.paddingBottom) || 0);
+      const rowWidth = main.clientWidth - padX;
+      if (rowWidth <= 0) return;
+
+      const colWidth =
+        (rowWidth - (LOOPER_TRACK_COUNT - 1) * LOOPER_TRACK_ROW_GAP_PX) / LOOPER_TRACK_COUNT;
+      const fitW = colWidth / LOOPER_TRACK_COL_BASE_PX;
+
+      let reserved = Math.max(0, stack.offsetHeight - columns.offsetHeight);
+      const children = main.children;
+      let flexItems = 0;
+      for (let i = 0; i < children.length; i += 1) {
+        const child = children[i];
+        if (!(child instanceof HTMLElement)) continue;
+        if (window.getComputedStyle(child).display === "none") continue;
+        flexItems += 1;
+        if (child !== stack) reserved += child.offsetHeight;
+      }
+      const gapPx = parseFloat(mainStyle.rowGap) || parseFloat(mainStyle.gap) || 0;
+      const gapCount = Math.max(0, flexItems - 1);
+      const budget =
+        main.clientHeight - padY - reserved - gapCount * gapPx - LOOPER_TRACK_FIT_SLACK_PX;
+      const baseRowH = columns.offsetHeight / applied;
+      if (!(baseRowH > 0)) return;
+      const fitH = budget > 0 ? budget / baseRowH : LOOPER_UI_SCALE_MIN;
+      const cap = Math.min(fitW, fitH);
+      const next = quantizeUiScaleCap(cap);
+
+      setUiScaleFitCap((prev) => {
+        if (next === prev) return prev;
+        // Ignore sub-step measurement noise so padding changes cannot oscillate the cap.
+        if (next < prev && cap >= prev - LOOPER_UI_SCALE_STEP * 0.4) return prev;
+        return next;
+      });
+    };
+
+    measure();
+    const observer = new ResizeObserver(() => {
+      measure();
+    });
+    observer.observe(main);
+    observer.observe(stack);
+    observer.observe(columns);
+    for (let i = 0; i < main.children.length; i += 1) {
+      const child = main.children[i];
+      if (child instanceof HTMLElement && child !== stack) observer.observe(child);
+    }
+    return () => observer.disconnect();
+  }, [uiScale, isMobileUi]);
+
+  const setUiScalePresetPersisted = (preset: LooperUiScalePreset): void => {
+    setUiScalePreset(preset);
+    try {
+      window.localStorage.setItem(LOOPER_UI_SCALE_STORAGE_KEY, preset);
+    } catch {
+      /* ignore storage write errors */
+    }
+  };
 
   // First-visit tutorial: defer while RTL wizard is open; permanent only after watching video.
   useEffect(() => {
@@ -2858,6 +3223,18 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     looperState.sessionRecorderSupportsScreenCapture && sessionVideoSource === "screen";
   const sessionHasVideo = sessionSupportsScreen || sessionVideoSource === "camera";
   const sessionIdleLabel = sessionHasVideo ? "Record Session" : "Record Audio";
+  const sessionButtonLabel =
+    sessionTapeState === "idle"
+      ? sessionIdleLabel
+      : sessionTapeState === "requesting"
+        ? "Starting…"
+        : sessionTapeState === "recording"
+          ? sessionCaptureMode === "audio-only"
+            ? "Recording audio…"
+            : sessionCaptureMode === "camera-video"
+              ? "Recording video…"
+              : "Recording…"
+          : "Saving…";
   const sessionVideoMenuLabel =
     sessionVideoSource === "camera" ? "Video (Camera) + Audio" : "Video + Audio";
   const flipLockedByRecording = sessionTapeState !== "idle";
@@ -2905,6 +3282,43 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     !inputsOpen &&
     !isTunerOpen &&
     looperState.runwayDisplay == null;
+
+  useEffect(() => {
+    const root = looperRootRef.current;
+    const nav = navRef.current;
+    const stack = trackStackRef.current;
+    const main = mainArenaRef.current;
+    if (!root || !nav || !stack || !main || typeof ResizeObserver === "undefined") return;
+
+    const writeRailBand = (): void => {
+      const rootRect = root.getBoundingClientRect();
+      const navRect = nav.getBoundingClientRect();
+      let clusterTop = main.getBoundingClientRect().bottom;
+      for (let i = 0; i < main.children.length; i += 1) {
+        const child = main.children[i];
+        if (!(child instanceof HTMLElement)) continue;
+        if (window.getComputedStyle(child).display === "none") continue;
+        clusterTop = Math.min(clusterTop, child.getBoundingClientRect().top);
+      }
+      const navH = Math.max(0, Math.round(navRect.bottom - rootRect.top));
+      const tracksH = Math.max(0, Math.round(rootRect.bottom - clusterTop));
+      root.style.setProperty("--kite-nav-h", `${navH}px`);
+      root.style.setProperty("--kite-tracks-h", `${tracksH}px`);
+    };
+
+    writeRailBand();
+    const observer = new ResizeObserver(() => {
+      writeRailBand();
+    });
+    observer.observe(nav);
+    observer.observe(stack);
+    observer.observe(main);
+    for (let i = 0; i < main.children.length; i += 1) {
+      const child = main.children[i];
+      if (child instanceof HTMLElement) observer.observe(child);
+    }
+    return () => observer.disconnect();
+  }, [beatCount, isMobileUi, showCalibrationOnboarding, looperState.assistBoundaryCountdown != null]);
 
   const primaryRawStream = ((): MediaStream | null => {
     for (const deviceId of inputDevices.activeDeviceIds) {
@@ -2971,6 +3385,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
   return (
     <div
+      ref={looperRootRef}
       style={{
         position: "fixed",
         top: 0,
@@ -3057,22 +3472,26 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
       {/* TOP NAV */}
       <nav
+        ref={navRef}
+        className="flex flex-wrap md:grid md:grid-cols-[1fr_auto_1fr]"
         style={{
           position: "relative",
           zIndex: 20,
-          display: "flex",
-          alignItems: "flex-start",
+          alignItems: "center",
           justifyContent: "space-between",
+          rowGap: 8,
+          columnGap: 8,
           padding: "calc(14px + env(safe-area-inset-top, 0px)) 16px 6px",
         }}
       >
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="order-2 md:order-1" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           <button
             type="button"
+            className={NAV_BTN_CLASS}
+            aria-label="End session"
             onClick={() => looperHandlers.onEndSession()}
             style={{
               ...glassSharp,
-              padding: "7px 14px",
               background: "rgba(153,27,27,0.8)",
               border: "1px solid rgba(248,113,113,0.7)",
               color: "#fee2e2",
@@ -3083,7 +3502,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               gap: 6,
             }}
           >
-            End Session
+            <LogOut size={12} />
+            <span className={NAV_LABEL_CLASS}>End Session</span>
           </button>
           <button
             type="button"
@@ -3092,9 +3512,10 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               setInputsOpen(false);
               setIsTunerOpen(false);
             }}
+            className={NAV_BTN_CLASS}
+            aria-label="Settings"
             style={{
               ...glassSharp,
-              padding: "7px 14px",
               background: settingsOpen ? "rgba(255,69,0,0.1)" : "rgba(10,10,10,0.75)",
               border: `1px solid ${settingsOpen ? "rgba(255,69,0,0.4)" : "rgba(255,255,255,0.08)"}`,
               color: "rgba(255,255,255,0.75)",
@@ -3105,16 +3526,18 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               gap: 6,
             }}
           >
-            <Settings size={12} color={settingsOpen ? ORANGE : undefined} /> Settings
+            <Settings size={12} color={settingsOpen ? ORANGE : undefined} />
+            <span className={NAV_LABEL_CLASS}>Settings</span>
           </button>
 
           <button
             type="button"
             title={cameraError ?? undefined}
+            className={NAV_BTN_CLASS}
+            aria-label={isCameraActive ? "Turn camera off" : "Turn camera on"}
             onClick={() => void handleToggleCamera()}
             style={{
               ...glassSharp,
-              padding: "7px 14px",
               background: ORANGE,
               border: `1px solid ${cameraError ? "#7f1d1d" : "#c2410c"}`,
               color: "#fff",
@@ -3126,7 +3549,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             }}
           >
             {isCameraActive ? <Video size={12} /> : <VideoOff size={12} />}
-            Camera
+            <span className={NAV_LABEL_CLASS}>Camera</span>
           </button>
 
           {isMobileUi && isCameraActive ? (
@@ -3142,9 +3565,9 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                     : "Flip camera"
               }
               aria-label="Flip camera"
+              className={NAV_BTN_CLASS}
               style={{
                 ...glassSharp,
-                padding: "7px 14px",
                 background: "rgba(10,10,10,0.75)",
                 border: "1px solid rgba(255,255,255,0.08)",
                 color: "rgba(255,255,255,0.85)",
@@ -3160,16 +3583,19 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               }}
             >
               <SwitchCamera size={12} />
-              Flip
+              <span className={NAV_LABEL_CLASS}>Flip</span>
             </button>
           ) : null}
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+        <div
+          className="order-1 w-full md:order-2 md:w-auto"
+          style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minWidth: 0 }}
+        >
           <h1
             style={{
               margin: 0,
-              fontSize: 26,
+              fontSize: "clamp(16px, 5vw, 26px)",
               fontWeight: 800,
               letterSpacing: "-0.02em",
               backgroundImage: "linear-gradient(to right, #fb923c, #f5f5f4, #34d399)",
@@ -3206,14 +3632,18 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <div
+          className="order-3 ml-auto md:ml-0 md:justify-end md:justify-self-end"
+          style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start" }}
+        >
           <button
             type="button"
             disabled={solo === "idle" && !looperState.isRecordingArmed}
+            className={NAV_BTN_CLASS}
+            aria-label={masterPaused ? "Play" : "Pause"}
             onClick={() => looperHandlers.onToggleMasterPause()}
             style={{
               ...glassSharp,
-              padding: "7px 14px",
               cursor: solo === "idle" && !looperState.isRecordingArmed ? "not-allowed" : "pointer",
               opacity: solo === "idle" && !looperState.isRecordingArmed ? 0.45 : 1,
               border: "1px solid #c2410c",
@@ -3226,7 +3656,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             }}
           >
             {masterPaused ? <Play size={12} /> : <Pause size={12} />}
-            {masterPaused ? "Play" : "Pause"}
+            <span className={NAV_LABEL_CLASS}>{masterPaused ? "Play" : "Pause"}</span>
           </button>
 
           <div
@@ -3243,6 +3673,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               disabled={sessionTapeState === "saving" || sessionTapeState === "requesting"}
               aria-haspopup={sessionTapeState === "idle" && sessionHasVideo ? "menu" : undefined}
               aria-expanded={sessionTapeState === "idle" && sessionHasVideo ? sessionCaptureMenuOpen : undefined}
+              aria-label={sessionButtonLabel}
+              className={NAV_BTN_CLASS}
               onClick={() => {
                 if (sessionTapeState === "idle" && sessionHasVideo) {
                   setSessionCaptureMenuOpen((v) => !v);
@@ -3253,7 +3685,6 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               }}
               style={{
                 ...glassSharp,
-                padding: "7px 14px",
                 cursor:
                   sessionTapeState === "saving" || sessionTapeState === "requesting"
                     ? "wait"
@@ -3274,17 +3705,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                   color: SESSION_COLORS[sessionTapeState],
                 }}
               />
-              {sessionTapeState === "idle"
-                ? sessionIdleLabel
-                : sessionTapeState === "requesting"
-                  ? "Starting…"
-                  : sessionTapeState === "recording"
-                    ? sessionCaptureMode === "audio-only"
-                      ? "Recording audio…"
-                      : sessionCaptureMode === "camera-video"
-                        ? "Recording video…"
-                        : "Recording…"
-                    : "Saving…"}
+              <span className={NAV_LABEL_CLASS}>{sessionButtonLabel}</span>
             </button>
 
             {sessionCaptureMenuOpen && sessionTapeState === "idle" ? (
@@ -3310,6 +3731,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                       right: 0,
                       zIndex: 41,
                       minWidth: "100%",
+                      maxWidth: "min(280px, calc(100vw - 24px))",
+                      boxSizing: "border-box",
                       display: "flex",
                       flexDirection: "column",
                       padding: 4,
@@ -3434,9 +3857,10 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 setSessionCaptureMenuOpen(false);
                 setRecordingsOpen(true);
               }}
+              className={NAV_BTN_CLASS}
+              aria-label="My Recordings"
               style={{
                 ...glassSharp,
-                padding: "7px 14px",
                 cursor: "pointer",
                 border: "1px solid rgba(255,255,255,0.08)",
                 background: "rgba(10,10,10,0.75)",
@@ -3447,7 +3871,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 gap: 6,
               }}
             >
-              <FolderOpen size={12} /> My Recordings
+              <FolderOpen size={12} />
+              <span className={NAV_LABEL_CLASS}>My Recordings</span>
             </button>
             <LocalRecordingsDrawer
               open={recordingsOpen}
@@ -3459,17 +3884,22 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             <button
               type="button"
               onClick={() => looperHandlers.onStopAndResetSoloLooper()}
+              className={NAV_BTN_CLASS}
+              aria-label="Reset"
               style={{
                 ...glassSharp,
-                padding: "7px 12px",
                 cursor: "pointer",
                 border: "1px solid rgba(239,68,68,0.45)",
                 background: "rgba(239,68,68,0.08)",
                 color: "rgba(252,211,206,1)",
                 fontSize: 10,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
               }}
             >
-              Reset
+              <RotateCcw size={12} />
+              <span className={NAV_LABEL_CLASS}>Reset</span>
             </button>
           )}
         </div>
@@ -3477,15 +3907,19 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
       {/* MAIN ARENA */}
       <main
+        ref={mainArenaRef}
+        className="px-[clamp(8px,4vw,60px)] md:px-[max(72px,4vw)]"
         style={{
           position: "relative",
           zIndex: 10,
           flex: 1,
+          minHeight: 0,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "flex-end",
-          padding: "0 clamp(8px, 4vw, 60px) calc(10px + env(safe-area-inset-bottom, 0px))",
+          paddingTop: 0,
+          paddingBottom: "calc(10px + env(safe-area-inset-bottom, 0px))",
           gap: 8,
         }}
       >
@@ -3500,6 +3934,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         </AnimatePresence>
 
         <p
+          className={isMobileUi ? "hidden" : "[@media(max-height:520px)]:hidden"}
           style={{
             color: "rgba(255, 255, 255, 0.95)",
             fontWeight: 600,
@@ -3507,6 +3942,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             fontSize: 9,
             letterSpacing: "0.12em",
             textAlign: "center",
+            margin: 0,
           }}
         >
           Tap{" "}
@@ -3514,7 +3950,17 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           start looping.
         </p>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: `repeat(${beatCount}, minmax(0, 44px))`,
+            justifyContent: "center",
+            alignItems: "center",
+            gap: "clamp(6px, 2.5vw, 16px)",
+            width: "100%",
+            maxWidth: `min(${scaledPx(580, effectiveUiScale)}px, 100%)`,
+          }}
+        >
           {Array.from({ length: beatCount }, (_, i) => {
             const isDown = i === 0;
             const active =
@@ -3532,8 +3978,11 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               <div
                 key={i}
                 style={{
-                  width: 44,
-                  height: 44,
+                  width: "100%",
+                  height: "auto",
+                  aspectRatio: "1",
+                  boxSizing: "border-box",
+                  minWidth: 0,
                   borderRadius: "50%",
                   cursor: "default",
                   border: borderStyle,
@@ -3554,7 +4003,14 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           })}
         </div>
 
-        <div style={{ position: "relative", width: "100%", maxWidth: 580 }}>
+        <div
+          ref={trackStackRef}
+          style={{
+            position: "relative",
+            width: "100%",
+            maxWidth: `min(${scaledPx(580, effectiveUiScale)}px, 100%)`,
+          }}
+        >
           {showCalibrationOnboarding ? (
             <div
               style={{
@@ -3623,7 +4079,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
               </div>
             </div>
           ) : null}
-          <div style={{ display: "flex", gap: 8, width: "100%" }}>
+          <div ref={trackColumnsRef} style={{ display: "flex", gap: LOOPER_TRACK_ROW_GAP_PX, width: "100%" }}>
             {looperState.soloTrackLanes.map((lane) => (
               <TrackColumn
                 key={lane.trackIndex}
@@ -3631,6 +4087,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 registerTrackFillEl={registerTrackFillEl}
                 gridLikeMode={gridLikeMode}
                 compact
+                uiScale={effectiveUiScale}
                 assistBoundaryCountdown={
                   looperState.assistBoundaryTrackIndex === lane.trackIndex
                     ? looperState.assistBoundaryCountdown
@@ -3644,16 +4101,17 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
       {/* Live meter + tuner toggle */}
       <div
+        className={SIDE_RAIL_CLASS}
         style={{
           position: "absolute",
           left: 10,
-          top: "50%",
-          transform: "translateY(-50%)",
           zIndex: 10,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          gap: 12,
+          justifyContent: "center",
+          minHeight: 0,
+          overflow: "hidden",
         }}
       >
         <button
@@ -3710,16 +4168,17 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
 
       {/* Master loop volume — right rail */}
       <div
+        className={SIDE_RAIL_CLASS}
         style={{
           position: "absolute",
           right: 10,
-          top: "50%",
-          transform: "translateY(-50%)",
           zIndex: 10,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          gap: 12,
+          justifyContent: "center",
+          minHeight: 0,
+          overflow: "hidden",
         }}
       >
         <button
@@ -3857,6 +4316,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             onAirSynthVolumeChange={airSynthEngine.setVolume}
             airSynthWaveform={airSynthEngine.waveform}
             onAirSynthWaveformChange={airSynthEngine.setWaveform}
+            uiScalePreset={uiScalePreset}
+            onUiScalePresetChange={setUiScalePresetPersisted}
           />
         )}
       </AnimatePresence>

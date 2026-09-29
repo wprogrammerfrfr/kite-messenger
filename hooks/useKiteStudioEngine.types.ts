@@ -177,6 +177,8 @@ export type KiteEngineState = {
   soloActiveRecordTrackIndex: number | null;
   isRecordingArmed: boolean;
   soloTrackVolumes: [number, number, number, number];
+  /** Per-track mute. Fader position is unchanged; playback gain is 0 while true. */
+  soloTrackMuted: [boolean, boolean, boolean, boolean];
   /** Master loop playback volume (0–1); does not affect live mic monitoring. */
   masterLoopVolume: number;
   soloMasterLoopFrames: number | null;
@@ -233,7 +235,6 @@ export type KiteEngineState = {
 /** Minimal UI callbacks the engine still delegates to the presenter shell. */
 export type KiteEngineUiConfig = {
   getUser: () => User | null;
-  confirmResetTrack: (trackIndex: 1 | 2 | 3 | 4) => boolean;
   onJoinOwnSessionError: (message: string) => void;
 };
 
@@ -338,6 +339,7 @@ export type KiteEngineActions = {
   onLooperPedalDown: () => void;
   handleTrackTransportTap: (trackIndex: 1 | 2 | 3 | 4) => void;
   handleSoloTrackVolumeChange: (trackIndex: 1 | 2 | 3 | 4, linear: number) => void;
+  handleToggleSoloTrackMute: (trackIndex: 1 | 2 | 3 | 4) => void;
   setMasterLoopVolume: (linear: number) => void;
   handleToggleSoloSessionRecording: (opts?: SoloSessionRecordingToggleOptions) => void;
   downloadSoloSessionBlob: (blob: Blob, ext: string) => void;

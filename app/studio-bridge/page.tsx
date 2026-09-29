@@ -242,8 +242,6 @@ export default function StudioBridgePage() {
   const engineUiConfig = useMemo(
     () => ({
       getUser: () => userRef.current,
-      confirmResetTrack: (trackIndex: 1 | 2 | 3 | 4) =>
-        window.confirm(`Reset Track ${trackIndex} while it is recording?`),
       onJoinOwnSessionError: (message: string) => {
         setOwnSessionBlockedMessage(message);
       },
@@ -333,6 +331,7 @@ export default function StudioBridgePage() {
   const soloActiveRecordTrackIndex = engineState.soloActiveRecordTrackIndex;
   const isRecordingArmed = engineState.isRecordingArmed;
   const soloTrackVolumes = engineState.soloTrackVolumes;
+  const soloTrackMuted = engineState.soloTrackMuted;
   const masterLoopVolume = engineState.masterLoopVolume;
   const soloMasterLoopFrames = engineState.soloMasterLoopFrames;
   const soloLooperLatencyMs = engineState.soloLooperLatencyMs;
@@ -437,6 +436,7 @@ export default function StudioBridgePage() {
   const handleResetSoloTrack = engineActions.handleResetSoloTrack;
   const handleTrackTransportTap = engineActions.handleTrackTransportTap;
   const handleSoloTrackVolumeChange = engineActions.handleSoloTrackVolumeChange;
+  const handleToggleSoloTrackMute = engineActions.handleToggleSoloTrackMute;
   const setMasterLoopVolume = engineActions.setMasterLoopVolume;
   const handleToggleSoloSessionRecording = engineActions.handleToggleSoloSessionRecording;
   const handleStartKiteSetup = engineActions.handleStartKiteSetup;
@@ -668,14 +668,28 @@ export default function StudioBridgePage() {
         progress,
         workletMode: slot?.mode ?? "idle",
         onVolumeChange: (lin: number) => handleSoloTrackVolumeChange(trackIndex, lin),
-        onArmRecord: () => handleTrackTransportTap(trackIndex),
+        onArmRecord: () => {
+          const stoppingOrDisarming =
+            isThisTrackRecording ||
+            slot?.mode === "armed_overdub" ||
+            (n >= 2 && soloOverdubArmedTrackIndex === n);
+          if (soloTrackMuted[n - 1] && !stoppingOrDisarming) {
+            handleToggleSoloTrackMute(trackIndex);
+          }
+          handleTrackTransportTap(trackIndex);
+        },
         armDisabled,
         armDisabledReason,
         armLabel: n === 1 ? "Record" : "Overdub",
         isFocused: focusedTrackIndex === n,
         onRequestFocus: () => applyPedalFocus(trackIndex),
         onResetTrack: () => handleResetSoloTrack(trackIndex),
-        resetDisabled: isRecordingArmed || soloLooperState === "idle",
+        resetDisabled:
+          isRecordingArmed ||
+          soloLooperState === "idle" ||
+          (n !== 1 && soloLooperState === "recording" && handsfreeSequenceActive),
+        isMuted: soloTrackMuted[n - 1],
+        onToggleMute: () => handleToggleSoloTrackMute(trackIndex),
         isOverdubArmedWaiting:
           slot?.mode === "armed_overdub" ||
           (n >= 2 && soloOverdubArmedTrackIndex !== null && soloOverdubArmedTrackIndex === n),
@@ -697,6 +711,7 @@ export default function StudioBridgePage() {
     soloOverdubArmedTrackIndex,
     soloTrackSlotUi,
     soloTrackVolumes,
+    soloTrackMuted,
     soloMasterLoopFrames,
     isRecordingArmed,
     isMasterPaused,
@@ -708,6 +723,7 @@ export default function StudioBridgePage() {
     kiteSetupTimeSignatureTop,
     kiteSetupTimeSignatureBottom,
     handleSoloTrackVolumeChange,
+    handleToggleSoloTrackMute,
     handleTrackTransportTap,
     handleResetSoloTrack,
     setSoloTrackBarCount,

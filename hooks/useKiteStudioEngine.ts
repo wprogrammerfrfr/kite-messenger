@@ -614,6 +614,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [soloTrackVolumes, setSoloTrackVolumes] = useState<[number, number, number, number]>([
     1, 1, 1, 1,
   ]);
+  /** Per-track mute. Fader value is kept; worklet gain is 0 while muted. */
+  const [soloTrackMuted, setSoloTrackMuted] = useState<[boolean, boolean, boolean, boolean]>([
+    false, false, false, false,
+  ]);
   /** Linear 0–1 master loop playback volume (post-worklet bus; live mic unaffected). */
   const [masterLoopVolume, setMasterLoopVolumeState] = useState(1);
   /** Track 1 closed loop length in frames (drives overdub arm + snapping UI). */
@@ -834,6 +838,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const soloLooperActiveRecordTrackIndexRef = useRef<number | null>(null);
   /** True between tap-stop `stopRecording` and worklet `LOOP_READY` (blocks double-finalize). */
   const soloLooperLoopFinalizePendingRef = useRef(false);
+  /** Track index passed to `stopRecording` while finalize is in flight; null once `LOOP_READY` or a cancel lands. */
+  const soloFinalizingTrackIndexRef = useRef<number | null>(null);
   /** Stop tapped before solo engine finished booting; flushed after `startRecording`. */
   const soloLooperPendingCommitRef = useRef(false);
   const commitActiveRecordingRef = useRef<() => void>(() => {});
@@ -941,6 +947,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
   const loopProgressRafRef = useRef<number | null>(null);
   const soloTrackVolumesRef = useRef<[number, number, number, number]>([1, 1, 1, 1]);
+  const soloTrackMutedRef = useRef<[boolean, boolean, boolean, boolean]>([
+    false, false, false, false,
+  ]);
   const masterLoopVolumeRef = useRef(1);
   const isRecordingArmedRef = useRef(false);
   /** Solo looper 4-beat runway: metronome pump tick; transport arms after beat 4 via `startLooperRunway`. */
@@ -1203,6 +1212,10 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   useEffect(() => {
     soloTrackVolumesRef.current = soloTrackVolumes;
   }, [soloTrackVolumes]);
+
+  useEffect(() => {
+    soloTrackMutedRef.current = soloTrackMuted;
+  }, [soloTrackMuted]);
 
   useEffect(() => {
     masterLoopVolumeRef.current = masterLoopVolume;
@@ -5241,6 +5254,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       }
       if (event.type !== "LOOP_READY") return;
       soloLooperLoopFinalizePendingRef.current = false;
+      soloFinalizingTrackIndexRef.current = null;
       syncActiveRecordTrackIndex(null);
       if (soloLooperStateRef.current !== "recording") return;
       const ti = event.trackIndex ?? 1;
@@ -5599,7 +5613,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           ? options.recordStartContextSec
           : ctx.currentTime;
       for (let t = 1; t <= 4; t += 1) {
-        engine.setTrackGain(t, soloTrackVolumesRef.current[t - 1]);
+        const gain = soloTrackMutedRef.current[t - 1] ? 0 : soloTrackVolumesRef.current[t - 1];
+        engine.setTrackGain(t, gain);
       }
 
       const buildStartRecordingParams = () => {
@@ -6713,6 +6728,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         setSoloTrackSlotUi(null);
         soloTrackSlotUiLatestRef.current = null;
         setSoloTrackVolumes([1, 1, 1, 1]);
+        soloTrackVolumesRef.current = [1, 1, 1, 1];
+        soloTrackMutedRef.current = [false, false, false, false];
+        setSoloTrackMuted([false, false, false, false]);
         setSoloMasterLoopFrames(null);
         applyPedalFocus(1);
         soloOverdubArmedTrackIndexRef.current = null;
@@ -6798,6 +6816,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         soloLooperEngineRef.current?.setPaused(false);
         soloMetronomeAnchorContextSecRef.current = null;
         setSoloTrackVolumes([1, 1, 1, 1]);
+        soloTrackVolumesRef.current = [1, 1, 1, 1];
+        soloTrackMutedRef.current = [false, false, false, false];
+        setSoloTrackMuted([false, false, false, false]);
         setSoloMasterLoopFrames(null);
         applyPedalFocus(1);
         soloOverdubArmedTrackIndexRef.current = null;
@@ -7192,10 +7213,14 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     syncActiveRecordTrackIndex(null);
     soloLooperLoopFinalizePendingRef.current = false;
     soloLooperPendingCommitRef.current = false;
+    soloFinalizingTrackIndexRef.current = null;
     soloLooperLiveLoopIdRef.current = null;
     setSoloTrackSlotUi(null);
     soloTrackSlotUiLatestRef.current = null;
     setSoloTrackVolumes([1, 1, 1, 1]);
+    soloTrackVolumesRef.current = [1, 1, 1, 1];
+    soloTrackMutedRef.current = [false, false, false, false];
+    setSoloTrackMuted([false, false, false, false]);
     setSoloMasterLoopFrames(null);
     applyPedalFocus(1);
     soloOverdubArmedTrackIndexRef.current = null;
@@ -7213,12 +7238,34 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
 
   const handleSoloTrackVolumeChange = useCallback((trackIndex: 1 | 2 | 3 | 4, linear: number) => {
     const g = Math.max(0, Math.min(1, linear));
-    setSoloTrackVolumes((prev) => {
-      const next: [number, number, number, number] = [...prev] as [number, number, number, number];
-      next[trackIndex - 1] = g;
-      return next;
-    });
-    soloLooperEngineRef.current?.setTrackGain(trackIndex, g);
+    const idx = trackIndex - 1;
+    const volumes: [number, number, number, number] = [...soloTrackVolumesRef.current];
+    volumes[idx] = g;
+    soloTrackVolumesRef.current = volumes;
+    setSoloTrackVolumes(volumes);
+    if (!soloTrackMutedRef.current[idx]) {
+      soloLooperEngineRef.current?.setTrackGain(trackIndex, g);
+    }
+  }, []);
+
+  const handleToggleSoloTrackMute = useCallback((trackIndex: 1 | 2 | 3 | 4) => {
+    const idx = trackIndex - 1;
+    const next: [boolean, boolean, boolean, boolean] = [...soloTrackMutedRef.current];
+    next[idx] = !next[idx];
+    soloTrackMutedRef.current = next;
+    setSoloTrackMuted(next);
+    const gain = next[idx] ? 0 : soloTrackVolumesRef.current[idx];
+    soloLooperEngineRef.current?.setTrackGain(trackIndex, gain);
+  }, []);
+
+  const clearSoloTrackMute = useCallback((trackIndex: 1 | 2 | 3 | 4) => {
+    const idx = trackIndex - 1;
+    if (!soloTrackMutedRef.current[idx]) return;
+    const next: [boolean, boolean, boolean, boolean] = [...soloTrackMutedRef.current];
+    next[idx] = false;
+    soloTrackMutedRef.current = next;
+    setSoloTrackMuted(next);
+    soloLooperEngineRef.current?.setTrackGain(trackIndex, soloTrackVolumesRef.current[idx]);
   }, []);
 
   const setMasterLoopVolume = useCallback((linear: number) => {
@@ -7249,13 +7296,13 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const handleResetSoloTrack = useCallback((trackIndex: 1 | 2 | 3 | 4) => {
     const engine = soloLooperEngineRef.current;
     if (!engine) return;
-    const slot = soloTrackSlotUiLatestRef.current?.find((s) => s.trackIndex === trackIndex);
-    if (slot?.mode === "recording") {
-      const confirmed = ui.confirmResetTrack(trackIndex);
-      if (!confirmed) return;
-    }
+
+    const wasActiveRecorder = soloLooperActiveRecordTrackIndexRef.current === trackIndex;
+    const wasFinalizing = soloFinalizingTrackIndexRef.current === trackIndex;
+    const wasArmedOverdub = soloOverdubArmedTrackIndexRef.current === trackIndex;
 
     engine.resetTrack(trackIndex);
+    clearSoloTrackMute(trackIndex);
     if (trackIndex === 1) {
       engine.stopAudibleMetronome();
       hasCapturedFirstKiteLoopRef.current = false;
@@ -7278,6 +7325,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       clearSoloRunwayDisplay();
       soloLooperLoopFinalizePendingRef.current = false;
       soloLooperPendingCommitRef.current = false;
+      soloFinalizingTrackIndexRef.current = null;
       syncActiveRecordTrackIndex(null);
       clearAllSoloTrackBarCountLocks();
       setSoloTrackSlotUi((prev) =>
@@ -7308,8 +7356,19 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
             : s
         ) ?? prev
       );
+      // Worklet discards an in-flight take on RESET_TRACK, so LOOP_READY never arrives.
+      // Drop the recording latch or the UI stays stuck on "recording" with no active track.
+      if (wasActiveRecorder || wasFinalizing || wasArmedOverdub) {
+        syncActiveRecordTrackIndex(null);
+        soloLooperLoopFinalizePendingRef.current = false;
+        soloLooperPendingCommitRef.current = false;
+        soloFinalizingTrackIndexRef.current = null;
+        soloLooperStateRef.current = "captured";
+        setSoloLooperState("captured");
+        clearAssistBoundaryCountdown();
+      }
     }
-  }, [ui, syncHandsfreeSequenceActive, clearSoloRunwayDisplay, syncActiveRecordTrackIndex, clearAllSoloTrackBarCountLocks]);
+  }, [clearSoloTrackMute, syncHandsfreeSequenceActive, clearSoloRunwayDisplay, syncActiveRecordTrackIndex, clearAllSoloTrackBarCountLocks, clearAssistBoundaryCountdown]);
 
   const handleArmSoloOverdubTrack = useCallback(
     (trackIndex: 2 | 3 | 4) => {
@@ -7456,6 +7515,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       )
     );
 
+    soloFinalizingTrackIndexRef.current = activeTrackIndex;
     syncActiveRecordTrackIndex(null);
 
     if (loopProgressRafRef.current !== null) {
@@ -7790,6 +7850,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         setSoloTrackSlotUi(null);
         soloTrackSlotUiLatestRef.current = null;
         setSoloTrackVolumes([1, 1, 1, 1]);
+        soloTrackVolumesRef.current = [1, 1, 1, 1];
+        soloTrackMutedRef.current = [false, false, false, false];
+        setSoloTrackMuted([false, false, false, false]);
         setSoloMasterLoopFrames(null);
         applyPedalFocus(1);
         soloOverdubArmedTrackIndexRef.current = null;
@@ -9797,6 +9860,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     soloActiveRecordTrackIndex,
     isRecordingArmed,
     soloTrackVolumes,
+    soloTrackMuted,
     masterLoopVolume,
     soloMasterLoopFrames,
     soloLooperLatencyMs,
@@ -9873,7 +9937,8 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       soloActiveRecordTrackIndex,
       isRecordingArmed,
       soloTrackVolumes,
-      masterLoopVolume,
+      soloTrackMuted,
+    masterLoopVolume,
       soloMasterLoopFrames,
       soloLooperLatencyMs,
       soloInputGain,
@@ -9939,6 +10004,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
     onLooperPedalDown: () => onLooperPedalDown(soloPedalTargetTrackIndexRef.current),
     handleTrackTransportTap,
     handleSoloTrackVolumeChange,
+    handleToggleSoloTrackMute,
     setMasterLoopVolume,
     handleToggleSoloSessionRecording,
     downloadSoloSessionBlob,
@@ -10010,6 +10076,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       onLooperPedalDown,
       handleTrackTransportTap,
       handleSoloTrackVolumeChange,
+      handleToggleSoloTrackMute,
       setMasterLoopVolume,
       handleToggleSoloSessionRecording,
       downloadSoloSessionBlob,
