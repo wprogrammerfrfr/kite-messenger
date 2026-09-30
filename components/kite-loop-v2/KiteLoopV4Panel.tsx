@@ -254,6 +254,21 @@ type StudioWebcamDeviceRequest = {
   deviceId: string;
 };
 
+type StudioVideoInput = {
+  deviceId: string;
+  label: string;
+};
+
+async function listStudioVideoInputs(): Promise<StudioVideoInput[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputs = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
+  return inputs.map((device, index) => ({
+    deviceId: device.deviceId,
+    label: device.label.trim() || `Camera ${index + 1}`,
+  }));
+}
+
 function studioWebcamVideoConstraints(
   facingOrDevice: StudioWebcamFacingRequest | StudioWebcamDeviceRequest
 ): MediaTrackConstraints {
@@ -264,7 +279,9 @@ function studioWebcamVideoConstraints(
   };
   if ("deviceId" in facingOrDevice) {
     return {
-      ...base,
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30 },
       deviceId: { exact: facingOrDevice.deviceId },
     };
   }
@@ -2753,6 +2770,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [videoReady, setVideoReady] = useState(false);
   const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
+  const [videoInputs, setVideoInputs] = useState<StudioVideoInput[]>([]);
+  const [selectedCameraDeviceId, setSelectedCameraDeviceId] = useState<string | null>(null);
   const [isFlippingCamera, setIsFlippingCamera] = useState(false);
   /** Client-only; SSR-safe default false. */
   const [isMobileUi, setIsMobileUi] = useState(false);
@@ -2899,24 +2918,46 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     []
   );
 
-  const openCameraWithOtherDeviceId = useCallback(
-    async (excludeDeviceId: string | null): Promise<MediaStream> => {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoInputs = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
-      const other =
-        videoInputs.find((d) => d.deviceId !== excludeDeviceId) ?? videoInputs[0];
-      if (!other?.deviceId) {
-        throw new Error("No other camera found");
+  const openCameraWithDeviceId = useCallback(async (deviceId: string): Promise<MediaStream> => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: studioWebcamVideoConstraints({ deviceId }),
+      audio: false,
+    });
+    await bumpWebcamTrackIfSoft(stream);
+    return stream;
+  }, []);
+
+  const rememberOpenedCamera = useCallback(async (stream: MediaStream): Promise<void> => {
+    const track = stream.getVideoTracks()[0];
+    const deviceId = track?.getSettings().deviceId ?? null;
+    const facing = track?.getSettings().facingMode;
+    let inputs: StudioVideoInput[] = [];
+    try {
+      inputs = await listStudioVideoInputs();
+    } catch {
+      inputs = [];
+    }
+    if (deviceId && !inputs.some((input) => input.deviceId === deviceId)) {
+      inputs = [...inputs, { deviceId, label: track?.label?.trim() || "Camera" }];
+    }
+    setVideoInputs(inputs);
+    if (deviceId) setSelectedCameraDeviceId(deviceId);
+    if (facing === "user" || facing === "environment") setCameraFacingMode(facing);
+    setCameraStream(stream);
+    setIsCameraActive(true);
+    setCameraError(null);
+  }, []);
+
+  const openPreferredCamera = useCallback(async (): Promise<MediaStream> => {
+    if (selectedCameraDeviceId) {
+      try {
+        return await openCameraWithDeviceId(selectedCameraDeviceId);
+      } catch {
+        /* Chosen camera is gone; fall back to facing mode. */
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: studioWebcamVideoConstraints({ deviceId: other.deviceId }),
-        audio: false,
-      });
-      await bumpWebcamTrackIfSoft(stream);
-      return stream;
-    },
-    []
-  );
+    }
+    return openCameraWithFacing(cameraFacingMode);
+  }, [cameraFacingMode, openCameraWithDeviceId, openCameraWithFacing, selectedCameraDeviceId]);
 
   const handleToggleCamera = useCallback(async () => {
     if (isCameraActive) {
@@ -2925,102 +2966,106 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
       setIsCameraActive(false);
       setCameraError(null);
       setVideoReady(false);
-      setCameraFacingMode("user");
       return;
     }
 
     try {
-      const stream = await openCameraWithFacing(cameraFacingMode);
-      setCameraStream(stream);
-      setIsCameraActive(true);
-      setCameraError(null);
+      await rememberOpenedCamera(await openPreferredCamera());
     } catch (err) {
       setCameraError(err instanceof Error ? err.message : "Camera access denied");
       setIsCameraActive(false);
     }
   }, [
-    cameraFacingMode,
     cameraStream,
     isCameraActive,
-    openCameraWithFacing,
+    openPreferredCamera,
+    rememberOpenedCamera,
     releaseCameraHardware,
   ]);
 
+  const switchToCameraDevice = useCallback(
+    async (deviceId: string): Promise<void> => {
+      if (!isCameraActive || isFlippingCamera || isAirSynthActive) return;
+      // Swapping the camera mid-take ends the recorder's cloned track on some browsers.
+      if (looperState.sessionRecorderState !== "idle") return;
+      const prevDeviceId =
+        cameraStream?.getVideoTracks()[0]?.getSettings().deviceId ?? selectedCameraDeviceId;
+      if (!deviceId || deviceId === prevDeviceId) return;
+
+      const prevFacing = cameraFacingMode;
+      setIsFlippingCamera(true);
+      setCameraError(null);
+      // Release hardware first — many phones keep the same camera if the old stream is live.
+      releaseCameraHardware(cameraStream);
+      setCameraStream(null);
+      setVideoReady(false);
+
+      try {
+        await rememberOpenedCamera(await openCameraWithDeviceId(deviceId));
+      } catch (err) {
+        try {
+          const restored = prevDeviceId
+            ? await openCameraWithDeviceId(prevDeviceId)
+            : await openCameraWithFacing(prevFacing);
+          await rememberOpenedCamera(restored);
+        } catch {
+          setIsCameraActive(false);
+        }
+        setCameraError(err instanceof Error ? err.message : "Could not switch camera");
+      } finally {
+        setIsFlippingCamera(false);
+      }
+    },
+    [
+      cameraFacingMode,
+      cameraStream,
+      isAirSynthActive,
+      isCameraActive,
+      isFlippingCamera,
+      looperState.sessionRecorderState,
+      openCameraWithDeviceId,
+      openCameraWithFacing,
+      rememberOpenedCamera,
+      releaseCameraHardware,
+      selectedCameraDeviceId,
+    ]
+  );
+
   const handleFlipCamera = useCallback(async () => {
     if (!isCameraActive || isFlippingCamera || isAirSynthActive) return;
-    // Swapping the camera mid-take ends the recorder's cloned track on some browsers.
     if (looperState.sessionRecorderState !== "idle") return;
-    const nextFacing: "user" | "environment" =
-      cameraFacingMode === "user" ? "environment" : "user";
-    const prevFacing = cameraFacingMode;
-    const prevDeviceId =
-      cameraStream?.getVideoTracks()[0]?.getSettings().deviceId ?? null;
-
-    setIsFlippingCamera(true);
-    setCameraError(null);
-    // Release hardware first — many phones keep the same camera if the old stream is live.
-    releaseCameraHardware(cameraStream);
-    setCameraStream(null);
-    setVideoReady(false);
-
+    const currentId =
+      cameraStream?.getVideoTracks()[0]?.getSettings().deviceId ?? selectedCameraDeviceId;
+    let inputs = videoInputs;
     try {
-      let nextStream: MediaStream;
-      try {
-        nextStream = await openCameraWithFacing(nextFacing);
-      } catch {
-        nextStream = await openCameraWithOtherDeviceId(prevDeviceId);
+      const fresh = await listStudioVideoInputs();
+      if (fresh.length > 0) {
+        inputs = fresh;
+        setVideoInputs(fresh);
       }
-
-      const nextDeviceId =
-        nextStream.getVideoTracks()[0]?.getSettings().deviceId ?? null;
-      const nextReportedFacing =
-        nextStream.getVideoTracks()[0]?.getSettings().facingMode ?? null;
-      const sameCamera =
-        prevDeviceId != null &&
-        nextDeviceId != null &&
-        prevDeviceId === nextDeviceId;
-      const facingUnchanged =
-        nextReportedFacing === "user" || nextReportedFacing === "environment"
-          ? nextReportedFacing === prevFacing
-          : false;
-
-      if (sameCamera || facingUnchanged) {
-        nextStream.getTracks().forEach((t) => t.stop());
-        nextStream = await openCameraWithOtherDeviceId(prevDeviceId);
-      }
-
-      const appliedFacing =
-        nextStream.getVideoTracks()[0]?.getSettings().facingMode === "environment" ||
-        nextStream.getVideoTracks()[0]?.getSettings().facingMode === "user"
-          ? (nextStream.getVideoTracks()[0]?.getSettings().facingMode as
-              | "user"
-              | "environment")
-          : nextFacing;
-
-      setCameraStream(nextStream);
-      setCameraFacingMode(appliedFacing);
-    } catch (err) {
-      try {
-        const restored = await openCameraWithFacing(prevFacing);
-        setCameraStream(restored);
-        setCameraFacingMode(prevFacing);
-      } catch {
-        setIsCameraActive(false);
-      }
-      setCameraError(err instanceof Error ? err.message : "Could not switch camera");
-    } finally {
-      setIsFlippingCamera(false);
+    } catch {
+      /* keep the list from the last successful open */
     }
+    if (inputs.length < 2) {
+      setCameraError("No other camera found");
+      return;
+    }
+    const currentIndex = inputs.findIndex((input) => input.deviceId === currentId);
+    const next = inputs[(currentIndex + 1) % inputs.length];
+    if (!next || next.deviceId === currentId) {
+      setCameraError("No other camera found");
+      return;
+    }
+    await switchToCameraDevice(next.deviceId);
   }, [
-    cameraFacingMode,
     cameraStream,
     isAirSynthActive,
     isCameraActive,
     isFlippingCamera,
     looperState.sessionRecorderState,
-    openCameraWithFacing,
-    openCameraWithOtherDeviceId,
-    releaseCameraHardware,
+    selectedCameraDeviceId,
+    switchToCameraDevice,
+    videoInputs,
   ]);
 
   /** Camera source: open the preview first so the take is visible while recording. */
@@ -3032,10 +3077,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     let stream: MediaStream | null = isCameraActive ? cameraStream : null;
     if (!stream) {
       try {
-        stream = await openCameraWithFacing(cameraFacingMode);
-        setCameraStream(stream);
-        setIsCameraActive(true);
-        setCameraError(null);
+        stream = await openPreferredCamera();
+        await rememberOpenedCamera(stream);
       } catch (err) {
         setCameraError(err instanceof Error ? err.message : "Camera access denied");
         stream = null;
@@ -3051,7 +3094,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     cameraStream,
     isCameraActive,
     looperHandlers,
-    openCameraWithFacing,
+    openPreferredCamera,
+    rememberOpenedCamera,
     sessionVideoSource,
   ]);
 
@@ -3552,7 +3596,36 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             <span className={NAV_LABEL_CLASS}>Camera</span>
           </button>
 
-          {isMobileUi && isCameraActive ? (
+          {isCameraActive && videoInputs.length > 0 ? (
+            <select
+              aria-label="Camera input"
+              value={selectedCameraDeviceId ?? videoInputs[0]?.deviceId ?? ""}
+              disabled={isFlippingCamera || isAirSynthActive || flipLockedByRecording}
+              onChange={(event) => void switchToCameraDevice(event.target.value)}
+              style={{
+                ...glassSharp,
+                maxWidth: 180,
+                background: "rgba(10,10,10,0.75)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                color: "rgba(255,255,255,0.85)",
+                fontSize: 11,
+                padding: "7px 8px",
+                cursor:
+                  isFlippingCamera || isAirSynthActive || flipLockedByRecording
+                    ? "not-allowed"
+                    : "pointer",
+                opacity: isFlippingCamera || isAirSynthActive || flipLockedByRecording ? 0.45 : 1,
+              }}
+            >
+              {videoInputs.map((input) => (
+                <option key={input.deviceId} value={input.deviceId}>
+                  {input.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
+
+          {isCameraActive && videoInputs.length > 1 ? (
             <button
               type="button"
               onClick={() => void handleFlipCamera()}

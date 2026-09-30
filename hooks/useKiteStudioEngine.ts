@@ -394,6 +394,17 @@ function stopSoloSessionDisplayTracks(displayStreamRef: { current: MediaStream |
   displayStreamRef.current = null;
 }
 
+/**
+ * Loop Station gain slider (0–10) → linear capture gain.
+ * Midpoint 5 is unity. 0–5 fades to silence; 5–10 reaches 4× (~+12 dB).
+ */
+function soloInputGainUiToLinear(uiGain: number): number {
+  if (!Number.isFinite(uiGain)) return 1;
+  const clamped = Math.min(10, Math.max(0, uiGain));
+  if (clamped <= 5) return clamped / 5;
+  return 1 + ((clamped - 5) / 5) * 3;
+}
+
 /** Linear fade for interface live-monitor duck / restore around Kite broadcast (avoid clicks). */
 const BROADCAST_INTERFACE_MONITOR_RAMP_SEC = 0.05;
 
@@ -624,8 +635,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   const [soloMasterLoopFrames, setSoloMasterLoopFrames] = useState<number | null>(null);
   /** Temporary RTL calibration control for hardware Clap Test. */
   const [soloLooperLatencyMs, setSoloLooperLatencyMs] = useState(0);
-  /** UI 0–10 recording input gain for solo looper only (5 = unity; maps to DSP 0.0–2.0). */
+  /** UI 0–10 recording input gain for solo looper only (5 = unity; maps to DSP 0.0–4.0). */
   const [soloInputGain, setSoloInputGain] = useState(5);
+  const soloInputGainRef = useRef(soloInputGain);
   const soloLooperLatencyMsRef = useRef(soloLooperLatencyMs);
   const soloLatencyPersistenceReadyRef = useRef(false);
   const [soloLatencyCalibrationStatus, setSoloLatencyCalibrationStatus] = useState<
@@ -1575,10 +1587,11 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
   }, [isVisualMetronomeOnly, soloLooperState, isMasterPaused]);
 
   useEffect(() => {
+    soloInputGainRef.current = soloInputGain;
     const engine = soloLooperEngineRef.current;
     if (!engine) return;
     const ctx = engine.inputGain.context as AudioContext;
-    engine.inputGain.gain.setTargetAtTime((soloInputGain / 10) * 2, ctx.currentTime, 0.01);
+    engine.inputGain.gain.setTargetAtTime(soloInputGainUiToLinear(soloInputGain), ctx.currentTime, 0.01);
   }, [soloInputGain]);
 
   useEffect(() => {
@@ -5353,7 +5366,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       monitorDestination: ctx.destination,
       monitorGain: 1,
       outputGain: masterLoopVolumeRef.current,
-      inputGain: (soloInputGain / 10) * 2,
+      inputGain: soloInputGainUiToLinear(soloInputGainRef.current),
       onEvent: (event) => handleSoloLooperEvent(event, ctx),
     });
     soloLooperEngineRef.current = engine;
@@ -5586,7 +5599,7 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
           monitorDestination: ctx.destination,
           monitorGain: 1,
           outputGain: masterLoopVolumeRef.current,
-          inputGain: (soloInputGain / 10) * 2,
+          inputGain: soloInputGainUiToLinear(soloInputGainRef.current),
           onEvent: (event) => handleSoloLooperEvent(event, ctx),
         });
         soloLooperEngineRef.current = engine;

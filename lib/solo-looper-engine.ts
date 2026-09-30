@@ -496,9 +496,10 @@ export async function buildSoloLooperEngine(
   outputGain.connect(recordingPlaybackDelayNode);
   recordingPlaybackDelayNode.connect(recordingDestination);
   outputGain.connect(stationMixDestination);
-  // Split-Mix: raw mic is captured to tape only. Headphones receive loop/worklet output
+  // Split-Mix: mic is captured to tape after the recording input gain, so the Gain
+  // slider reaches the session export. Headphones receive loop/worklet output
   // through monitorDestination; direct hardware monitoring handles zero-latency live foldback.
-  sourceNode.connect(recordingMicGainNode);
+  inputGain.connect(recordingMicGainNode);
   recordingMicGainNode.connect(recordingDestination);
   if (monitorGainNode && options.monitorDestination) {
     outputGain.connect(monitorGainNode);
@@ -863,7 +864,7 @@ export async function buildSoloLooperEngine(
       engine.sourceNode = nextSource;
 
       nextSource.connect(inputGain);
-      nextSource.connect(recordingMicGainNode);
+      // Tape tap stays on inputGain, so a capture swap does not bypass the Gain slider.
       return true;
     },
     setRecordingLatencyCompensation(latencyMs: number, options?: { glideSec?: number }): void {
