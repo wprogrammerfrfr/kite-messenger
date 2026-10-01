@@ -232,6 +232,10 @@ export type KiteLoopV4AirSynthProps = {
 
 const ORANGE = "#ff4500";
 const EMERALD = "#22c55e";
+const CHROMA_KEY_GREEN = "#00FF00";
+const CHROMA_KEY_WHITE = "#FFFFFF";
+
+type ChromaKeyColor = "green" | "white";
 const SLIDER_TRACK_EMPTY = "rgba(255,255,255,0.08)";
 
 const STUDIO_GLOW_ROOT_BG =
@@ -1546,6 +1550,10 @@ type SettingsModalProps = {
   onAirSynthWaveformChange: (type: OscillatorType) => void;
   uiScalePreset: LooperUiScalePreset;
   onUiScalePresetChange: (preset: LooperUiScalePreset) => void;
+  chromaKeyEnabled: boolean;
+  onChromaKeyEnabledChange: (enabled: boolean) => void;
+  chromaKeyColor: ChromaKeyColor;
+  onChromaKeyColorChange: (color: ChromaKeyColor) => void;
 };
 
 const AIR_SYNTH_WAVEFORM_OPTIONS: { value: OscillatorType; label: string }[] = [
@@ -1585,6 +1593,10 @@ function SettingsModal({
   onAirSynthWaveformChange,
   uiScalePreset,
   onUiScalePresetChange,
+  chromaKeyEnabled,
+  onChromaKeyEnabledChange,
+  chromaKeyColor,
+  onChromaKeyColorChange,
 }: SettingsModalProps): React.JSX.Element {
   const [airSynthKeyMenuOpen, setAirSynthKeyMenuOpen] = useState(false);
   const [airSynthWaveformMenuOpen, setAirSynthWaveformMenuOpen] = useState(false);
@@ -1849,6 +1861,42 @@ function SettingsModal({
                       }}
                     >
                       {LOOPER_UI_SCALE_LABELS[preset]}
+                    </button>
+                  );
+                })}
+              </div>
+              <CheckRow
+                checked={chromaKeyEnabled}
+                onChange={onChromaKeyEnabledChange}
+                label="Chroma key"
+              />
+              <span style={{ color: "rgba(255,255,255,0.65)", fontSize: 11 }}>Key color</span>
+              <div style={{ display: "flex", gap: 5 }}>
+                {(
+                  [
+                    { id: "green", label: "Green" },
+                    { id: "white", label: "White" },
+                  ] as const
+                ).map(({ id, label }) => {
+                  const selected = chromaKeyColor === id;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => onChromaKeyColorChange(id)}
+                      style={{
+                        flex: 1,
+                        borderRadius: 9,
+                        padding: "8px 0",
+                        border: `1px solid ${selected ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.09)"}`,
+                        background: selected ? "rgba(34,197,94,0.1)" : "transparent",
+                        color: selected ? EMERALD : "rgba(255,255,255,0.78)",
+                        fontSize: 11,
+                        fontWeight: selected ? 700 : 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {label}
                     </button>
                   );
                 })}
@@ -2759,6 +2807,8 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
     useState<KiteTunerInstrumentId>(DEFAULT_INSTRUMENT_ID);
   const [calibrationDismissed, setCalibrationDismissed] = useState(false);
   const [uiScalePreset, setUiScalePreset] = useState<LooperUiScalePreset>("small");
+  const [chromaKeyEnabled, setChromaKeyEnabled] = useState(false);
+  const [chromaKeyColor, setChromaKeyColor] = useState<ChromaKeyColor>("green");
   const [showTutorialModal, setShowTutorialModal] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -3426,6 +3476,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
   };
 
   const webcamFrameAspect = videoAspectRatioRef.current;
+  const chromaKeyFill = chromaKeyColor === "white" ? CHROMA_KEY_WHITE : CHROMA_KEY_GREEN;
 
   return (
     <div
@@ -3440,7 +3491,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         overflow: "hidden",
         display: "flex",
         flexDirection: "column",
-        background: STUDIO_GLOW_ROOT_BG,
+        background: chromaKeyEnabled ? chromaKeyFill : STUDIO_GLOW_ROOT_BG,
         paddingTop: "env(safe-area-inset-top, 0px)",
         paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}
@@ -3454,7 +3505,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
           justifyContent: "center",
           pointerEvents: "none",
           zIndex: 0,
-          background: STUDIO_GLOW_STAGE_BG,
+          background: chromaKeyEnabled ? chromaKeyFill : STUDIO_GLOW_STAGE_BG,
         }}
       >
         {isCameraActive ? (
@@ -3468,6 +3519,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                 { airSynthBoost: isAirSynthActive }
               ),
               position: "relative",
+              boxShadow: chromaKeyEnabled ? "none" : STUDIO_GLOW_FRAME_SHADOW,
             }}
           >
             <div
@@ -3490,6 +3542,7 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
                   height: "100%",
                   objectFit: "cover",
                   background: "#000",
+                  opacity: chromaKeyEnabled ? 0 : 1,
                 }}
               />
             </div>
@@ -3504,15 +3557,17 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
         ) : null}
       </div>
 
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          pointerEvents: "none",
-          zIndex: 1,
-          background: STUDIO_GLOW_VIGNETTE_BG,
-        }}
-      />
+      {chromaKeyEnabled ? null : (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            zIndex: 1,
+            background: STUDIO_GLOW_VIGNETTE_BG,
+          }}
+        />
+      )}
 
       {/* TOP NAV */}
       <nav
@@ -4391,6 +4446,10 @@ export const KiteLoopV4Panel = memo(function KiteLoopV4Panel({
             onAirSynthWaveformChange={airSynthEngine.setWaveform}
             uiScalePreset={uiScalePreset}
             onUiScalePresetChange={setUiScalePresetPersisted}
+            chromaKeyEnabled={chromaKeyEnabled}
+            onChromaKeyEnabledChange={setChromaKeyEnabled}
+            chromaKeyColor={chromaKeyColor}
+            onChromaKeyColorChange={setChromaKeyColor}
           />
         )}
       </AnimatePresence>
