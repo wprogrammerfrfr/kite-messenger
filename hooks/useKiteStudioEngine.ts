@@ -5266,6 +5266,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
         return;
       }
       if (event.type !== "LOOP_READY") return;
+      // Tail patch is a buffer refresh for a track already playing. It must not
+      // clear the active recorder or the UI treats Master 1 as recording.
+      if ("tailPatched" in event && event.tailPatched === true) return;
       soloLooperLoopFinalizePendingRef.current = false;
       soloFinalizingTrackIndexRef.current = null;
       syncActiveRecordTrackIndex(null);

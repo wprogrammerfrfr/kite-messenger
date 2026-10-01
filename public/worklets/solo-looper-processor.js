@@ -1243,6 +1243,7 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
     const isFreeMaster = targetTrackIndex === 1 && slot.loopMode === "free";
     const isFreeOverdub =
       this.isOverdubTrackIndex(targetTrackIndex) && slot.loopMode === "free";
+    const isGridMaster = targetTrackIndex === 1 && slot.loopMode === "grid";
     const isGridLike = this.isGridLikeLoopMode(slot.loopMode);
     const framesSinceTakeStart = Math.max(
       0,
@@ -1395,7 +1396,11 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       extractedFrames: copyFrames,
       intervalFrames: n,
       latencyShiftFrames,
-      phaseSource: useMasterPhaseLock ? "phase_lock" : isFreeOverdub ? "take_phase" : "zero",
+      phaseSource: useMasterPhaseLock
+        ? "phase_lock"
+        : isFreeOverdub || isGridMaster
+          ? "take_phase"
+          : "zero",
     });
 
     slot.recordingBuffer = null;
@@ -1410,8 +1415,9 @@ class SoloLooperProcessor extends AudioWorkletProcessor {
       // Free-mode overdub: phase-lock to master. Grid/handsfree start at take origin
       // so unequal bar counts do not seed mid-phrase (masterPhase % longerLen).
       slot.playbackCursor = masterPhase % transportIntervalFrames;
-    } else if (isFreeOverdub) {
-      // Free overdub: continue the take's own timeline from its bar-line start (includes RTL post-roll).
+    } else if (isFreeOverdub || isGridMaster) {
+      // Resume at elapsed post-roll phase so the downbeat is not late by the RTL shift.
+      // Free overdub: bar-line start. Grid T1: latencyShift % n after deferred finalize (0 when latency is 0).
       slot.playbackCursor = framesSinceTakeStart % n;
     } else {
       slot.playbackCursor = 0;
