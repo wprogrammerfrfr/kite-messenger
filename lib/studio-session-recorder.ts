@@ -90,7 +90,9 @@ export async function getSessionCameraStream(
 
 /**
  * Request display/tab capture for session recording.
- * Extra DisplayMediaStreamConstraints fields are ignored by browsers that do not support them.
+ * 1080p30 is the desktop ceiling: max keeps Retina/4K captures from encoding larger,
+ * ideal asks for 1080p when the surface is bigger. Extra constraint fields are ignored
+ * by browsers that do not support them.
  */
 export async function getSessionDisplayMediaStream(): Promise<MediaStream> {
   if (!canUseDisplayMedia()) {
@@ -98,7 +100,11 @@ export async function getSessionDisplayMediaStream(): Promise<MediaStream> {
   }
   // Prefer current tab when supported; unknown keys are ignored by older browsers.
   const constraints = {
-    video: { frameRate: { ideal: 30, max: 30 } },
+    video: {
+      width: { ideal: 1920, max: 1920 },
+      height: { ideal: 1080, max: 1080 },
+      frameRate: { ideal: 30, max: 30 },
+    },
     audio: false,
     preferCurrentTab: true,
     selfBrowserSurface: "include",
@@ -111,7 +117,15 @@ export async function getSessionDisplayMediaStream(): Promise<MediaStream> {
   return navigator.mediaDevices.getDisplayMedia(constraints);
 }
 
-export function selectSessionVideoMediaRecorderOptions(): MediaRecorderOptions {
+/** Camera / Android. Desktop screen capture passes a higher rate explicitly. */
+const SESSION_CAMERA_VIDEO_BITS_PER_SECOND = 2_500_000;
+
+/** 1080p30 screen capture. Same resolution as the 2.5 Mbps default, more bits. */
+export const SESSION_SCREEN_VIDEO_BITS_PER_SECOND = 5_000_000;
+
+export function selectSessionVideoMediaRecorderOptions(
+  videoBitsPerSecond: number = SESSION_CAMERA_VIDEO_BITS_PER_SECOND
+): MediaRecorderOptions {
   if (!canUseMediaRecorder()) {
     throw new Error("MediaRecorder is not available in this environment.");
   }
@@ -122,13 +136,13 @@ export function selectSessionVideoMediaRecorderOptions(): MediaRecorderOptions {
     if (MediaRecorder.isTypeSupported(mime)) {
       return {
         mimeType: mime,
-        videoBitsPerSecond: 2_500_000,
+        videoBitsPerSecond,
         audioBitsPerSecond: 320_000,
       };
     }
   }
   return {
-    videoBitsPerSecond: 2_500_000,
+    videoBitsPerSecond,
     audioBitsPerSecond: 320_000,
   };
 }

@@ -22,6 +22,7 @@ import {
   resolveSessionVideoSource,
   selectSessionAudioMediaRecorderOptions,
   selectSessionVideoMediaRecorderOptions,
+  SESSION_SCREEN_VIDEO_BITS_PER_SECOND,
   type SoloSessionRecorderCaptureMode,
 } from "@/lib/studio-session-recorder";
 import { shareOrDownloadBlob } from "@/lib/studio-mobile-share";
@@ -5471,7 +5472,9 @@ export function useKiteStudioEngine(config: KiteEngineConfig): UseKiteStudioEngi
       const recorderOptions =
         captureMode === "audio-only"
           ? selectSessionAudioMediaRecorderOptions().mediaRecorderOptions
-          : selectSessionVideoMediaRecorderOptions();
+          : captureMode === "screen-video"
+            ? selectSessionVideoMediaRecorderOptions(SESSION_SCREEN_VIDEO_BITS_PER_SECOND)
+            : selectSessionVideoMediaRecorderOptions();
 
       let recorder: MediaRecorder;
       try {
